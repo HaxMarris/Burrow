@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "private": true,
   "description": "Desktop client for a self-hosted Burrow chat server",
+  "author": "Burrow",
+  "homepage": "https://github.com/HaxMarris/Burrow",
   "main": "main.js",
   "scripts": {
     "copy-client": "node scripts/copy-client.js",
@@ -20,10 +22,23 @@
   "build": {
     "appId": "chat.burrow.desktop",
     "productName": "Burrow",
-    "files": ["main.js", "app/**/*"],
-    "win": { "target": "nsis" },
-    "mac": { "target": "dmg", "category": "public.app-category.social-networking" },
-    "linux": { "target": "AppImage", "category": "Chat" },
-    "nsis": { "oneClick": true }
+    "files": [
+      "main.js",
+      "app/**/*"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.social-networking"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Chat"
+    },
+    "nsis": {
+      "oneClick": true
+    }
   }
 }
