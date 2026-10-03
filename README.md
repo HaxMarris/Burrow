@@ -13,6 +13,7 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) with mute and who's-talking rings
 - Image and file sharing: attach, paste or drag in up to 10 files per message, with inline image and video previews
 - Emoji reactions and replies (a reply to you counts as a mention)
+- Profile pictures and password changes (changing your password logs out your other devices)
 - Real-time messaging over WebSockets, with typing indicators and online/offline presence
 - Full message history with infinite scroll back, edit and delete your own messages (↑ edits your last one)
 - Light formatting: `**bold**`, `*italic*`, `` `code` ``, code blocks, clickable links, `@mentions` (highlighted, and they trigger a desktop notification)
@@ -172,6 +173,7 @@ Burrow has its own names for things: a **burrow** is a shared space for one grou
 - Click **+** under *Your burrows* to dig a new burrow, or join one with an invite code.
 - The gear next to the burrow's name shows its invite code. The host (whoever created it) can delete the burrow there; everyone else can leave.
 - The host adds rooms with the **+** next to *Rooms*.
+- Click your name in the bottom corner to set a profile picture or change your password.
 - The moon button in your profile card switches between the light "birch" theme and the dark "pine night" theme. By default it follows your system setting.
 
 ## Development
@@ -188,14 +190,13 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, and reactions and replies.
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, and profile pictures and password changes.
 
 Rough order of what would make it feel more like Discord:
 
 1. Direct messages
 2. Roles and permissions (moderators, private channels)
 3. Video and screen sharing in voice rooms
-4. Profile pictures and password changes
 
 ## Alternatives
 

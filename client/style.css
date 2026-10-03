@@ -157,12 +157,21 @@ label input:focus, .modal-card input:focus { border-color: var(--moss); }
 ul { list-style: none; margin: 0; padding: 0; }
 
 .user-card { display: flex; align-items: center; gap: 10px; background: var(--surface); border-radius: var(--radius); padding: 8px 8px 8px 10px; box-shadow: var(--shadow); }
+.me-btn { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; background: none; border: 0; padding: 4px; margin: -4px; border-radius: 12px; color: inherit; font: inherit; text-align: left; cursor: pointer; transition: background .15s; }
+.me-btn:hover { background: var(--surface-2); }
 .user-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .me-name { font-weight: 700; color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; }
 .conn { font-size: 12px; color: var(--berry); }
 .conn.ok { color: var(--online); }
 .avatar { width: 34px; height: 34px; flex: none; border-radius: 11px; display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 14px; position: relative; }
 .avatar.lg { width: 40px; height: 40px; border-radius: 13px; font-size: 16px; }
+.avatar.xl { width: 88px; height: 88px; border-radius: 26px; font-size: 34px; }
+.avatar.has-picture { background-size: cover; background-position: center; }
+.account-picture { display: flex; align-items: center; gap: 18px; }
+.account-picture .buttons { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.account-picture .buttons div { display: flex; gap: 8px; }
+.modal-card h3 { margin: 10px 0 0; font-size: 17px; }
+.success { color: var(--online); font-size: 13px; min-height: 1em; }
 
 /* ---------- chat ---------- */
 .chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }
