@@ -11,7 +11,7 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Accounts with username and password, protected by an optional registration code so strangers can't sign up
 - Burrows (shared spaces) you create, with an invite code to share, and rooms that the host (or anyone whose role allows it) can add
 - Custom roles with their own name, color and permissions, private rooms, and removing or banning people
-- Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) with mute, who's-talking rings, and a volume slider for each person
+- Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) end-to-end encrypted, with mute, who's-talking rings, and a volume slider for each person
 - Image and file sharing: attach, paste or drag in up to 10 files per message, with inline image and video previews
 - Emoji reactions and replies (a reply to you counts as a mention)
 - Direct messages with anyone you share a burrow with
@@ -119,6 +119,11 @@ about 4 Mbps of upload.
 The host then adds a room with **+** next to *Rooms* and picks *Voice room*. Click a voice room to
 join; the bar above your name has mute and leave. Click someone in a voice room to turn them up or down
 (0% to 200%, only for you).
+
+Voice is end-to-end encrypted: audio is scrambled on each person's device and only the others in the
+room can unscramble it, so LiveKit (and anyone who got into the server) only ever handles noise. A new
+key is made whenever someone joins or leaves. Click the lock in the voice bar to see the room's safety
+code; everyone in the room should see the same one. Everyone needs an up-to-date app for this.
 
 ### Backups
 

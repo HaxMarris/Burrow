@@ -19,7 +19,7 @@ export function voiceToken(opts: VoiceOptions, user: { id: number; username: str
     name: user.username,
     nbf: now - 10,
     exp: now + ttlSeconds,
-    video: { room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] },
+    video: { room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, canPublishSources: ['microphone'] },
   });
   const sig = createHmac('sha256', opts.apiSecret).update(`${header}.${payload}`).digest('base64url');
   return `${header}.${payload}.${sig}`;
