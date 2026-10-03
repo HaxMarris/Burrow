@@ -4,7 +4,7 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { extname, join, normalize } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import type { Db } from './db.ts';
+import { addModeratorRole, type Db } from './db.ts';
 import { hashPassword, verifyPassword, newToken, newInviteCode } from './auth.ts';
 import { voiceToken, type VoiceOptions } from './voice.ts';
 
@@ -22,7 +22,10 @@ export interface AppOptions {
 }
 
 type User = { id: number; username: string; avatar: string | null };
-type Role = 'host' | 'mod' | 'member';
+const PERMS = ['rooms', 'messages', 'remove', 'ban', 'roles'] as const;
+type Perm = (typeof PERMS)[number];
+type Standing = { host: boolean; rank: number; perms: Set<Perm>; roleIds: number[] };
+const parsePerms = (text: string) => text.split(',').filter((p): p is Perm => (PERMS as readonly string[]).includes(p));
 type Channel = { id: number; serverId: number; name: string; kind: 'text' | 'voice'; private: number };
 type Json = Record<string, unknown>;
 
@@ -37,6 +40,7 @@ class HttpError extends Error {
 const MAX_MESSAGE_LENGTH = 4000;
 const MAX_ATTACHMENTS = 10;
 const MAX_REACTIONS = 20; // different emoji on one message
+const MAX_ROLES = 30;
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 // A user's picture link, from their users.avatar file name (or null).
 const avatarUrl = (col: string) => `CASE WHEN ${col} IS NULL THEN NULL ELSE '/api/avatars/' || ${col} END`;
@@ -84,27 +88,41 @@ export function createApp(opts: AppOptions): Server {
       | Channel
       | undefined;
 
-  // ---- roles: the host (whoever created the burrow), moderators and members --------
+  // ---- roles: the host (whoever created the burrow) and the burrow's own custom roles ----
 
-  /** 'host', 'mod' or 'member' in a burrow; null if not in it. DMs have no host. */
-  const roleOf = (serverId: number, userId: number): Role | null => {
+  /**
+   * Where someone stands in a burrow: their roles, what those let them do, and their rank
+   * (the position of their highest role; lower is higher, the host is above everyone).
+   * Null if they aren't in it. DMs have no roles.
+   */
+  const standing = (serverId: number, userId: number): Standing | null => {
     const row = db
-      .prepare('SELECT s.owner_id, s.kind, m.role FROM members m JOIN servers s ON s.id = m.server_id WHERE m.server_id = ? AND m.user_id = ?')
-      .get(serverId, userId) as { owner_id: number; kind: string; role: Role } | undefined;
+      .prepare('SELECT s.owner_id, s.kind FROM members m JOIN servers s ON s.id = m.server_id WHERE m.server_id = ? AND m.user_id = ?')
+      .get(serverId, userId) as { owner_id: number; kind: string } | undefined;
     if (!row) return null;
-    if (row.kind === 'burrow' && row.owner_id === userId) return 'host';
-    return row.role;
+    if (row.kind !== 'burrow') return { host: false, rank: Infinity, perms: new Set(), roleIds: [] };
+    const roles = db
+      .prepare('SELECT r.id, r.position, r.perms FROM member_roles mr JOIN roles r ON r.id = mr.role_id WHERE mr.server_id = ? AND mr.user_id = ?')
+      .all(serverId, userId) as { id: number; position: number; perms: string }[];
+    const host = row.owner_id === userId;
+    return {
+      host,
+      rank: host ? 0 : Math.min(Infinity, ...roles.map((r) => r.position)),
+      perms: new Set(host ? PERMS : roles.flatMap((r) => parsePerms(r.perms))),
+      roleIds: roles.map((r) => r.id),
+    };
   };
-  /** Hosts and moderators look after a burrow: rooms, other people's messages, removing people. */
-  const canManage = (serverId: number, userId: number) => {
-    const role = roleOf(serverId, userId);
-    return role === 'host' || role === 'mod';
-  };
-  /** Private rooms are seen by the host, moderators and the people let in. */
+  const can = (serverId: number, userId: number, perm: Perm) => !!standing(serverId, userId)?.perms.has(perm);
+  /** Private rooms are seen by people who manage rooms, the people let in, and anyone with a role let in. */
   const canSee = (channel: Channel, userId: number) => {
     if (!isMember(channel.serverId, userId)) return false;
-    if (!channel.private || canManage(channel.serverId, userId)) return true;
-    return !!db.prepare('SELECT 1 FROM channel_access WHERE channel_id = ? AND user_id = ?').get(channel.id, userId);
+    if (!channel.private || can(channel.serverId, userId, 'rooms')) return true;
+    return !!db
+      .prepare(
+        `SELECT 1 FROM channel_access WHERE channel_id = ? AND user_id = ?
+         UNION SELECT 1 FROM channel_role_access cra JOIN member_roles mr ON mr.role_id = cra.role_id WHERE cra.channel_id = ? AND mr.user_id = ?`,
+      )
+      .get(channel.id, userId, channel.id, userId);
   };
   const channelAudience = (channel: Channel) => serverMemberIds(channel.serverId).filter((id) => canSee(channel, id));
 
@@ -175,7 +193,8 @@ export function createApp(opts: AppOptions): Server {
       .prepare('SELECT id, name, kind, owner_id AS ownerId, invite_code AS inviteCode FROM servers WHERE id = ?')
       .get(serverId) as Json;
     if (server.kind === 'dm') delete server.inviteCode;
-    const manager = canManage(serverId, viewerId);
+    const manager = can(serverId, viewerId, 'rooms');
+    const ids = (sql: string, id: number) => (db.prepare(sql).all(id) as { id: number }[]).map((r) => r.id);
     const channels = (
       db.prepare('SELECT id, server_id AS serverId, name, kind, private FROM channels WHERE server_id = ? ORDER BY id').all(serverId) as Channel[]
     )
@@ -185,22 +204,36 @@ export function createApp(opts: AppOptions): Server {
         private: !!priv,
         ...(c.kind === 'voice' ? { voiceUsers: usersInVoice(c.id) } : {}),
         // Who has been let in, for the people who can change it.
-        ...(priv && manager ? { memberIds: (db.prepare('SELECT user_id FROM channel_access WHERE channel_id = ?').all(c.id) as { user_id: number }[]).map((r) => r.user_id) } : {}),
+        ...(priv && manager
+          ? {
+              memberIds: ids('SELECT user_id AS id FROM channel_access WHERE channel_id = ?', c.id),
+              roleIds: ids('SELECT role_id AS id FROM channel_role_access WHERE channel_id = ?', c.id),
+            }
+          : {}),
       }));
+    const roles = (
+      db.prepare('SELECT id, name, color, perms, position FROM roles WHERE server_id = ? ORDER BY position').all(serverId) as Json[]
+    ).map((r) => ({ ...r, perms: parsePerms(r.perms as string) }));
+    const memberRoles = db
+      .prepare('SELECT mr.user_id, mr.role_id FROM member_roles mr JOIN roles r ON r.id = mr.role_id WHERE mr.server_id = ? ORDER BY r.position')
+      .all(serverId) as { user_id: number; role_id: number }[];
     const members = db
       .prepare(
-        `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar, m.role FROM members m JOIN users u ON u.id = m.user_id
+        `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar FROM members m JOIN users u ON u.id = m.user_id
          WHERE m.server_id = ? ORDER BY u.username`,
       )
-      .all(serverId) as (User & { role: Role })[];
+      .all(serverId) as User[];
     return {
       ...server,
       channels,
-      members: members.map((m) => ({
-        ...m,
-        role: server.kind === 'burrow' && m.id === server.ownerId ? 'host' : server.kind === 'dm' ? 'member' : m.role,
-        online: online.has(m.id),
-      })),
+      roles,
+      members: members.map((m) => {
+        // Highest role first. 'role' is kept for apps from before custom roles.
+        const roleIds = memberRoles.filter((r) => r.user_id === m.id).map((r) => r.role_id);
+        const host = server.kind === 'burrow' && m.id === server.ownerId;
+        const powers = roleIds.some((id) => (roles.find((r) => r.id === id)?.perms.length ?? 0) > 0);
+        return { ...m, roleIds, role: host ? 'host' : powers ? 'mod' : 'member', online: online.has(m.id) };
+      }),
     };
   };
 
@@ -430,6 +463,7 @@ export function createApp(opts: AppOptions): Server {
     const serverId = Number(r.lastInsertRowid);
     db.prepare('INSERT INTO members (server_id, user_id, joined_at) VALUES (?, ?, ?)').run(serverId, user.id, t);
     db.prepare('INSERT INTO channels (server_id, name, created_at) VALUES (?, ?, ?)').run(serverId, 'general', t);
+    addModeratorRole(db, serverId);
     return serverSummary(serverId, user.id);
   });
 
@@ -478,13 +512,13 @@ export function createApp(opts: AppOptions): Server {
     sendServerUpdate(serverId);
   };
 
-  /** The burrow and your role in it, if you're allowed to look after it. */
-  const managedBurrow = (serverId: number, user: User) => {
+  /** Your standing in a burrow, if it lets you do this. */
+  const allowed = (serverId: number, user: User, perm: Perm) => {
     const kind = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind;
-    const role = kind === 'burrow' ? roleOf(serverId, user.id) : null;
-    if (!role) throw new HttpError(404, 'Burrow not found');
-    if (role === 'member') throw new HttpError(403, 'Only the host and moderators can do that');
-    return role;
+    const me = kind === 'burrow' ? standing(serverId, user.id) : null;
+    if (!me) throw new HttpError(404, 'Burrow not found');
+    if (!me.perms.has(perm)) throw new HttpError(403, "Your roles don't allow that");
+    return me;
   };
 
   /** Checks a private room's guest list: people in the burrow, without duplicates. */
@@ -492,33 +526,130 @@ export function createApp(opts: AppOptions): Server {
     const members = new Set(serverMemberIds(serverId));
     return [...new Set(Array.isArray(ids) ? ids.map(Number) : [])].filter((id) => members.has(id));
   };
-  const setAccess = (channelId: number, ids: number[]) => {
+  /** The same for roles: this burrow's roles, without duplicates. */
+  const roleList = (serverId: number, ids: unknown) => {
+    const roles = new Set((db.prepare('SELECT id FROM roles WHERE server_id = ?').all(serverId) as { id: number }[]).map((r) => r.id));
+    return [...new Set(Array.isArray(ids) ? ids.map(Number) : [])].filter((id) => roles.has(id));
+  };
+  const setAccess = (channelId: number, ids: number[], roleIds: number[]) => {
     db.prepare('DELETE FROM channel_access WHERE channel_id = ?').run(channelId);
     for (const id of ids) db.prepare('INSERT INTO channel_access (channel_id, user_id) VALUES (?, ?)').run(channelId, id);
+    db.prepare('DELETE FROM channel_role_access WHERE channel_id = ?').run(channelId);
+    for (const id of roleIds) db.prepare('INSERT INTO channel_role_access (channel_id, role_id) VALUES (?, ?)').run(channelId, id);
   };
 
-  // The host makes and unmakes moderators.
-  route('POST', '/api/servers/:id/members/:id/role', ({ user, params, body }) => {
-    const [serverId, targetId] = params.map(Number);
-    if (managedBurrow(serverId, user) !== 'host') throw new HttpError(403, 'Only the host can choose moderators');
-    const target = roleOf(serverId, targetId);
-    if (!target) throw new HttpError(404, "They aren't in this burrow");
-    if (target === 'host') throw new HttpError(400, 'The host is already in charge');
-    if (body.role !== 'mod' && body.role !== 'member') throw new HttpError(400, 'Role must be mod or member');
-    db.prepare('UPDATE members SET role = ? WHERE server_id = ? AND user_id = ?').run(body.role, serverId, targetId);
+  /** After rooms or roles change: anyone in a voice room they can no longer see is taken out, and everyone gets the new view. */
+  const accessChanged = (serverId: number) => {
+    for (const [u, c] of inVoice) {
+      const channel = channelById(c);
+      if (channel?.serverId === serverId && !canSee(channel, u)) setVoice(u, null);
+    }
     sendServerUpdate(serverId);
+  };
+
+  // ---- custom roles ----
+  // People who manage roles can only touch roles below their own highest role,
+  // and can't hand out permissions they don't have themselves. The host can do anything.
+
+  const roleById = (id: number) =>
+    db.prepare('SELECT id, server_id AS serverId, position, perms FROM roles WHERE id = ?').get(id) as
+      | { id: number; serverId: number; position: number; perms: string }
+      | undefined;
+  const cleanColor = (value: unknown) => {
+    if (typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value)) throw new HttpError(400, 'Color must look like #4f8a5b');
+    return value.toLowerCase();
+  };
+  // Permissions you don't have yourself stay as they were.
+  const cleanPerms = (value: unknown, me: Standing, current = '') => {
+    const wanted = new Set(parsePerms(Array.isArray(value) ? value.join(',') : ''));
+    const had = new Set(parsePerms(current));
+    return PERMS.filter((p) => (me.perms.has(p) ? wanted.has(p) : had.has(p))).join(',');
+  };
+  /** The role, if you're allowed to change it. */
+  const managedRole = (id: number, user: User) => {
+    const role = roleById(id);
+    if (!role || !isMember(role.serverId, user.id)) throw new HttpError(404, 'Role not found');
+    const me = allowed(role.serverId, user, 'roles');
+    if (role.position <= me.rank) throw new HttpError(403, 'You can only change roles below your own');
+    return { role, me };
+  };
+
+  route('POST', '/api/servers/:id/roles', ({ user, params, body }) => {
+    const serverId = Number(params[0]);
+    const me = allowed(serverId, user, 'roles');
+    const count = (db.prepare('SELECT COUNT(*) AS n, MAX(position) AS last FROM roles WHERE server_id = ?').get(serverId) as { n: number; last: number | null });
+    if (count.n >= MAX_ROLES) throw new HttpError(400, `A burrow can have at most ${MAX_ROLES} roles`);
+    // New roles start at the bottom, below everyone's.
+    db.prepare('INSERT INTO roles (server_id, name, color, perms, position, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      serverId,
+      cleanName(body.name, 'Role name', 32),
+      cleanColor(body.color ?? '#8a8f87'),
+      cleanPerms(body.perms, me),
+      (count.last ?? 0) + 1,
+      now(),
+    );
+    sendServerUpdate(serverId);
+    return serverSummary(serverId, user.id);
+  });
+
+  // Rename, recolor, change permissions, or move up or down one place.
+  route('PATCH', '/api/roles/:id', ({ user, params, body }) => {
+    const { role, me } = managedRole(Number(params[0]), user);
+    if (body.name !== undefined) db.prepare('UPDATE roles SET name = ? WHERE id = ?').run(cleanName(body.name, 'Role name', 32), role.id);
+    if (body.color !== undefined) db.prepare('UPDATE roles SET color = ? WHERE id = ?').run(cleanColor(body.color), role.id);
+    if (body.perms !== undefined) db.prepare('UPDATE roles SET perms = ? WHERE id = ?').run(cleanPerms(body.perms, me, role.perms), role.id);
+    if (body.move === 'up' || body.move === 'down') {
+      const neighbor = db
+        .prepare(
+          body.move === 'up'
+            ? 'SELECT id, position FROM roles WHERE server_id = ? AND position < ? ORDER BY position DESC LIMIT 1'
+            : 'SELECT id, position FROM roles WHERE server_id = ? AND position > ? ORDER BY position LIMIT 1',
+        )
+        .get(role.serverId, role.position) as { id: number; position: number } | undefined;
+      if (neighbor && neighbor.position <= me.rank) throw new HttpError(403, "You can't move a role above your own");
+      if (neighbor) {
+        db.prepare('UPDATE roles SET position = ? WHERE id = ?').run(neighbor.position, role.id);
+        db.prepare('UPDATE roles SET position = ? WHERE id = ?').run(role.position, neighbor.id);
+      }
+    }
+    accessChanged(role.serverId);
+    return serverSummary(role.serverId, user.id);
+  });
+
+  route('DELETE', '/api/roles/:id', ({ user, params }) => {
+    const { role } = managedRole(Number(params[0]), user);
+    db.prepare('DELETE FROM roles WHERE id = ?').run(role.id);
+    accessChanged(role.serverId);
+    return serverSummary(role.serverId, user.id);
+  });
+
+  // Gives someone exactly these roles. Roles at or above your own stay as they are.
+  route('POST', '/api/servers/:id/members/:id/roles', ({ user, params, body }) => {
+    const [serverId, targetId] = params.map(Number);
+    const me = allowed(serverId, user, 'roles');
+    const target = standing(serverId, targetId);
+    if (!target) throw new HttpError(404, "They aren't in this burrow");
+    if (targetId !== user.id && target.rank <= me.rank) throw new HttpError(403, "You can't change their roles");
+    const wanted = new Set(roleList(serverId, body.roleIds));
+    const changeable = (id: number) => roleById(id)!.position > me.rank;
+    for (const id of new Set([...wanted, ...target.roleIds])) {
+      if (wanted.has(id) === target.roleIds.includes(id)) continue;
+      if (!changeable(id)) throw new HttpError(403, 'You can only give or take roles below your own');
+      if (wanted.has(id)) db.prepare('INSERT INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?)').run(serverId, targetId, id);
+      else db.prepare('DELETE FROM member_roles WHERE role_id = ? AND user_id = ?').run(id, targetId);
+    }
+    accessChanged(serverId);
     return { ok: true };
   });
 
   // Removes someone; with ban: true they can't come back with the invite code.
-  // Moderators can remove members, but only the host can remove a moderator.
+  // You can only remove people whose highest role is below yours.
   route('POST', '/api/servers/:id/members/:id/remove', ({ user, params, body }) => {
     const [serverId, targetId] = params.map(Number);
-    const myRole = managedBurrow(serverId, user);
-    const target = roleOf(serverId, targetId);
+    const me = allowed(serverId, user, body.ban ? 'ban' : 'remove');
+    const target = standing(serverId, targetId);
     if (!target) throw new HttpError(404, "They aren't in this burrow");
-    if (target === 'host' || (target === 'mod' && myRole !== 'host') || targetId === user.id)
-      throw new HttpError(403, "You can't remove them");
+    if (target.host || target.rank <= me.rank || targetId === user.id) throw new HttpError(403, "You can't remove them");
     if (body.ban) db.prepare('INSERT OR IGNORE INTO bans (server_id, user_id, banned_at) VALUES (?, ?, ?)').run(serverId, targetId, now());
     removeMember(serverId, targetId);
     sendTo([targetId], { type: 'server_deleted', serverId });
@@ -526,7 +657,7 @@ export function createApp(opts: AppOptions): Server {
   });
 
   route('GET', '/api/servers/:id/bans', ({ user, params }) => {
-    managedBurrow(Number(params[0]), user);
+    allowed(Number(params[0]), user, 'ban');
     return db
       .prepare(
         `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar, b.banned_at AS bannedAt
@@ -537,20 +668,20 @@ export function createApp(opts: AppOptions): Server {
 
   route('DELETE', '/api/servers/:id/bans/:id', ({ user, params }) => {
     const [serverId, targetId] = params.map(Number);
-    managedBurrow(serverId, user);
+    allowed(serverId, user, 'ban');
     db.prepare('DELETE FROM bans WHERE server_id = ? AND user_id = ?').run(serverId, targetId);
     return { ok: true };
   });
 
   route('POST', '/api/servers/:id/channels', ({ user, params, body }) => {
     const serverId = Number(params[0]);
-    managedBurrow(serverId, user);
+    allowed(serverId, user, 'rooms');
     const kind = body.kind === 'voice' ? 'voice' : 'text';
     const name = roomName(body.name, kind);
     const r = db
       .prepare('INSERT INTO channels (server_id, name, kind, private, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(serverId, name, kind, body.private ? 1 : 0, now());
-    if (body.private) setAccess(Number(r.lastInsertRowid), accessList(serverId, body.memberIds));
+    if (body.private) setAccess(Number(r.lastInsertRowid), accessList(serverId, body.memberIds), roleList(serverId, body.roleIds));
     sendServerUpdate(serverId);
     return serverSummary(serverId, user.id);
   });
@@ -565,21 +696,19 @@ export function createApp(opts: AppOptions): Server {
   route('PATCH', '/api/channels/:id', ({ user, params, body }) => {
     const channel = channelById(Number(params[0]));
     if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
-    managedBurrow(channel.serverId, user);
+    allowed(channel.serverId, user, 'rooms');
     if (body.name !== undefined) db.prepare('UPDATE channels SET name = ? WHERE id = ?').run(roomName(body.name, channel.kind), channel.id);
     if (body.private !== undefined) db.prepare('UPDATE channels SET private = ? WHERE id = ?').run(body.private ? 1 : 0, channel.id);
-    if (body.memberIds !== undefined) setAccess(channel.id, accessList(channel.serverId, body.memberIds));
-    // Anyone in a voice room they can no longer see is taken out of it.
-    const updated = channelById(channel.id)!;
-    for (const [u, c] of inVoice) if (c === channel.id && !canSee(updated, u)) setVoice(u, null);
-    sendServerUpdate(channel.serverId);
+    if (body.memberIds !== undefined || body.roleIds !== undefined)
+      setAccess(channel.id, accessList(channel.serverId, body.memberIds), roleList(channel.serverId, body.roleIds));
+    accessChanged(channel.serverId);
     return serverSummary(channel.serverId, user.id);
   });
 
   route('DELETE', '/api/channels/:id', ({ user, params }) => {
     const channel = channelById(Number(params[0]));
     if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
-    managedBurrow(channel.serverId, user);
+    allowed(channel.serverId, user, 'rooms');
     const textRooms = db.prepare("SELECT COUNT(*) AS n FROM channels WHERE server_id = ? AND kind = 'text'").get(channel.serverId) as { n: number };
     if (channel.kind === 'text' && textRooms.n <= 1) throw new HttpError(400, 'A burrow needs at least one text room');
     for (const [u, c] of inVoice) if (c === channel.id) setVoice(u, null);
@@ -669,7 +798,7 @@ export function createApp(opts: AppOptions): Server {
       | undefined;
     const channel = msg && channelById(msg.channel_id);
     if (!msg || !channel || !canSee(channel, user.id)) throw new HttpError(404, 'Message not found');
-    if (msg.author_id !== user.id && !canManage(channel.serverId, user.id))
+    if (msg.author_id !== user.id && !can(channel.serverId, user.id, 'messages'))
       throw new HttpError(403, 'You can only delete your own messages');
     removeFiles(db.prepare('SELECT id FROM attachments WHERE message_id = ?').all(id) as Json[]);
     db.prepare('DELETE FROM messages WHERE id = ?').run(id);
