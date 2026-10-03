@@ -110,6 +110,11 @@ Voice only is light enough for a Raspberry Pi 4 or 5. The limit is usually your 
 speed: LiveKit sends each speaker to every listener at about 40 kbps, so a room of 10 needs up to
 about 4 Mbps of upload.
 
+Voice is end-to-end encrypted: audio is scrambled on each person's device and only the others in the
+room can unscramble it, so LiveKit (and anyone who got into the server) only ever handles noise. A new
+key is made whenever someone joins or leaves. Click the lock in the voice bar to see the room's safety
+code; everyone in the room should see the same one. Everyone needs an up-to-date app for this.
+
 1. Copy `.env.example` to `.env` in the same folder as `docker-compose.yml`, and replace the secret
    with the output of `openssl rand -base64 32`.
 2. `docker compose up -d --build`. This now starts `livekit` too.
@@ -119,11 +124,6 @@ about 4 Mbps of upload.
 The host then adds a room with **+** next to *Rooms* and picks *Voice room*. Click a voice room to
 join; the bar above your name has mute and leave. Click someone in a voice room to turn them up or down
 (0% to 200%, only for you).
-
-Voice is end-to-end encrypted: audio is scrambled on each person's device and only the others in the
-room can unscramble it, so LiveKit (and anyone who got into the server) only ever handles noise. A new
-key is made whenever someone joins or leaves. Click the lock in the voice bar to see the room's safety
-code; everyone in the room should see the same one. Everyone needs an up-to-date app for this.
 
 ### Backups
 
