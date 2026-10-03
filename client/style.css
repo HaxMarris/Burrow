@@ -393,3 +393,8 @@ a.btn { text-decoration: none; display: inline-block; }
 .sound-volume .btn { padding: 6px 14px; }
 .modal-card select { background: var(--surface-2); border: 1.5px solid transparent; border-radius: 10px; padding: 10px 12px; font-size: 15px; font-weight: 400; outline: none; }
 .modal-card select:focus { border-color: var(--moss); }
+.voice-lock { color: var(--online); }
+.voice-lock svg { width: 16px; height: 16px; fill: currentColor; }
+.safety-pop { width: 260px; }
+.safety-pop p { margin: 0; }
+.safety-code { font-size: 22px; font-weight: 800; letter-spacing: .08em; text-align: center; padding: 6px 0; font-variant-numeric: tabular-nums; color: var(--accent); }

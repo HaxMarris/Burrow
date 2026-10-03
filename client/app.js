@@ -1537,8 +1537,13 @@ async function joinVoice(channelId) {
     const LK = await loadLivekit();
     const { url, token } = await api(`/api/channels/${channelId}/voice`, { method: 'POST' });
     if (state.voice !== voice) return;
+    if (!LK.isE2EESupported()) throw new Error("this app can't encrypt voice. Update Burrow or use a current browser.");
     const quality = VOICE_QUALITY[voicePrefs.quality] ?? VOICE_QUALITY.high;
+    const vc = await createVoiceCrypto(LK);
+    voice.crypto = vc;
     const room = new LK.Room({
+      // End-to-end encryption: the voice server only ever handles scrambled audio.
+      e2ee: { keyProvider: vc.keys, worker: vc.worker },
       audioCaptureDefaults: { echoCancellation: true, noiseSuppression: voicePrefs.noiseSuppression, autoGainControl: voicePrefs.noiseSuppression },
       // Opus at a higher bitrate than LiveKit's 48 kbps default; silence still costs almost nothing (DTX).
       publishDefaults: { audioPreset: { maxBitrate: quality.bitrate }, dtx: true, red: true },
@@ -1561,8 +1566,13 @@ async function joinVoice(channelId) {
       .on(LK.RoomEvent.TrackUnmuted, (pub, p) => setMuted(p, false))
       .on(LK.RoomEvent.Reconnecting, () => renderVoiceBar('Reconnecting…'))
       .on(LK.RoomEvent.Reconnected, () => renderVoiceBar())
-      .on(LK.RoomEvent.Disconnected, () => { if (state.voice === voice) leaveVoice(); });
+      .on(LK.RoomEvent.Disconnected, () => { if (state.voice === voice) leaveVoice(); })
+      .on(LK.RoomEvent.DataReceived, (payload, participant, kind, topic) => onCryptoMessage(voice, payload, participant, topic))
+      .on(LK.RoomEvent.ParticipantDisconnected, (p) => { vc.pubs.delete(p.identity); keysChanged(voice); })
+      .on(LK.RoomEvent.EncryptionError, (err) => console.warn('Voice encryption:', err?.message ?? err));
     await room.connect(url || state.serverUrl.replace(/^http/, 'ws'), token);
+    await room.setE2EEEnabled(true);
+    startKeyExchange(voice);
     await room.startAudio();
     await room.localParticipant.setMicrophoneEnabled(true);
     if (state.voice !== voice) return room.disconnect();
@@ -1593,6 +1603,10 @@ function leaveVoice(quiet) {
   state.speaking.clear();
   state.mutedInVoice.clear();
   voice.room?.disconnect();
+  clearTimeout(voice.crypto?.retry);
+  clearTimeout(voice.crypto?.rotateTimer);
+  voice.crypto?.worker.terminate();
+  closeVolume();
   $('#voice-audio').replaceChildren();
   if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: 'voice_leave' }));
   renderVoiceBar();
@@ -1615,15 +1629,181 @@ function renderVoiceBar(status) {
   $('#voice-bar').classList.toggle('hidden', !voice);
   if (!voice) return;
   const ch = [...state.servers.values()].flatMap((s) => s.channels).find((c) => c.id === voice.channelId);
-  $('#voice-status').textContent = status ?? 'Voice connected';
-  $('#voice-status').classList.toggle('ok', !status);
+  const sealed = voice.crypto?.index >= 0;
+  $('#voice-status').textContent = status ?? (sealed ? 'Voice connected' : 'Securing voice…');
+  $('#voice-status').classList.toggle('ok', !status && sealed);
+  $('#voice-lock').classList.toggle('hidden', !!status || !sealed);
   $('#voice-room-name').textContent = ch?.name ?? '';
   $('#voice-mute').classList.toggle('on', voice.muted);
   $('#voice-mute').title = voice.muted ? 'Unmute' : 'Mute';
 }
 
 $('#voice-mute').onclick = toggleMute;
+$('#voice-lock').onclick = (e) => { e.stopPropagation(); openSafetyCode(e.currentTarget); };
 $('#voice-leave').onclick = () => leaveVoice();
+
+// ---------------------------------------------------------------- end-to-end encrypted voice
+//
+// Audio is encrypted on your device and only decrypted by the others in the room, so the
+// voice server (and anyone who gets into it) only ever handles scrambled audio.
+//
+// Each person makes a fresh key pair when they join and announces the public half. Whoever has
+// been in the room longest makes the room key and sends it to each person, sealed with a key only
+// the two of them can work out (ECDH P-256, then AES-GCM). They make a new room key whenever
+// someone joins or leaves, so newcomers can't decode what came before and leavers can't decode
+// what comes after. The server passes these messages along but can't open them.
+//
+// A server that wanted to listen in would have to swap in public keys of its own. That changes
+// the room's safety code, which everyone can compare (click the lock in the voice bar).
+
+const E2EE_TOPIC = 'burrow-e2ee';
+const KEYRING_SIZE = 16; // LiveKit keeps this many room keys, so audio sealed with the last one still plays
+const toB64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const fromB64 = (text) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+
+// Started from a Blob, since browsers won't start workers from local files (the desktop app).
+let workerSourceLoading = null;
+async function e2eeWorker() {
+  workerSourceLoading ??= new Promise((resolve, reject) => {
+    const tag = document.createElement('script');
+    tag.src = 'vendor/livekit-client.e2ee.worker.source.js';
+    tag.onload = () => resolve(URL.createObjectURL(new Blob([window.LivekitE2EEWorkerSource], { type: 'text/javascript' })));
+    tag.onerror = () => { workerSourceLoading = null; reject(new Error("Couldn't load voice encryption.")); };
+    document.head.append(tag);
+  });
+  return new Worker(await workerSourceLoading);
+}
+
+async function createVoiceCrypto(LK) {
+  class RoomKeys extends LK.BaseKeyProvider {
+    constructor() { super({ sharedKey: true, ratchetWindowSize: 0, failureTolerance: -1, keyringSize: KEYRING_SIZE }); }
+    async use(raw, index) { this.onSetEncryptionKey(await LK.createKeyMaterialFromBuffer(raw), undefined, index); }
+  }
+  const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveKey']);
+  return {
+    pair,
+    pub: toB64(await crypto.subtle.exportKey('raw', pair.publicKey)),
+    pubs: new Map(), // identity -> their public key, for everyone else in the room
+    keys: new RoomKeys(),
+    worker: await e2eeWorker(),
+    index: -1, // which room key we're on; -1 until we have one
+  };
+}
+
+/** The AES key only we and the owner of `theirPub` can work out. */
+async function pairKey(vc, theirPub) {
+  const theirs = await crypto.subtle.importKey('raw', fromB64(theirPub), { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  return crypto.subtle.deriveKey({ name: 'ECDH', public: theirs }, vc.pair.privateKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
+function sendCrypto(voice, message, to) {
+  const data = new TextEncoder().encode(JSON.stringify(message));
+  voice.room.localParticipant.publishData(data, { reliable: true, topic: E2EE_TOPIC, ...(to ? { destinationIdentities: [to] } : {}) }).catch(() => {});
+}
+
+/** The person who hands out room keys: whoever joined first. */
+function keyKeeper(room) {
+  const joined = (p) => p.joinedAt?.getTime() ?? Infinity;
+  return [room.localParticipant, ...room.remoteParticipants.values()]
+    .sort((a, b) => joined(a) - joined(b) || Number(a.identity) - Number(b.identity))[0];
+}
+
+function startKeyExchange(voice) {
+  const vc = voice.crypto;
+  if (!voice.room.remoteParticipants.size) return keysChanged(voice);
+  sendCrypto(voice, { t: 'hello', pub: vc.pub });
+  // If no key arrives (say the keeper left at the same moment), ask again.
+  const retry = () => {
+    if (state.voice !== voice || vc.index >= 0) return;
+    sendCrypto(voice, { t: 'hello', pub: vc.pub });
+    vc.retry = setTimeout(retry, 4000);
+  };
+  vc.retry = setTimeout(retry, 4000);
+}
+
+/** Someone came or went: if we're the key keeper, make a new room key and hand it out. */
+function keysChanged(voice) {
+  const vc = voice.crypto;
+  renderVoiceBar();
+  if (!voice.room || keyKeeper(voice.room) !== voice.room.localParticipant) return;
+  clearTimeout(vc.rotateTimer);
+  // A short wait gathers people joining at the same time into one new key.
+  vc.rotateTimer = setTimeout(async () => {
+    if (state.voice !== voice) return;
+    const raw = crypto.getRandomValues(new Uint8Array(32));
+    const index = (vc.index + 1) % KEYRING_SIZE;
+    for (const p of voice.room.remoteParticipants.values()) {
+      const pub = vc.pubs.get(p.identity);
+      if (!pub) continue;
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const sealed = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(`${index}:${p.identity}`) },
+        await pairKey(vc, pub),
+        raw,
+      );
+      sendCrypto(voice, { t: 'key', index, iv: toB64(iv), key: toB64(sealed), pub: vc.pub }, p.identity);
+    }
+    await vc.keys.use(raw.buffer, index);
+    vc.index = index;
+    renderVoiceBar();
+  }, 250);
+}
+
+async function onCryptoMessage(voice, payload, participant, topic) {
+  const vc = voice.crypto;
+  if (topic !== E2EE_TOPIC || !participant || state.voice !== voice) return;
+  let msg;
+  try { msg = JSON.parse(new TextDecoder().decode(payload)); } catch { return; }
+  const from = participant.identity;
+  if ((msg.t === 'hello' || msg.t === 'pub') && typeof msg.pub === 'string') {
+    vc.pubs.set(from, msg.pub);
+    if (msg.t === 'hello') sendCrypto(voice, { t: 'pub', pub: vc.pub }, from);
+    keysChanged(voice);
+  } else if (msg.t === 'key') {
+    try {
+      if (!vc.pubs.has(from)) vc.pubs.set(from, msg.pub);
+      const raw = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: fromB64(msg.iv), additionalData: new TextEncoder().encode(`${msg.index}:${voice.room.localParticipant.identity}`) },
+        await pairKey(vc, vc.pubs.get(from)),
+        fromB64(msg.key),
+      );
+      await vc.keys.use(raw, Number(msg.index) % KEYRING_SIZE);
+      vc.index = Number(msg.index) % KEYRING_SIZE;
+      clearTimeout(vc.retry);
+      renderVoiceBar();
+    } catch (err) {
+      console.warn("Couldn't open a voice key from", from, err);
+    }
+  }
+}
+
+/** A short code from everyone's public keys. If anyone's differs, someone is in the middle. */
+async function safetyCode(voice) {
+  const vc = voice.crypto;
+  const entries = [[voice.room.localParticipant.identity, vc.pub], ...vc.pubs].sort((a, b) => Number(a[0]) - Number(b[0]));
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(entries.map((e) => e.join(':')).join('|'))));
+  const groups = [0, 2, 4].map((i) => String(((hash[i] << 8) | hash[i + 1]) % 10000).padStart(4, '0'));
+  return { code: groups.join(' '), people: entries.length };
+}
+
+async function openSafetyCode(anchor) {
+  const voice = state.voice;
+  if (!voice?.crypto) return;
+  closeVolume();
+  const { code, people } = await safetyCode(voice);
+  const pop = document.createElement('div');
+  pop.className = 'volume-pop safety-pop';
+  pop.id = 'volume-pop';
+  pop.innerHTML = `<div class="volume-head"><b>End-to-end encrypted</b></div>
+    <p class="small">Only the ${people === 1 ? 'person' : `${people} people`} in this room can hear it. Not even the server can.</p>
+    <div class="safety-code">${code}</div>
+    <p class="small muted">Everyone here should see the same code. If someone's is different, the server may be listening in.</p>`;
+  pop.onclick = (e) => e.stopPropagation();
+  document.body.append(pop);
+  const r = anchor.getBoundingClientRect();
+  pop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 8))}px`;
+  pop.style.top = `${Math.max(8, r.top - pop.offsetHeight - 8)}px`;
+}
 
 // ---------------------------------------------------------------- volume and sounds
 //
