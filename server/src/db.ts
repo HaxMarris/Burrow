@@ -77,5 +77,8 @@ export function openDb(file: string): Db {
   // Added with replies: the message this one answers (it may since have been deleted).
   const messageCols = db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
   if (!messageCols.some((c) => c.name === 'reply_to')) db.exec('ALTER TABLE messages ADD COLUMN reply_to INTEGER');
+  // Added with profile pictures: the picture's file name in the uploads folder.
+  const userCols = db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
+  if (!userCols.some((c) => c.name === 'avatar')) db.exec('ALTER TABLE users ADD COLUMN avatar TEXT');
   return db;
 }

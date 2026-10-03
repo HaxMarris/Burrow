@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import { readFile, mkdir, unlink, stat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, unlink, stat } from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { extname, join, normalize } from 'node:path';
@@ -21,7 +21,7 @@ export interface AppOptions {
   maxUploadBytes?: number;
 }
 
-type User = { id: number; username: string };
+type User = { id: number; username: string; avatar: string | null };
 type Json = Record<string, unknown>;
 
 class HttpError extends Error {
@@ -35,6 +35,16 @@ class HttpError extends Error {
 const MAX_MESSAGE_LENGTH = 4000;
 const MAX_ATTACHMENTS = 10;
 const MAX_REACTIONS = 20; // different emoji on one message
+const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
+// A user's picture link, from their users.avatar file name (or null).
+const avatarUrl = (col: string) => `CASE WHEN ${col} IS NULL THEN NULL ELSE '/api/avatars/' || ${col} END`;
+// Profile pictures are recognised by their first bytes, not by what the client says they are.
+const AVATAR_TYPES: { ext: string; type: string; magic: (b: Buffer) => boolean }[] = [
+  { ext: 'png', type: 'image/png', magic: (b) => b.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) },
+  { ext: 'jpg', type: 'image/jpeg', magic: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { ext: 'gif', type: 'image/gif', magic: (b) => b.subarray(0, 4).toString('latin1') === 'GIF8' },
+  { ext: 'webp', type: 'image/webp', magic: (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP' },
+];
 const EMOJI = /\p{Extended_Pictographic}|\p{Regional_Indicator}/u;
 // Shown in the page. Everything else downloads, so an uploaded .html or .svg can't run as part of Burrow.
 const INLINE_TYPES = new Set([
@@ -60,7 +70,7 @@ export function createApp(opts: AppOptions): Server {
   const userByToken = (token: string | undefined): User | undefined => {
     if (!token) return undefined;
     return db
-      .prepare('SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?')
+      .prepare(`SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`)
       .get(token) as User | undefined;
   };
 
@@ -126,7 +136,7 @@ export function createApp(opts: AppOptions): Server {
     const row = db
       .prepare(
         `SELECT m.id, m.channel_id AS channelId, m.content, m.created_at AS createdAt, m.edited_at AS editedAt,
-                m.reply_to AS replyToId, u.id AS authorId, u.username AS author
+                m.reply_to AS replyToId, u.id AS authorId, u.username AS author, ${avatarUrl('u.avatar')} AS authorAvatar
          FROM messages m JOIN users u ON u.id = m.author_id WHERE m.id = ?`,
       )
       .get(id) as Json | undefined;
@@ -142,7 +152,8 @@ export function createApp(opts: AppOptions): Server {
     ).map((c) => (c.kind === 'voice' ? { ...c, voiceUsers: usersInVoice(c.id as number) } : c));
     const members = db
       .prepare(
-        'SELECT u.id, u.username FROM members m JOIN users u ON u.id = m.user_id WHERE m.server_id = ? ORDER BY u.username',
+        `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar FROM members m JOIN users u ON u.id = m.user_id
+         WHERE m.server_id = ? ORDER BY u.username`,
       )
       .all(serverId) as User[];
     return {
@@ -168,6 +179,7 @@ export function createApp(opts: AppOptions): Server {
   // ---- realtime -----------------------------------------------------------
 
   const sockets = new Map<number, Set<WebSocket>>(); // userId -> open sockets
+  const socketTokens = new WeakMap<WebSocket, string>(); // which login each socket belongs to
   const online = new Set<number>();
   const inVoice = new Map<number, number>(); // userId -> voice channel they are in
 
@@ -244,7 +256,7 @@ export function createApp(opts: AppOptions): Server {
 
   // ---- HTTP routes --------------------------------------------------------
 
-  type Handler = (ctx: { user: User; params: string[]; body: Json; url: URL }) => unknown;
+  type Handler = (ctx: { user: User; params: string[]; body: Json; url: URL; token: string | undefined }) => unknown;
   type Route = { method: string; pattern: RegExp; auth: boolean; handler: Handler };
   const routes: Route[] = [];
   const route = (method: string, path: string, handler: Handler, auth = true) =>
@@ -272,7 +284,7 @@ export function createApp(opts: AppOptions): Server {
       const r = db
         .prepare('INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)')
         .run(username, hashPassword(body.password), now());
-      return startSession({ id: Number(r.lastInsertRowid), username });
+      return startSession({ id: Number(r.lastInsertRowid), username, avatar: null });
     },
     false,
   );
@@ -282,11 +294,11 @@ export function createApp(opts: AppOptions): Server {
     '/api/login',
     ({ body }) => {
       const row = db
-        .prepare('SELECT id, username, password_hash FROM users WHERE username = ?')
+        .prepare(`SELECT id, username, ${avatarUrl('avatar')} AS avatar, password_hash FROM users WHERE username = ?`)
         .get(String(body.username ?? '')) as (User & { password_hash: string }) | undefined;
       if (!row || !verifyPassword(String(body.password ?? ''), row.password_hash))
         throw new HttpError(401, 'Wrong username or password');
-      return startSession({ id: row.id, username: row.username });
+      return startSession({ id: row.id, username: row.username, avatar: row.avatar });
     },
     false,
   );
@@ -297,6 +309,21 @@ export function createApp(opts: AppOptions): Server {
   });
 
   route('GET', '/api/me', ({ user }) => user);
+
+  // Changing your password signs you out everywhere else.
+  route('POST', '/api/me/password', ({ user, body, token }) => {
+    const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(user.id) as { password_hash: string };
+    if (!verifyPassword(String(body.currentPassword ?? ''), row.password_hash))
+      throw new HttpError(403, 'Your current password is wrong');
+    if (typeof body.newPassword !== 'string' || body.newPassword.length < 8)
+      throw new HttpError(400, 'New password must be at least 8 characters');
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(body.newPassword), user.id);
+    db.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(user.id, token);
+    for (const ws of sockets.get(user.id) ?? []) if (socketTokens.get(ws) !== token) ws.close(4001, 'Password changed');
+    return { ok: true };
+  });
+
+  route('DELETE', '/api/me/avatar', ({ user }) => setAvatarFile(user, null));
 
   route('GET', '/api/servers', ({ user }) => {
     const ids = db
@@ -388,7 +415,7 @@ export function createApp(opts: AppOptions): Server {
     const rows = db
       .prepare(
         `SELECT m.id, m.channel_id AS channelId, m.content, m.created_at AS createdAt, m.edited_at AS editedAt,
-                m.reply_to AS replyToId, u.id AS authorId, u.username AS author
+                m.reply_to AS replyToId, u.id AS authorId, u.username AS author, ${avatarUrl('u.avatar')} AS authorAvatar
          FROM messages m JOIN users u ON u.id = m.author_id
          WHERE m.channel_id = ? AND m.id < ? ORDER BY m.id DESC LIMIT ?`,
       )
@@ -527,6 +554,65 @@ export function createApp(opts: AppOptions): Server {
     createReadStream(filePath(id)).pipe(res);
   };
 
+  // ---- profile pictures ---------------------------------------------------
+
+  const avatarPath = (file: string) => join(opts.uploadDir!, 'avatars', file);
+
+  /** Swaps in a new picture file (or none), removes the old one and tells everyone who can see this user. */
+  const setAvatarFile = (user: User, file: string | null) => {
+    const old = db.prepare('SELECT avatar FROM users WHERE id = ?').get(user.id) as { avatar: string | null };
+    db.prepare('UPDATE users SET avatar = ? WHERE id = ?').run(file, user.id);
+    if (old.avatar && opts.uploadDir) unlink(avatarPath(old.avatar)).catch(() => {});
+    const updated = { id: user.id, username: user.username, avatar: file && `/api/avatars/${file}` };
+    sendTo(new Set([user.id, ...usersSharingServerWith(user.id)]), { type: 'user_updated', user: updated });
+    return updated;
+  };
+
+  // The picture is the raw request body. The app shrinks it to a small square before sending.
+  const handleAvatarUpload = async (req: IncomingMessage, res: ServerResponse) => {
+    const user = userByToken(req.headers.authorization?.replace(/^Bearer /, ''));
+    if (!user) throw new HttpError(401, 'Not logged in');
+    if (!opts.uploadDir) throw new HttpError(503, 'Uploads are not set up on this server');
+    const tooBig = new HttpError(413, `Profile pictures can be at most ${MAX_AVATAR_BYTES / 1048576} MB`);
+    if (Number(req.headers['content-length']) > MAX_AVATAR_BYTES) throw tooBig;
+    const chunks: Buffer[] = [];
+    let size = 0;
+    await new Promise<void>((resolve, reject) => {
+      req.on('data', (c: Buffer) => {
+        size += c.length;
+        if (size > MAX_AVATAR_BYTES) {
+          req.pause();
+          reject(tooBig);
+        } else chunks.push(c);
+      });
+      req.on('end', resolve);
+      req.on('error', reject);
+    });
+    const data = Buffer.concat(chunks);
+    const kind = AVATAR_TYPES.find((t) => t.magic(data));
+    if (!kind) throw new HttpError(400, 'Profile pictures must be PNG, JPEG, GIF or WebP images');
+    const file = `${randomBytes(16).toString('base64url')}.${kind.ext}`;
+    await mkdir(join(opts.uploadDir, 'avatars'), { recursive: true });
+    await writeFile(avatarPath(file), data);
+    send(res, 200, setAvatarFile(user, file));
+  };
+
+  // Picture links are unguessable and never reused, so they can be cached forever.
+  const serveAvatar = async (req: IncomingMessage, res: ServerResponse, file: string) => {
+    const kind = AVATAR_TYPES.find((t) => file.endsWith('.' + t.ext))!;
+    const info = opts.uploadDir ? await stat(avatarPath(file)).catch(() => null) : null;
+    if (!info) throw new HttpError(404, 'Picture not found');
+    res.writeHead(200, {
+      'content-type': kind.type,
+      'content-length': info.size,
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; sandbox",
+      'cache-control': 'public, max-age=31536000, immutable',
+    });
+    if (req.method === 'HEAD') return res.end();
+    createReadStream(avatarPath(file)).pipe(res);
+  };
+
   // Uploads that never made it into a message are cleared out after a day.
   if (opts.uploadDir) {
     const sweep = () => {
@@ -598,6 +684,9 @@ export function createApp(opts: AppOptions): Server {
       if (upload) return await handleUpload(req, res, Number(upload[1]));
       const file = (req.method === 'GET' || req.method === 'HEAD') && url.pathname.match(/^\/api\/attachments\/([\w-]+)(\/|$)/);
       if (file) return await serveAttachment(req, res, file[1]);
+      if (req.method === 'POST' && url.pathname === '/api/me/avatar') return await handleAvatarUpload(req, res);
+      const avatar = (req.method === 'GET' || req.method === 'HEAD') && url.pathname.match(/^\/api\/avatars\/([\w-]+\.(?:png|jpg|gif|webp))$/);
+      if (avatar) return await serveAvatar(req, res, avatar[1]);
       for (const r of routes) {
         const m = r.method === req.method && url.pathname.match(r.pattern);
         if (!m) continue;
@@ -606,7 +695,7 @@ export function createApp(opts: AppOptions): Server {
         if (r.auth && !user) throw new HttpError(401, 'Not logged in');
         const body = req.method === 'GET' ? {} : await readBody(req);
         if (url.pathname === '/api/logout') body.token = token;
-        return send(res, 200, await r.handler({ user: user!, params: m.slice(1), body, url }));
+        return send(res, 200, await r.handler({ user: user!, params: m.slice(1), body, url, token }));
       }
       throw new HttpError(404, 'Not found');
     } catch (err) {
@@ -627,7 +716,10 @@ export function createApp(opts: AppOptions): Server {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       return socket.destroy();
     }
-    wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, user));
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      socketTokens.set(ws, url.searchParams.get('token')!);
+      onConnection(ws, user);
+    });
   });
 
   const onConnection = (ws: WebSocket, user: User) => {

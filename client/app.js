@@ -33,6 +33,7 @@ const state = {
   voice: null,              // { channelId, room, muted } while in a voice room
   speaking: new Set(),      // user ids talking right now in our voice room
   mutedInVoice: new Set(),  // user ids muted in our voice room
+  avatars: new Map(),       // user id -> profile picture path (or null), kept current by user_updated events
 };
 
 // ---------------------------------------------------------------- API
@@ -160,7 +161,8 @@ async function enterApp() {
   $('#auth').classList.add('hidden');
   $('#app').classList.remove('hidden');
   $('#me-name').textContent = state.me.username;
-  setAvatar($('#me-avatar'), state.me.username);
+  state.avatars.set(state.me.id, state.me.avatar ?? null);
+  setAvatar($('#me-avatar'), state.me.username, state.me.avatar);
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
   const config = await api('/api/config').catch(() => ({}));
   state.voiceEnabled = !!config.voice;
@@ -172,6 +174,7 @@ async function enterApp() {
 
 async function loadServers() {
   const list = await api('/api/servers');
+  list.forEach(rememberAvatars);
   state.servers = new Map(list.map((s) => [s.id, s]));
   state.serverOrder = list.map((s) => s.id);
   if (!state.servers.has(state.serverId)) state.serverId = state.serverOrder[0] ?? null;
@@ -197,7 +200,13 @@ function connect() {
     if (wasRetry) loadServers().catch(() => {});
   };
   ws.onmessage = (e) => handleEvent(JSON.parse(e.data));
-  ws.onclose = () => {
+  ws.onclose = (e) => {
+    // The password was changed on another device, which signs this one out.
+    if (e.code === 4001 && state.ws === ws) {
+      logout(false);
+      $('#auth-error').textContent = 'Your password was changed, so please log in again.';
+      return;
+    }
     $('#conn-status').classList.remove('ok');
     $('#conn-status').textContent = 'Reconnecting…';
     if (state.ws !== ws || !state.token) return;
@@ -241,6 +250,7 @@ function handleEvent(ev) {
       break;
     }
     case 'server_updated': {
+      rememberAvatars(ev.server);
       const isNew = !state.servers.has(ev.server.id);
       state.servers.set(ev.server.id, ev.server);
       if (isNew) state.serverOrder.push(ev.server.id);
@@ -261,6 +271,9 @@ function handleEvent(ev) {
       break;
     case 'typing':
       showTyping(ev.channelId, ev.username);
+      break;
+    case 'user_updated':
+      applyUser(ev.user);
       break;
     case 'voice_state':
       for (const s of state.servers.values())
@@ -346,7 +359,7 @@ function renderChannels() {
       row.className = 'voice-person' + (state.speaking.has(id) ? ' speaking' : '');
       const av = document.createElement('span');
       av.className = 'avatar xs';
-      setAvatar(av, name);
+      setAvatar(av, name, avatarOf(id));
       const label = document.createElement('span');
       label.textContent = name;
       row.append(av, label);
@@ -412,7 +425,7 @@ function renderMembers() {
         li.className = m.online ? 'online' : 'offline';
         const av = document.createElement('span');
         av.className = 'avatar';
-        setAvatar(av, m.username);
+        setAvatar(av, m.username, avatarOf(m.id, m.avatar));
         const name = document.createElement('span');
         name.textContent = m.username;
         li.append(av, name);
@@ -476,7 +489,7 @@ function renderMessages({ stick = false } = {}) {
       group.className = 'group' + (m.authorId === state.me.id ? ' mine' : '');
       const av = document.createElement('span');
       av.className = 'avatar lg';
-      setAvatar(av, m.author);
+      setAvatar(av, m.author, avatarOf(m.authorId, m.authorAvatar));
       body = document.createElement('div');
       const time = new Date(m.createdAt);
       body.innerHTML = `<div class="head"><span class="author">${escapeHtml(m.author)}</span>
@@ -698,6 +711,7 @@ function openAddServer() {
 }
 
 function addServer(s) {
+  rememberAvatars(s);
   if (!state.servers.has(s.id)) state.serverOrder.push(s.id);
   state.servers.set(s.id, s);
   closeModal();
@@ -755,6 +769,94 @@ $('#add-channel').onclick = () => {
     } catch (err) { $('#modal-error').textContent = err.message; }
   };
 };
+
+// ---------------------------------------------------------------- your account
+
+const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
+
+$('#account-btn').onclick = () => {
+  modal(`<h2>Your account</h2>
+    ${state.maxUploadBytes ? `<div class="account-picture">
+      <span class="avatar xl" id="account-avatar"></span>
+      <div class="buttons">
+        <div>
+          <button type="button" class="btn secondary" id="avatar-pick">Upload picture</button>
+          <button type="button" class="btn secondary" id="avatar-remove">Remove</button>
+        </div>
+        <span class="small muted">PNG, JPEG, GIF or WebP. It's cropped to a square.</span>
+      </div>
+      <input type="file" id="avatar-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+    </div>
+    <div class="error" id="avatar-error"></div>` : ''}
+    <h3>Change password</h3>
+    <form id="password-form">
+      <input type="text" autocomplete="username" value="${escapeHtml(state.me.username)}" hidden />
+      <label>Current password<input type="password" id="pw-current" autocomplete="current-password" required /></label>
+      <label>New password<input type="password" id="pw-new" autocomplete="new-password" minlength="8" required /></label>
+      <label>New password again<input type="password" id="pw-confirm" autocomplete="new-password" minlength="8" required /></label>
+      <span class="small muted">This logs you out on your other devices.</span>
+      <div class="error" id="pw-status"></div>
+      <div class="modal-row"><button type="button" class="btn secondary" data-close>Close</button><button type="submit" class="btn">Change password</button></div>
+    </form>`);
+  if (state.maxUploadBytes) {
+    setAvatar($('#account-avatar'), state.me.username, state.me.avatar);
+    $('#avatar-remove').classList.toggle('hidden', !state.me.avatar);
+    $('#avatar-pick').onclick = () => $('#avatar-input').click();
+    $('#avatar-input').onchange = async (e) => {
+      const file = e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      $('#avatar-error').textContent = '';
+      $('#avatar-pick').disabled = true;
+      $('#avatar-pick').textContent = 'Uploading…';
+      try { applyUser(await uploadAvatar(await squarePicture(file))); }
+      catch (err) { $('#avatar-error').textContent = err.message; }
+      finally { $('#avatar-pick').disabled = false; $('#avatar-pick').textContent = 'Upload picture'; }
+    };
+    $('#avatar-remove').onclick = async () => {
+      try { applyUser(await api('/api/me/avatar', { method: 'DELETE' })); }
+      catch (err) { $('#avatar-error').textContent = err.message; }
+    };
+  }
+  $('#password-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const status = (text, ok = false) => { $('#pw-status').textContent = text; $('#pw-status').className = ok ? 'success' : 'error'; };
+    status('');
+    if ($('#pw-new').value !== $('#pw-confirm').value) return status("The new passwords don't match");
+    try {
+      await api('/api/me/password', { method: 'POST', body: { currentPassword: $('#pw-current').value, newPassword: $('#pw-new').value } });
+      e.target.reset();
+      status('Password changed.', true);
+    } catch (err) { status(err.message); }
+  };
+};
+
+// Crops to the middle square and shrinks to 256 px, so pictures load fast everywhere.
+// Small GIFs go up untouched to keep their animation.
+async function squarePicture(file) {
+  if (file.type === 'image/gif' && file.size <= MAX_AVATAR_BYTES) return file;
+  let img;
+  try { img = await createImageBitmap(file); }
+  catch { throw new Error("That file doesn't look like a picture"); }
+  const side = Math.min(img.width, img.height);
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 256;
+  canvas.getContext('2d').drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, 256, 256);
+  const encode = (type) => new Promise((resolve) => canvas.toBlob(resolve, type, 0.9));
+  const webp = await encode('image/webp');
+  return webp?.type === 'image/webp' ? webp : encode('image/png');
+}
+
+async function uploadAvatar(blob) {
+  const res = await fetch(state.serverUrl + '/api/me/avatar', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + state.token, 'content-type': blob.type || 'application/octet-stream' },
+    body: blob,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Upload failed (${res.status})`);
+  return data;
+}
 
 // ---------------------------------------------------------------- replies & reactions
 
@@ -1144,9 +1246,37 @@ function colorFor(name) {
   return FOREST[h % FOREST.length];
 }
 
-function setAvatar(el, username) {
-  el.style.background = colorFor(username);
-  el.textContent = username[0].toUpperCase();
+// Shows the person's picture when they have one, otherwise their first letter on a forest color.
+function setAvatar(el, username, picture) {
+  el.style.backgroundColor = colorFor(username);
+  el.style.backgroundImage = picture ? `url("${state.serverUrl}${picture}")` : '';
+  el.classList.toggle('has-picture', !!picture);
+  el.textContent = picture ? '' : username[0].toUpperCase();
+}
+
+// Members lists carry everyone's current picture; a message only knows its author's picture
+// from when it was loaded, so the members list (and live updates) win when we have them.
+function avatarOf(userId, fallback = null) {
+  return state.avatars.has(userId) ? state.avatars.get(userId) : fallback;
+}
+function rememberAvatars(server) {
+  for (const m of server.members) state.avatars.set(m.id, m.avatar ?? null);
+}
+
+// Someone (maybe us) changed their picture.
+function applyUser(u) {
+  state.avatars.set(u.id, u.avatar);
+  for (const s of state.servers.values()) for (const m of s.members) if (m.id === u.id) m.avatar = u.avatar;
+  if (u.id === state.me?.id) {
+    state.me.avatar = u.avatar;
+    setAvatar($('#me-avatar'), state.me.username, u.avatar);
+    const preview = $('#account-avatar');
+    if (preview) setAvatar(preview, state.me.username, u.avatar);
+    $('#avatar-remove')?.classList.toggle('hidden', !u.avatar);
+  }
+  renderMembers();
+  renderChannels();
+  renderMessages();
 }
 
 function iconButton(label, title, onclick) {
