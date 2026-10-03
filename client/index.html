@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Burrow</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="style.css" />
+  <script>
+    // Apply the saved theme before first paint to avoid a flash.
+    try { const t = localStorage.getItem('theme'); if (t) document.documentElement.dataset.theme = t; } catch {}
+  </script>
+</head>
+<body>
+  <!-- Login / register -->
+  <div id="auth" class="auth hidden">
+    <div class="auth-scene" aria-hidden="true">
+      <svg viewBox="0 0 600 800" preserveAspectRatio="xMidYMax slice">
+        <rect width="600" height="800" fill="var(--scene-sky)" />
+        <circle cx="430" cy="210" r="70" fill="var(--scene-sun)" />
+        <g fill="var(--scene-far)">
+          <path d="M0 520 L40 430 L80 520 L110 450 L150 520 L190 410 L230 520 L270 460 L310 520 L350 420 L390 520 L430 455 L470 520 L510 430 L550 520 L580 470 L600 500 V800 H0Z" />
+        </g>
+        <g fill="var(--scene-mid)">
+          <path d="M0 600 L30 510 L60 600 L100 480 L140 600 L170 530 L200 600 L250 470 L300 600 L330 540 L360 600 L410 490 L460 600 L500 520 L540 600 L580 500 L600 560 V800 H0Z" />
+        </g>
+        <g fill="var(--scene-near)">
+          <path d="M-20 800 L60 560 L140 800Z M90 800 L170 610 L250 800Z M380 800 L470 540 L560 800Z M500 800 L570 620 L640 800Z" />
+          <ellipse cx="300" cy="800" rx="170" ry="90" />
+        </g>
+        <ellipse cx="300" cy="790" rx="46" ry="34" fill="var(--scene-hole)" />
+      </svg>
+      <div class="auth-brand"><span class="logo-mark"></span>Burrow</div>
+      <p class="auth-tagline">A cozy corner of the internet for you and your friends.</p>
+    </div>
+    <div class="auth-side">
+      <form id="auth-form" class="auth-card">
+        <h1 id="auth-title">Welcome back</h1>
+        <p class="muted" id="auth-subtitle">Log in to chat with your friends.</p>
+        <label id="server-url-row">Server address
+          <input id="server-url" placeholder="my-server.example.com:3000" autocomplete="url" />
+        </label>
+        <label>Username <input id="username" autocomplete="username" required /></label>
+        <label>Password <input id="password" type="password" autocomplete="current-password" required /></label>
+        <label id="reg-code-row" class="hidden">Registration code
+          <input id="reg-code" placeholder="Ask whoever runs the server" />
+        </label>
+        <div id="auth-error" class="error"></div>
+        <button type="submit" class="btn" id="auth-submit">Log in</button>
+        <p class="muted small center"><a href="#" id="auth-toggle">Need an account? Register</a></p>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main app -->
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <div class="brand"><span class="logo-mark"></span>Burrow</div>
+
+      <div class="burrows">
+        <div class="eyebrow">Your burrows</div>
+        <div id="server-list" class="burrow-tiles"></div>
+      </div>
+
+      <div class="server-card">
+        <div class="server-card-head">
+          <h2 id="server-name">No burrow yet</h2>
+          <button class="icon-btn" id="server-menu-btn" title="Burrow settings and invite">
+            <svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm8.9 3-1.6-.4a7.4 7.4 0 0 0-.7-1.7l.9-1.4-1.9-1.9-1.4.9a7.4 7.4 0 0 0-1.7-.7L13 3.1h-2l-.4 1.7a7.4 7.4 0 0 0-1.7.7l-1.4-.9-1.9 1.9.9 1.4a7.4 7.4 0 0 0-.7 1.7l-1.7.4v2l1.7.4c.2.6.4 1.2.7 1.7l-.9 1.4 1.9 1.9 1.4-.9c.5.3 1.1.5 1.7.7l.4 1.7h2l.4-1.7c.6-.2 1.2-.4 1.7-.7l1.4.9 1.9-1.9-.9-1.4c.3-.5.5-1.1.7-1.7l1.6-.4v-2Z"/></svg>
+          </button>
+        </div>
+        <div class="section-title">
+          <span>Rooms</span>
+          <button class="icon-btn small-btn hidden" id="add-channel" title="New room">+</button>
+        </div>
+        <ul id="channel-list"></ul>
+      </div>
+
+      <footer class="user-card">
+        <span class="avatar" id="me-avatar"></span>
+        <div class="user-meta">
+          <span id="me-name" class="me-name"></span>
+          <span id="conn-status" class="conn">Connecting…</span>
+        </div>
+        <button class="icon-btn" id="theme-toggle" title="Switch light / dark">
+          <svg viewBox="0 0 24 24"><path d="M21 14.5A8.5 8.5 0 0 1 9.5 3 8.5 8.5 0 1 0 21 14.5Z"/></svg>
+        </button>
+        <button class="icon-btn" id="logout" title="Log out">
+          <svg viewBox="0 0 24 24"><path d="M10 4H5v16h5M15 8l4 4-4 4M19 12H9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </footer>
+    </aside>
+
+    <main class="chat">
+      <header class="chat-header">
+        <div>
+          <h1 id="channel-name"></h1>
+          <div id="channel-sub" class="muted small"></div>
+        </div>
+        <button class="icon-btn" id="members-toggle" title="Show who's here">
+          <svg viewBox="0 0 24 24"><path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-6 9c0-3.3 2.7-6 6-6s6 2.7 6 6H3Zm13.5-9a3 3 0 1 0 0-6M17 14c2.5.4 4 2.6 4 6h-3"/></svg>
+        </button>
+      </header>
+      <div id="messages" class="messages"></div>
+      <div class="composer-wrap">
+        <div id="typing" class="typing"></div>
+        <form id="composer" class="composer">
+          <textarea id="composer-input" rows="1" placeholder="Say something" maxlength="4000"></textarea>
+          <button type="submit" class="send" id="send-btn" title="Send">
+            <svg viewBox="0 0 24 24"><path d="M4 12 20 4l-4 16-4-6-8-2Z"/></svg>
+          </button>
+        </form>
+      </div>
+      <div id="empty-state" class="empty-state hidden">
+        <div class="empty-illustration"><span class="logo-mark big"></span></div>
+        <h2>Nothing here yet</h2>
+        <p class="muted">Dig a new burrow for your friends, or join one with an invite code.</p>
+        <button id="empty-add" class="btn">Create or join a burrow</button>
+      </div>
+    </main>
+
+    <aside class="member-pane" id="member-pane">
+      <div id="member-list"></div>
+    </aside>
+  </div>
+
+  <!-- Modal -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-card" id="modal-card"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

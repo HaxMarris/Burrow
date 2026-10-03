@@ -1,0 +1,20 @@
+{
+  "name": "burrow-chat-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted Discord-style chat server",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "start": "node --no-warnings src/index.ts",
+    "dev": "node --no-warnings --watch src/index.ts",
+    "test": "node --no-warnings --test test/*.test.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13"
+  }
+}

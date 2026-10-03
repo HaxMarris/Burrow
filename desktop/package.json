@@ -1,0 +1,29 @@
+{
+  "name": "burrow-chat",
+  "productName": "Burrow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop client for a self-hosted Burrow chat server",
+  "main": "main.js",
+  "scripts": {
+    "copy-client": "node scripts/copy-client.js",
+    "start": "npm run copy-client && electron .",
+    "dist": "npm run copy-client && electron-builder",
+    "dist:win": "npm run copy-client && electron-builder --win",
+    "dist:mac": "npm run copy-client && electron-builder --mac",
+    "dist:linux": "npm run copy-client && electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "chat.burrow.desktop",
+    "productName": "Burrow",
+    "files": ["main.js", "app/**/*"],
+    "win": { "target": "nsis" },
+    "mac": { "target": "dmg", "category": "public.app-category.social-networking" },
+    "linux": { "target": "AppImage", "category": "Chat" },
+    "nsis": { "oneClick": true }
+  }
+}

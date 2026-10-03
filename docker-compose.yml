@@ -1,0 +1,14 @@
+services:
+  burrow:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Friends need this code to create an account. Change it!
+      REGISTRATION_CODE: "change-me"
+    volumes:
+      - burrow-data:/data
+
+volumes:
+  burrow-data:
