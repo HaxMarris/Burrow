@@ -27,7 +27,7 @@ chat-app/
 ├── client/     The chat UI (plain HTML/CSS/JS), served by the server and bundled into the desktop app
 ├── desktop/    Electron wrapper that packages the client as an installable app
 ├── Dockerfile, docker-compose.yml
-└── .github/workflows/desktop-release.yml   Builds installers on GitHub when you push a tag
+└── .github/workflows/desktop-release.yml   Builds installers on GitHub when you publish a release
 ```
 
 The server has one runtime dependency (`ws`). It uses Node's built-in SQLite
@@ -92,6 +92,12 @@ type a new tag such as `v0.1.0`, and click **Publish release**. The `Desktop rel
 builds a Windows `.exe`, macOS `.dmg` and Linux `.AppImage` and attaches them to that release,
 usually within about ten minutes. Send your friends the release link.
 
+**Updates:** the desktop app checks for a newer release when it starts and every six hours.
+On Windows and Linux it downloads the update in the background and asks to restart; if they pick
+*Later*, it installs the next time they quit. On macOS it shows a *Download* button that opens the
+release page, because macOS only lets signed apps update themselves. Release tags must look like
+`v1.2.3`; the tag becomes the app's version number.
+
 You can also run the workflow by hand from the **Actions** tab to get test builds without publishing anything.
 
 To build locally instead (each OS builds its own installer best):
@@ -130,6 +136,8 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing).
+
 Rough order of what would make it feel more like Discord:
 
 1. Image and file uploads (stored on disk next to the database)
@@ -137,7 +145,6 @@ Rough order of what would make it feel more like Discord:
 3. Direct messages
 4. Roles and permissions (moderators, private channels)
 5. Voice channels with WebRTC (the big one; likely via a small SFU such as mediasoup or LiveKit)
-6. Auto-update for the desktop app
 
 ## Alternatives
 

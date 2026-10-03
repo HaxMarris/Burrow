@@ -2,6 +2,7 @@
 // server address on first launch and remembers it.
 const { app, BrowserWindow, shell, Menu } = require('electron');
 const path = require('node:path');
+const { startUpdateChecks } = require('./updater');
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -39,6 +40,7 @@ if (process.platform === 'win32') app.setAppUserModelId('chat.burrow.desktop'); 
 app.whenReady().then(() => {
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
   createWindow();
+  startUpdateChecks(() => BrowserWindow.getAllWindows()[0]);
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
