@@ -50,6 +50,18 @@ export function openDb(file: string): Db {
       edited_at  INTEGER
     );
     CREATE INDEX IF NOT EXISTS messages_by_channel ON messages(channel_id, id);
+    CREATE TABLE IF NOT EXISTS attachments (
+      id          TEXT PRIMARY KEY,
+      channel_id  INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      uploader_id INTEGER NOT NULL REFERENCES users(id),
+      message_id  INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+      position    INTEGER NOT NULL DEFAULT 0,
+      name        TEXT NOT NULL,
+      type        TEXT NOT NULL,
+      size        INTEGER NOT NULL,
+      created_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS attachments_by_message ON attachments(message_id);
   `);
   // Added with voice rooms: 'text' or 'voice'.
   const channelCols = db.prepare('PRAGMA table_info(channels)').all() as { name: string }[];

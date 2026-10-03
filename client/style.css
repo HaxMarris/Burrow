@@ -269,3 +269,33 @@ ul { list-style: none; margin: 0; padding: 0; }
 .hang-up:hover { color: #fff; background: var(--berry); }
 .kind-choice { display: flex; gap: 18px; margin: 4px 0 2px; }
 .kind-choice label { flex-direction: row; align-items: center; gap: 6px; color: var(--text); font-weight: 600; font-size: 14px; }
+
+/* ---------- attachments ---------- */
+.composer:has(#attach-btn:not(.hidden)) { padding-left: 6px; }
+.composer .attach { align-self: flex-end; margin-bottom: 2px; }
+.pending-files { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.pending { position: relative; display: flex; align-items: center; gap: 8px; max-width: 260px; background: var(--surface); border: 1.5px solid var(--line); border-radius: 12px; padding: 6px 30px 6px 6px; overflow: hidden; box-shadow: var(--shadow); }
+.pending img, .pending .file-icon { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; flex: none; }
+.pending-name { font-size: 13px; font-weight: 700; color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pending-meta { font-size: 12px; color: var(--muted); flex: none; }
+.pending .bar { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--moss); transition: width .15s; }
+.pending.failed { border-color: var(--berry); }
+.pending.failed .pending-meta { color: var(--berry); }
+.pending-remove { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; border: 0; border-radius: 50%; background: var(--surface-2); color: var(--muted); font-size: 16px; line-height: 1; }
+.pending-remove:hover { background: var(--berry); color: #fff; }
+.file-icon { display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
+.file-icon svg { width: 22px; height: 22px; fill: currentColor; }
+.attachments { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin: 4px 0 2px; }
+.att-image { max-width: min(400px, 100%); max-height: 300px; border-radius: 12px; cursor: zoom-in; display: block; background: var(--surface-2); }
+.att-video { max-width: min(480px, 100%); max-height: 320px; border-radius: 12px; background: #000; }
+.att-file { display: flex; align-items: center; gap: 10px; padding: 8px 14px 8px 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; text-decoration: none; color: var(--text); max-width: 360px; }
+.att-file .file-icon { width: 40px; height: 40px; border-radius: 10px; flex: none; }
+.att-file:hover { border-color: var(--moss); }
+.att-file-text { display: flex; flex-direction: column; min-width: 0; }
+.att-file-name { font-weight: 700; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat { position: relative; }
+.chat.dropping::after { content: "Drop to attach"; position: absolute; inset: 12px; display: grid; place-items: center; border: 2.5px dashed var(--moss); border-radius: var(--radius); background: color-mix(in srgb, var(--bg) 85%, transparent); font-family: var(--font-head); font-size: 22px; color: var(--accent); pointer-events: none; z-index: 5; }
+.modal-card.wide { width: min(92vw, 1100px); max-width: none; }
+.lightbox img { display: block; max-width: 100%; max-height: 75vh; margin: 0 auto 14px; border-radius: 12px; }
+
+a.btn { text-decoration: none; display: inline-block; }

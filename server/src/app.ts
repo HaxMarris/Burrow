@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdir, unlink, stat } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { extname, join, normalize } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Db } from './db.ts';
@@ -13,6 +15,10 @@ export interface AppOptions {
   registrationCode?: string;
   /** LiveKit settings; voice rooms are turned off without them. */
   voice?: VoiceOptions;
+  /** Where uploaded files are stored; uploads are turned off without it. */
+  uploadDir?: string;
+  /** Largest upload in bytes (default 25 MB). */
+  maxUploadBytes?: number;
 }
 
 type User = { id: number; username: string };
@@ -27,6 +33,12 @@ class HttpError extends Error {
 }
 
 const MAX_MESSAGE_LENGTH = 4000;
+const MAX_ATTACHMENTS = 10;
+// Shown in the page. Everything else downloads, so an uploaded .html or .svg can't run as part of Burrow.
+const INLINE_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif',
+  'video/mp4', 'video/webm', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
+]);
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -63,14 +75,37 @@ export function createApp(opts: AppOptions): Server {
       (r) => r.user_id,
     );
 
-  const messageById = (id: number) =>
-    db
+  const attachmentJson = (a: Json) => ({
+    id: a.id,
+    name: a.name,
+    type: a.type,
+    size: a.size,
+    url: `/api/attachments/${a.id}/${encodeURIComponent(a.name as string)}`,
+  });
+
+  /** Adds each message's attachments (oldest first) to a list of message rows. */
+  const withAttachments = (rows: Json[]) => {
+    if (!rows.length) return rows;
+    const ids = rows.map((r) => r.id as number);
+    const atts = db
+      .prepare(
+        `SELECT id, message_id, name, type, size FROM attachments
+         WHERE message_id IN (${ids.map(() => '?').join(',')}) ORDER BY position`,
+      )
+      .all(...ids) as Json[];
+    return rows.map((r) => ({ ...r, attachments: atts.filter((a) => a.message_id === r.id).map(attachmentJson) }));
+  };
+
+  const messageById = (id: number) => {
+    const row = db
       .prepare(
         `SELECT m.id, m.channel_id AS channelId, m.content, m.created_at AS createdAt, m.edited_at AS editedAt,
                 u.id AS authorId, u.username AS author
          FROM messages m JOIN users u ON u.id = m.author_id WHERE m.id = ?`,
       )
       .get(id) as Json | undefined;
+    return row && withAttachments([row])[0];
+  };
 
   const serverSummary = (serverId: number) => {
     const server = db
@@ -144,15 +179,30 @@ export function createApp(opts: AppOptions): Server {
         .all(userId) as { user_id: number }[]
     ).map((r) => r.user_id);
 
-  const postMessage = (user: User, channelId: number, content: unknown) => {
+  const postMessage = (user: User, channelId: number, content: unknown, attachmentIds: unknown = []) => {
     const channel = channelById(channelId);
     if (!channel || !isMember(channel.serverId, user.id)) throw new HttpError(404, 'Room not found');
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
-    if (typeof content !== 'string' || !content.trim()) throw new HttpError(400, 'Message is empty');
+    if (content == null) content = '';
+    if (typeof content !== 'string') throw new HttpError(400, 'Message is empty');
     if (content.length > MAX_MESSAGE_LENGTH) throw new HttpError(400, 'Message is too long');
+    const ids = Array.isArray(attachmentIds) ? [...new Set(attachmentIds.map(String))] : [];
+    if (ids.length > MAX_ATTACHMENTS) throw new HttpError(400, `At most ${MAX_ATTACHMENTS} files per message`);
+    // Only your own uploads to this room that aren't on a message yet.
+    const usable = ids.filter(
+      (id) =>
+        !!db
+          .prepare('SELECT 1 FROM attachments WHERE id = ? AND uploader_id = ? AND channel_id = ? AND message_id IS NULL')
+          .get(id, user.id, channelId),
+    );
+    if (usable.length !== ids.length) throw new HttpError(400, 'One of the files is missing or already sent');
+    if (!content.trim() && !usable.length) throw new HttpError(400, 'Message is empty');
     const r = db
       .prepare('INSERT INTO messages (channel_id, author_id, content, created_at) VALUES (?, ?, ?, ?)')
       .run(channelId, user.id, content, now());
+    usable.forEach((id, position) =>
+      db.prepare('UPDATE attachments SET message_id = ?, position = ? WHERE id = ?').run(Number(r.lastInsertRowid), position, id),
+    );
     const message = messageById(Number(r.lastInsertRowid))!;
     broadcastToServer(channel.serverId, { type: 'message', message });
     return message;
@@ -169,7 +219,7 @@ export function createApp(opts: AppOptions): Server {
   route(
     'GET',
     '/api/config',
-    () => ({ registrationCodeRequired: !!opts.registrationCode, voice: !!opts.voice }),
+    () => ({ registrationCodeRequired: !!opts.registrationCode, voice: !!opts.voice, maxUploadBytes: opts.uploadDir ? maxUpload : 0 }),
     false,
   );
 
@@ -255,6 +305,11 @@ export function createApp(opts: AppOptions): Server {
     if (owner.owner_id === user.id) {
       broadcastToServer(serverId, { type: 'server_deleted', serverId });
       for (const [u, c] of inVoice) if (channelById(c)?.serverId === serverId) inVoice.delete(u);
+      removeFiles(
+        db
+          .prepare('SELECT a.id FROM attachments a JOIN channels c ON c.id = a.channel_id WHERE c.server_id = ?')
+          .all(serverId) as Json[],
+      );
       db.prepare('DELETE FROM servers WHERE id = ?').run(serverId);
     } else {
       const voiceChannel = inVoice.get(user.id);
@@ -303,12 +358,12 @@ export function createApp(opts: AppOptions): Server {
          FROM messages m JOIN users u ON u.id = m.author_id
          WHERE m.channel_id = ? AND m.id < ? ORDER BY m.id DESC LIMIT ?`,
       )
-      .all(channel.id, before, limit);
-    return rows.reverse();
+      .all(channel.id, before, limit) as Json[];
+    return withAttachments(rows.reverse());
   });
 
   route('POST', '/api/channels/:id/messages', ({ user, params, body }) =>
-    postMessage(user, Number(params[0]), body.content),
+    postMessage(user, Number(params[0]), body.content, body.attachmentIds),
   );
 
   const ownMessage = (user: User, id: number) => {
@@ -323,7 +378,8 @@ export function createApp(opts: AppOptions): Server {
   route('PATCH', '/api/messages/:id', ({ user, params, body }) => {
     const id = Number(params[0]);
     const channel = ownMessage(user, id);
-    if (typeof body.content !== 'string' || !body.content.trim()) throw new HttpError(400, 'Message is empty');
+    const hasFiles = !!db.prepare('SELECT 1 FROM attachments WHERE message_id = ?').get(id);
+    if (typeof body.content !== 'string' || (!body.content.trim() && !hasFiles)) throw new HttpError(400, 'Message is empty');
     if (body.content.length > MAX_MESSAGE_LENGTH) throw new HttpError(400, 'Message is too long');
     db.prepare('UPDATE messages SET content = ?, edited_at = ? WHERE id = ?').run(body.content, now(), id);
     const message = messageById(id)!;
@@ -334,10 +390,98 @@ export function createApp(opts: AppOptions): Server {
   route('DELETE', '/api/messages/:id', ({ user, params }) => {
     const id = Number(params[0]);
     const channel = ownMessage(user, id);
+    removeFiles(db.prepare('SELECT id FROM attachments WHERE message_id = ?').all(id) as Json[]);
     db.prepare('DELETE FROM messages WHERE id = ?').run(id);
     broadcastToServer(channel.serverId, { type: 'message_deleted', id, channelId: channel.id });
     return { ok: true };
   });
+
+  // ---- uploads ------------------------------------------------------------
+
+  const maxUpload = opts.maxUploadBytes ?? 25 * 1024 * 1024;
+  const filePath = (id: string) => join(opts.uploadDir!, id);
+  const removeFiles = (rows: Json[]) => {
+    if (!opts.uploadDir) return;
+    for (const r of rows) unlink(filePath(r.id as string)).catch(() => {});
+  };
+
+  // The file is the raw request body; its name comes in the x-filename header.
+  const handleUpload = async (req: IncomingMessage, res: ServerResponse, channelId: number) => {
+    const user = userByToken(req.headers.authorization?.replace(/^Bearer /, ''));
+    if (!user) throw new HttpError(401, 'Not logged in');
+    if (!opts.uploadDir) throw new HttpError(503, 'Uploads are not set up on this server');
+    const channel = channelById(channelId);
+    if (!channel || !isMember(channel.serverId, user.id)) throw new HttpError(404, 'Room not found');
+    if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
+    const declared = Number(req.headers['content-length']);
+    if (declared > maxUpload) throw new HttpError(413, `Files can be at most ${Math.round(maxUpload / 1048576)} MB`);
+    let name = 'file';
+    try {
+      name = decodeURIComponent(String(req.headers['x-filename'] ?? 'file'));
+    } catch {}
+    name = name.replace(/[\\/\x00-\x1f]/g, '_').trim().slice(-200) || 'file';
+    const type = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase() || 'application/octet-stream';
+
+    await mkdir(opts.uploadDir, { recursive: true });
+    const id = randomBytes(16).toString('base64url');
+    const out = createWriteStream(filePath(id));
+    let size = 0;
+    await new Promise<void>((resolve, reject) => {
+      req.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > maxUpload) {
+          req.pause();
+          reject(new HttpError(413, `Files can be at most ${Math.round(maxUpload / 1048576)} MB`));
+        } else out.write(chunk);
+      });
+      req.on('end', () => out.end(resolve));
+      req.on('error', reject);
+      out.on('error', reject);
+    }).catch((err) => {
+      out.destroy();
+      unlink(filePath(id)).catch(() => {});
+      throw err;
+    });
+    if (!size) {
+      unlink(filePath(id)).catch(() => {});
+      throw new HttpError(400, 'File is empty');
+    }
+    db.prepare(
+      'INSERT INTO attachments (id, channel_id, uploader_id, name, type, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run(id, channel.id, user.id, name, type, size, now());
+    send(res, 200, attachmentJson({ id, name, type, size }));
+  };
+
+  // Attachment links are unguessable (128 random bits), so images work in <img> tags without a login.
+  const serveAttachment = async (req: IncomingMessage, res: ServerResponse, id: string) => {
+    const a = db.prepare('SELECT name, type, size FROM attachments WHERE id = ? AND message_id IS NOT NULL').get(id) as
+      | { name: string; type: string; size: number }
+      | undefined;
+    if (!a || !opts.uploadDir || !(await stat(filePath(id)).catch(() => null))) throw new HttpError(404, 'File not found');
+    const inline = INLINE_TYPES.has(a.type);
+    res.writeHead(200, {
+      'content-type': inline ? a.type : 'application/octet-stream',
+      'content-length': a.size,
+      'content-disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(a.name)}`,
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; sandbox",
+      'cache-control': 'private, max-age=31536000, immutable',
+    });
+    if (req.method === 'HEAD') return res.end();
+    createReadStream(filePath(id)).pipe(res);
+  };
+
+  // Uploads that never made it into a message are cleared out after a day.
+  if (opts.uploadDir) {
+    const sweep = () => {
+      const stale = db
+        .prepare('SELECT id FROM attachments WHERE message_id IS NULL AND created_at < ?')
+        .all(now() - 24 * 3600_000) as Json[];
+      removeFiles(stale);
+      db.prepare('DELETE FROM attachments WHERE message_id IS NULL AND created_at < ?').run(now() - 24 * 3600_000);
+    };
+    setInterval(sweep, 3600_000).unref();
+  }
 
   // ---- HTTP plumbing ------------------------------------------------------
 
@@ -386,7 +530,7 @@ export function createApp(opts: AppOptions): Server {
   const server = createServer(async (req, res) => {
     // The desktop client loads its UI locally and talks to this server cross-origin.
     res.setHeader('access-control-allow-origin', '*');
-    res.setHeader('access-control-allow-headers', 'authorization, content-type');
+    res.setHeader('access-control-allow-headers', 'authorization, content-type, x-filename');
     res.setHeader('access-control-allow-methods', 'GET, POST, PATCH, DELETE, OPTIONS');
     if (req.method === 'OPTIONS') return res.writeHead(204).end();
 
@@ -394,6 +538,10 @@ export function createApp(opts: AppOptions): Server {
     if (!url.pathname.startsWith('/api/')) return serveStatic(res, url.pathname);
 
     try {
+      const upload = req.method === 'POST' && url.pathname.match(/^\/api\/channels\/(\d+)\/attachments$/);
+      if (upload) return await handleUpload(req, res, Number(upload[1]));
+      const file = (req.method === 'GET' || req.method === 'HEAD') && url.pathname.match(/^\/api\/attachments\/([\w-]+)(\/|$)/);
+      if (file) return await serveAttachment(req, res, file[1]);
       for (const r of routes) {
         const m = r.method === req.method && url.pathname.match(r.pattern);
         if (!m) continue;
@@ -453,7 +601,7 @@ export function createApp(opts: AppOptions): Server {
       }
       try {
         if (msg.type === 'send') {
-          postMessage(user, Number(msg.channelId), msg.content);
+          postMessage(user, Number(msg.channelId), msg.content, msg.attachmentIds);
         } else if (msg.type === 'voice_join') {
           const channel = channelById(Number(msg.channelId));
           if (!channel || channel.kind !== 'voice' || !isMember(channel.serverId, user.id))

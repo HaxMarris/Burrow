@@ -11,6 +11,7 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Accounts with username and password, protected by an optional registration code so strangers can't sign up
 - Burrows (shared spaces) you create, with an invite code to share, and rooms the host can add
 - Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) with mute and who's-talking rings
+- Image and file sharing: attach, paste or drag in up to 10 files per message, with inline image and video previews
 - Real-time messaging over WebSockets, with typing indicators and online/offline presence
 - Full message history with infinite scroll back, edit and delete your own messages (↑ edits your last one)
 - Light formatting: `**bold**`, `*italic*`, `` `code` ``, code blocks, clickable links, `@mentions` (highlighted, and they trigger a desktop notification)
@@ -18,7 +19,7 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Desktop app for Windows, macOS and Linux (Electron), plus the same UI in any browser
 - Scandinavian-forest look with light and dark themes
 
-**Not yet:** video and screen sharing, image and file uploads, DMs, roles and permissions, reactions. See [Roadmap](#roadmap).
+**Not yet:** video and screen sharing, DMs, roles and permissions, reactions. See [Roadmap](#roadmap).
 
 ## Layout
 
@@ -73,6 +74,8 @@ Data goes to `server/data/chat.db`.
 | `BACKUP_DIR`        | `backups/` next to the database | Where the daily database copies go (`/data/backups` in Docker). |
 | `BACKUP_KEEP`       | `7`                    | How many daily copies to keep. `0` turns backups off.               |
 | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | unset (voice off) | Shared with LiveKit; turns on voice rooms.             |
+| `UPLOAD_DIR`        | `uploads/` next to the database | Where shared files are stored (`/data/uploads` in Docker).  |
+| `MAX_UPLOAD_MB`     | `25`                   | Largest file someone can share.                                     |
 | `LIVEKIT_URL`       | same address as Burrow | Where apps reach LiveKit, if not routed through Burrow's address.   |
 
 ### Letting friends reach it
@@ -184,15 +187,14 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), and voice rooms.
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, and image and file sharing.
 
 Rough order of what would make it feel more like Discord:
 
-1. Image and file uploads (stored on disk next to the database)
-2. Emoji reactions and replies
-3. Direct messages
-4. Roles and permissions (moderators, private channels)
-5. Video and screen sharing in voice rooms
+1. Emoji reactions and replies
+2. Direct messages
+3. Roles and permissions (moderators, private channels)
+4. Video and screen sharing in voice rooms
 
 ## Alternatives
 
