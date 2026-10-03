@@ -299,3 +299,27 @@ ul { list-style: none; margin: 0; padding: 0; }
 .lightbox img { display: block; max-width: 100%; max-height: 75vh; margin: 0 auto 14px; border-radius: 12px; }
 
 a.btn { text-decoration: none; display: inline-block; }
+
+/* ---------- replies & reactions ---------- */
+.line .actions .icon-btn svg { width: 18px; height: 18px; }
+.reply-quote { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); margin: 2px 0 2px; padding-left: 14px; position: relative; cursor: pointer; max-width: 100%; }
+.reply-quote::before { content: ""; position: absolute; left: 2px; top: 50%; width: 9px; height: 10px; border-left: 2px solid var(--line); border-top: 2px solid var(--line); border-top-left-radius: 6px; }
+.reply-author { font-weight: 800; flex: none; }
+.reply-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.reply-quote:hover .reply-text { color: var(--text); }
+.line.flash { animation: flash 1.6s ease-out; }
+@keyframes flash { 0%, 40% { background: var(--mention-bg); } 100% { background: transparent; } }
+.reactions { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 2px; }
+.reaction { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 9px; border-radius: 999px; border: 1.5px solid var(--line); background: var(--surface); color: var(--text); font-weight: 700; font-size: 13px; }
+.reaction:hover { border-color: var(--moss); }
+.reaction.mine { background: var(--accent-soft); border-color: var(--accent); color: var(--text-strong); }
+.r-emoji { font-size: 16px; line-height: 1; }
+.reaction.add { padding: 0 6px; color: var(--muted); opacity: 0; transition: opacity .1s; }
+.reaction.add svg { width: 16px; height: 16px; fill: currentColor; }
+.line:hover .reaction.add { opacity: 1; }
+.emoji-picker { position: fixed; z-index: 20; display: grid; grid-template-columns: repeat(8, 36px); gap: 2px; padding: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
+.emoji-picker button { width: 36px; height: 36px; border: 0; border-radius: 9px; background: none; font-size: 21px; line-height: 1; }
+.emoji-picker button:hover { background: var(--hover); transform: scale(1.1); }
+.reply-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--muted); background: var(--surface-2); border-radius: 12px 12px 0 0; padding: 4px 6px 4px 14px; margin: 0 12px -2px; }
+.reply-bar b { color: var(--text-strong); }
+
