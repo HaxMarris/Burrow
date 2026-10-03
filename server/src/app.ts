@@ -34,6 +34,8 @@ class HttpError extends Error {
 
 const MAX_MESSAGE_LENGTH = 4000;
 const MAX_ATTACHMENTS = 10;
+const MAX_REACTIONS = 20; // different emoji on one message
+const EMOJI = /\p{Extended_Pictographic}|\p{Regional_Indicator}/u;
 // Shown in the page. Everything else downloads, so an uploaded .html or .svg can't run as part of Burrow.
 const INLINE_TYPES = new Set([
   'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif',
@@ -83,9 +85,33 @@ export function createApp(opts: AppOptions): Server {
     url: `/api/attachments/${a.id}/${encodeURIComponent(a.name as string)}`,
   });
 
-  /** Adds each message's attachments (oldest first) to a list of message rows. */
+  const reactionsFor = (messageId: number) => {
+    const rows = db
+      .prepare('SELECT emoji, user_id FROM reactions WHERE message_id = ? ORDER BY created_at, rowid')
+      .all(messageId) as { emoji: string; user_id: number }[];
+    const byEmoji = new Map<string, number[]>();
+    for (const r of rows) byEmoji.set(r.emoji, [...(byEmoji.get(r.emoji) ?? []), r.user_id]);
+    return [...byEmoji].map(([emoji, userIds]) => ({ emoji, userIds }));
+  };
+
+  /** A short preview of the message being replied to, or { deleted: true } if it's gone. */
+  const replyPreview = (id: unknown) => {
+    if (id == null) return null;
+    const m = db
+      .prepare(
+        `SELECT m.id, m.content, u.id AS authorId, u.username AS author,
+                EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id) AS hasAttachments
+         FROM messages m JOIN users u ON u.id = m.author_id WHERE m.id = ?`,
+      )
+      .get(id as number) as Json | undefined;
+    if (!m) return { deleted: true };
+    return { ...m, content: (m.content as string).slice(0, 160), hasAttachments: !!m.hasAttachments };
+  };
+
+  /** Adds attachments, reactions and reply previews to a list of message rows. */
   const withAttachments = (rows: Json[]) => {
     if (!rows.length) return rows;
+    rows = rows.map(({ replyToId, ...r }) => ({ ...r, replyTo: replyPreview(replyToId), reactions: reactionsFor(r.id as number) }));
     const ids = rows.map((r) => r.id as number);
     const atts = db
       .prepare(
@@ -100,7 +126,7 @@ export function createApp(opts: AppOptions): Server {
     const row = db
       .prepare(
         `SELECT m.id, m.channel_id AS channelId, m.content, m.created_at AS createdAt, m.edited_at AS editedAt,
-                u.id AS authorId, u.username AS author
+                m.reply_to AS replyToId, u.id AS authorId, u.username AS author
          FROM messages m JOIN users u ON u.id = m.author_id WHERE m.id = ?`,
       )
       .get(id) as Json | undefined;
@@ -179,7 +205,7 @@ export function createApp(opts: AppOptions): Server {
         .all(userId) as { user_id: number }[]
     ).map((r) => r.user_id);
 
-  const postMessage = (user: User, channelId: number, content: unknown, attachmentIds: unknown = []) => {
+  const postMessage = (user: User, channelId: number, content: unknown, attachmentIds: unknown = [], replyTo: unknown = null) => {
     const channel = channelById(channelId);
     if (!channel || !isMember(channel.serverId, user.id)) throw new HttpError(404, 'Room not found');
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
@@ -197,9 +223,17 @@ export function createApp(opts: AppOptions): Server {
     );
     if (usable.length !== ids.length) throw new HttpError(400, 'One of the files is missing or already sent');
     if (!content.trim() && !usable.length) throw new HttpError(400, 'Message is empty');
+    let replyId: number | null = null;
+    if (replyTo != null) {
+      const target = db.prepare('SELECT channel_id FROM messages WHERE id = ?').get(Number(replyTo)) as
+        | { channel_id: number }
+        | undefined;
+      if (!target || target.channel_id !== channelId) throw new HttpError(400, "Can't reply to that message");
+      replyId = Number(replyTo);
+    }
     const r = db
-      .prepare('INSERT INTO messages (channel_id, author_id, content, created_at) VALUES (?, ?, ?, ?)')
-      .run(channelId, user.id, content, now());
+      .prepare('INSERT INTO messages (channel_id, author_id, content, created_at, reply_to) VALUES (?, ?, ?, ?, ?)')
+      .run(channelId, user.id, content, now(), replyId);
     usable.forEach((id, position) =>
       db.prepare('UPDATE attachments SET message_id = ?, position = ? WHERE id = ?').run(Number(r.lastInsertRowid), position, id),
     );
@@ -354,7 +388,7 @@ export function createApp(opts: AppOptions): Server {
     const rows = db
       .prepare(
         `SELECT m.id, m.channel_id AS channelId, m.content, m.created_at AS createdAt, m.edited_at AS editedAt,
-                u.id AS authorId, u.username AS author
+                m.reply_to AS replyToId, u.id AS authorId, u.username AS author
          FROM messages m JOIN users u ON u.id = m.author_id
          WHERE m.channel_id = ? AND m.id < ? ORDER BY m.id DESC LIMIT ?`,
       )
@@ -363,7 +397,7 @@ export function createApp(opts: AppOptions): Server {
   });
 
   route('POST', '/api/channels/:id/messages', ({ user, params, body }) =>
-    postMessage(user, Number(params[0]), body.content, body.attachmentIds),
+    postMessage(user, Number(params[0]), body.content, body.attachmentIds, body.replyTo),
   );
 
   const ownMessage = (user: User, id: number) => {
@@ -385,6 +419,28 @@ export function createApp(opts: AppOptions): Server {
     const message = messageById(id)!;
     broadcastToServer(channel.serverId, { type: 'message_updated', message });
     return message;
+  });
+
+  // Adds your reaction, or takes it away if you'd already reacted with that emoji.
+  route('POST', '/api/messages/:id/reactions', ({ user, params, body }) => {
+    const id = Number(params[0]);
+    const msg = db.prepare('SELECT channel_id FROM messages WHERE id = ?').get(id) as { channel_id: number } | undefined;
+    const channel = msg && channelById(msg.channel_id);
+    if (!channel || !isMember(channel.serverId, user.id)) throw new HttpError(404, 'Message not found');
+    const emoji = typeof body.emoji === 'string' ? body.emoji.trim() : '';
+    if (!emoji || emoji.length > 16 || !EMOJI.test(emoji)) throw new HttpError(400, 'That is not an emoji');
+    const mine = db.prepare('SELECT 1 FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?').get(id, user.id, emoji);
+    if (mine) {
+      db.prepare('DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?').run(id, user.id, emoji);
+    } else {
+      const kinds = reactionsFor(id);
+      if (!kinds.some((k) => k.emoji === emoji) && kinds.length >= MAX_REACTIONS)
+        throw new HttpError(400, 'That message has all the reactions it can hold');
+      db.prepare('INSERT INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)').run(id, user.id, emoji, now());
+    }
+    const reactions = reactionsFor(id);
+    broadcastToServer(channel.serverId, { type: 'reactions', messageId: id, channelId: channel.id, reactions });
+    return { reactions };
   });
 
   route('DELETE', '/api/messages/:id', ({ user, params }) => {
@@ -601,7 +657,7 @@ export function createApp(opts: AppOptions): Server {
       }
       try {
         if (msg.type === 'send') {
-          postMessage(user, Number(msg.channelId), msg.content, msg.attachmentIds);
+          postMessage(user, Number(msg.channelId), msg.content, msg.attachmentIds, msg.replyTo);
         } else if (msg.type === 'voice_join') {
           const channel = channelById(Number(msg.channelId));
           if (!channel || channel.kind !== 'voice' || !isMember(channel.serverId, user.id))

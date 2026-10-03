@@ -12,6 +12,7 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Burrows (shared spaces) you create, with an invite code to share, and rooms the host can add
 - Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) with mute and who's-talking rings
 - Image and file sharing: attach, paste or drag in up to 10 files per message, with inline image and video previews
+- Emoji reactions and replies (a reply to you counts as a mention)
 - Real-time messaging over WebSockets, with typing indicators and online/offline presence
 - Full message history with infinite scroll back, edit and delete your own messages (↑ edits your last one)
 - Light formatting: `**bold**`, `*italic*`, `` `code` ``, code blocks, clickable links, `@mentions` (highlighted, and they trigger a desktop notification)
@@ -19,7 +20,7 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Desktop app for Windows, macOS and Linux (Electron), plus the same UI in any browser
 - Scandinavian-forest look with light and dark themes
 
-**Not yet:** video and screen sharing, DMs, roles and permissions, reactions. See [Roadmap](#roadmap).
+**Not yet:** video and screen sharing, DMs, roles and permissions. See [Roadmap](#roadmap).
 
 ## Layout
 
@@ -187,14 +188,14 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, and image and file sharing.
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, and reactions and replies.
 
 Rough order of what would make it feel more like Discord:
 
-1. Emoji reactions and replies
-2. Direct messages
-3. Roles and permissions (moderators, private channels)
-4. Video and screen sharing in voice rooms
+1. Direct messages
+2. Roles and permissions (moderators, private channels)
+3. Video and screen sharing in voice rooms
+4. Profile pictures and password changes
 
 ## Alternatives
 

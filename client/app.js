@@ -28,6 +28,7 @@ const state = {
   wsRetry: 0,
   voiceEnabled: false,      // the server has LiveKit set up
   maxUploadBytes: 0,        // 0 = uploads are off on this server
+  replyTo: null,            // the message the composer is replying to
   pending: [],              // files attached to the composer: { file, previewUrl, progress, attachment, error, done }
   voice: null,              // { channelId, room, muted } while in a voice room
   speaking: new Set(),      // user ids talking right now in our voice room
@@ -223,13 +224,22 @@ function handleEvent(ev) {
     }
     case 'message_updated': {
       const i = state.messages.findIndex((x) => x.id === ev.message.id);
-      if (i >= 0) { state.messages[i] = ev.message; renderMessages(); }
+      if (i >= 0) state.messages[i] = ev.message;
+      for (const x of state.messages) if (x.replyTo?.id === ev.message.id) x.replyTo.content = ev.message.content.slice(0, 160);
+      renderMessages();
       break;
     }
     case 'message_deleted':
       state.messages = state.messages.filter((x) => x.id !== ev.id);
+      for (const x of state.messages) if (x.replyTo?.id === ev.id) x.replyTo = { deleted: true };
+      if (state.replyTo?.id === ev.id) setReply(null);
       renderMessages();
       break;
+    case 'reactions': {
+      const m = state.messages.find((x) => x.id === ev.messageId);
+      if (m) { m.reactions = ev.reactions; renderMessages(); }
+      break;
+    }
     case 'server_updated': {
       const isNew = !state.servers.has(ev.server.id);
       state.servers.set(ev.server.id, ev.server);
@@ -264,7 +274,7 @@ function handleEvent(ev) {
 }
 
 function notify(m) {
-  const mentioned = new RegExp('@' + escapeRegex(state.me.username) + '\\b', 'i').test(m.content);
+  const mentioned = new RegExp('@' + escapeRegex(state.me.username) + '\\b', 'i').test(m.content) || m.replyTo?.authorId === state.me.id;
   if (!mentioned && !document.hidden) return;
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   const server = [...state.servers.values()].find((s) => s.channels.some((c) => c.id === m.channelId));
@@ -363,6 +373,7 @@ async function selectChannel(id) {
     state.pending = [];
     renderPending();
   }
+  if (id !== state.channelId) setReply(null);
   state.channelId = id;
   state.unread.delete(id);
   state.lastChannel[state.serverId] = id;
@@ -459,7 +470,7 @@ function renderMessages({ stick = false } = {}) {
       frag.append(d);
       prev = null;
     }
-    const grouped = prev && prev.authorId === m.authorId && m.createdAt - prev.createdAt < GROUP_WINDOW;
+    const grouped = prev && !m.replyTo && prev.authorId === m.authorId && m.createdAt - prev.createdAt < GROUP_WINDOW;
     if (!grouped) {
       const group = document.createElement('div');
       group.className = 'group' + (m.authorId === state.me.id ? ' mine' : '');
@@ -485,21 +496,27 @@ function renderLine(m) {
   el.className = 'line';
   el.dataset.id = m.id;
   el.title = new Date(m.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  if (m.authorId !== state.me.id && new RegExp('@' + escapeRegex(state.me.username) + '\\b', 'i').test(m.content))
+  if (m.authorId !== state.me.id && (new RegExp('@' + escapeRegex(state.me.username) + '\\b', 'i').test(m.content) || m.replyTo?.authorId === state.me.id))
     el.classList.add('mentions-me');
+  if (m.replyTo) el.append(renderReplyQuote(m.replyTo));
   const content = document.createElement('div');
   content.className = 'content';
   content.innerHTML = formatContent(m.content) + (m.editedAt ? ' <span class="edited">(edited)</span>' : '');
   if (!m.content && !m.editedAt) content.classList.add('hidden');
   el.append(content);
   if (m.attachments?.length) el.append(renderAttachments(m.attachments));
+  if (m.reactions?.length) el.append(renderReactions(m));
 
-  if (m.authorId === state.me.id) {
-    const actions = document.createElement('div');
-    actions.className = 'actions';
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  const reactBtn = iconButton('', 'Add reaction', (e) => openEmojiPicker(e.currentTarget, m));
+  reactBtn.innerHTML = SMILE_ICON;
+  const replyBtn = iconButton('', 'Reply', () => setReply(m));
+  replyBtn.innerHTML = REPLY_ICON;
+  actions.append(reactBtn, replyBtn);
+  if (m.authorId === state.me.id)
     actions.append(iconButton('Edit', 'Edit message', () => startEdit(m, content)), iconButton('Delete', 'Delete message', () => confirmDelete(m)));
-    el.append(actions);
-  }
+  el.append(actions);
   return el;
 }
 
@@ -562,25 +579,28 @@ async function sendComposer() {
   const content = input.value.trim();
   const channelId = state.channelId;
   const files = state.pending;
+  const replyTo = state.replyTo;
   if ((!content && !files.length) || !channelId) return;
   if (files.some((p) => p.error)) return alert('Remove the files that failed to upload first.');
   input.value = '';
   autosize();
   state.pending = [];
   renderPending();
+  setReply(null);
   try {
     const attachmentIds = (await Promise.all(files.map((p) => p.done))).map((a) => a.id);
     files.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl));
     if (state.ws?.readyState === WebSocket.OPEN) {
-      state.ws.send(JSON.stringify({ type: 'send', channelId, content, attachmentIds }));
+      state.ws.send(JSON.stringify({ type: 'send', channelId, content, attachmentIds, replyTo: replyTo?.id }));
     } else {
-      await api(`/api/channels/${channelId}/messages`, { method: 'POST', body: { content, attachmentIds } });
+      await api(`/api/channels/${channelId}/messages`, { method: 'POST', body: { content, attachmentIds, replyTo: replyTo?.id } });
     }
   } catch (err) {
     // Put everything back so nothing is lost.
     if (!input.value) input.value = content;
     state.pending = files.concat(state.pending);
     renderPending();
+    if (replyTo && !state.replyTo) setReply(replyTo);
     alertError(err);
   }
   lastTypingSent = 0;
@@ -590,7 +610,9 @@ async function sendComposer() {
 $('#composer').addEventListener('submit', (e) => { e.preventDefault(); sendComposer(); });
 
 input.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
+  if (e.key === 'Escape' && state.replyTo) {
+    setReply(null);
+  } else if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendComposer();
   } else if (e.key === 'ArrowUp' && !input.value) {
@@ -733,6 +755,98 @@ $('#add-channel').onclick = () => {
     } catch (err) { $('#modal-error').textContent = err.message; }
   };
 };
+
+// ---------------------------------------------------------------- replies & reactions
+
+const SMILE_ICON = '<svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16Zm-3.5-9a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm7 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM12 17.5c2.3 0 4.3-1.4 5.1-3.5H6.9c.8 2.1 2.8 3.5 5.1 3.5Z"/></svg>';
+const REPLY_ICON = '<svg viewBox="0 0 24 24"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11Z"/></svg>';
+const EMOJI_CHOICES = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉', '👀', '💯', '😍', '🤔', '😅', '🙌', '👏', '😎',
+  '🥲', '😭', '🤣', '😡', '✅', '❌', '⭐', '🌲', '🍕', '☕', '🎮', '🏔️', '🦊', '🐻', '🍄', '👋'];
+
+function setReply(m) {
+  state.replyTo = m;
+  const bar = $('#reply-bar');
+  bar.classList.toggle('hidden', !m);
+  if (m) {
+    $('#reply-name').textContent = m.author;
+    input.focus();
+  }
+}
+$('#reply-cancel').onclick = () => setReply(null);
+
+function renderReplyQuote(r) {
+  const q = document.createElement('div');
+  q.className = 'reply-quote';
+  if (r.deleted) {
+    q.innerHTML = '<span class="muted">Original message was deleted</span>';
+    return q;
+  }
+  const snippet = r.content ? r.content.replace(/\s+/g, ' ') : (r.hasAttachments ? 'Sent a file' : '');
+  q.innerHTML = `<span class="reply-author" style="color:${colorFor(r.author)}">@${escapeHtml(r.author)}</span><span class="reply-text">${escapeHtml(snippet)}</span>`;
+  q.title = 'Jump to message';
+  q.onclick = () => {
+    const target = messagesEl.querySelector(`.line[data-id="${r.id}"]`);
+    if (!target) return;
+    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    target.classList.remove('flash');
+    void target.offsetWidth;
+    target.classList.add('flash');
+  };
+  return q;
+}
+
+function renderReactions(m) {
+  const row = document.createElement('div');
+  row.className = 'reactions';
+  for (const r of m.reactions) {
+    const b = document.createElement('button');
+    b.className = 'reaction' + (r.userIds.includes(state.me.id) ? ' mine' : '');
+    const server = state.servers.get(state.serverId);
+    b.title = r.userIds.map((id) => server?.members.find((x) => x.id === id)?.username ?? 'someone').join(', ');
+    b.innerHTML = `<span class="r-emoji">${escapeHtml(r.emoji)}</span><span class="r-count">${r.userIds.length}</span>`;
+    b.onclick = () => toggleReaction(m, r.emoji);
+    row.append(b);
+  }
+  const add = document.createElement('button');
+  add.className = 'reaction add';
+  add.title = 'Add reaction';
+  add.innerHTML = SMILE_ICON;
+  add.onclick = (e) => openEmojiPicker(e.currentTarget, m);
+  row.append(add);
+  return row;
+}
+
+function toggleReaction(m, emoji) {
+  api(`/api/messages/${m.id}/reactions`, { method: 'POST', body: { emoji } })
+    .then(({ reactions }) => { m.reactions = reactions; renderMessages(); })
+    .catch(alertError);
+}
+
+function openEmojiPicker(anchor, m) {
+  closeEmojiPicker();
+  const picker = document.createElement('div');
+  picker.id = 'emoji-picker';
+  picker.className = 'emoji-picker';
+  for (const e of EMOJI_CHOICES) {
+    const b = document.createElement('button');
+    b.textContent = e;
+    b.onclick = () => { closeEmojiPicker(); toggleReaction(m, e); };
+    picker.append(b);
+  }
+  document.body.append(picker);
+  const r = anchor.getBoundingClientRect();
+  const w = picker.offsetWidth, h = picker.offsetHeight;
+  picker.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w)) + 'px';
+  picker.style.top = (r.top - h - 6 > 8 ? r.top - h - 6 : r.bottom + 6) + 'px';
+  setTimeout(() => document.addEventListener('mousedown', outsidePicker), 0);
+}
+function outsidePicker(e) { if (!e.target.closest('#emoji-picker')) closeEmojiPicker(); }
+function closeEmojiPicker() {
+  $('#emoji-picker')?.remove();
+  document.removeEventListener('mousedown', outsidePicker);
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeEmojiPicker(); });
+messagesEl.addEventListener('scroll', closeEmojiPicker);
 
 // ---------------------------------------------------------------- attachments
 

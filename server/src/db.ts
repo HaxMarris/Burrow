@@ -62,10 +62,20 @@ export function openDb(file: string): Db {
       created_at  INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS attachments_by_message ON attachments(message_id);
+    CREATE TABLE IF NOT EXISTS reactions (
+      message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      emoji      TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (message_id, user_id, emoji)
+    );
   `);
   // Added with voice rooms: 'text' or 'voice'.
   const channelCols = db.prepare('PRAGMA table_info(channels)').all() as { name: string }[];
   if (!channelCols.some((c) => c.name === 'kind'))
     db.exec("ALTER TABLE channels ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'");
+  // Added with replies: the message this one answers (it may since have been deleted).
+  const messageCols = db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
+  if (!messageCols.some((c) => c.name === 'reply_to')) db.exec('ALTER TABLE messages ADD COLUMN reply_to INTEGER');
   return db;
 }
