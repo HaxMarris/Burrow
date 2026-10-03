@@ -104,6 +104,9 @@ export function openDb(file: string): Db {
       PRIMARY KEY (server_id, user_id)
     );
   `);
+  // Added with login expiry: when the login was last used (null means its created_at).
+  const sessionCols = db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[];
+  if (!sessionCols.some((c) => c.name === 'last_used_at')) db.exec('ALTER TABLE sessions ADD COLUMN last_used_at INTEGER');
   // Added with custom roles: each burrow has its own roles with a name, a color and permissions.
   // position 1 is the top role; people can only act on those below their own highest role.
   const hadRoles = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'roles'").get();

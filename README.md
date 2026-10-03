@@ -120,6 +120,14 @@ The host then adds a room with **+** next to *Rooms* and picks *Voice room*. Cli
 join; the bar above your name has mute and leave. Click someone in a voice room to turn them up or down
 (0% to 200%, only for you).
 
+### Security
+
+- Everything travels encrypted: Caddy serves HTTPS (and Burrow then tells browsers to always use it), and voice uses WebRTC's built-in encryption. Passwords are stored hashed with scrypt.
+- Too many wrong passwords lock that account's login for 15 minutes; registration code guesses are limited per address the same way.
+- Logins expire after 30 days without use. Changing your password logs you out everywhere else.
+- With Docker, port 3000 only listens on the server itself, so the only way in is through Caddy. Set `BURROW_BIND=0.0.0.0` in `.env` if you run without a reverse proxy.
+- The web app only runs its own scripts (a strict Content-Security-Policy), which blunts any injected code.
+
 ### Backups
 
 Burrow copies its database once a day and keeps the last 7 copies. They sit on the same disk as
