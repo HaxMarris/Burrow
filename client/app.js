@@ -1198,6 +1198,7 @@ $('#account-btn').onclick = () => {
       <input type="file" id="avatar-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
     </div>
     <div class="error" id="avatar-error"></div>` : ''}
+    ${voiceSettings()}
     ${soundSettings()}
     <h3>Change password</h3>
     <form id="password-form">
@@ -1209,6 +1210,7 @@ $('#account-btn').onclick = () => {
       <div class="error" id="pw-status"></div>
       <div class="modal-row"><button type="button" class="btn secondary" data-close>Close</button><button type="submit" class="btn">Change password</button></div>
     </form>`);
+  wireVoiceSettings();
   wireSoundSettings();
   if (state.maxUploadBytes) {
     setAvatar($('#account-avatar'), state.me.username, state.me.avatar);
@@ -1535,8 +1537,11 @@ async function joinVoice(channelId) {
     const LK = await loadLivekit();
     const { url, token } = await api(`/api/channels/${channelId}/voice`, { method: 'POST' });
     if (state.voice !== voice) return;
+    const quality = VOICE_QUALITY[voicePrefs.quality] ?? VOICE_QUALITY.high;
     const room = new LK.Room({
-      audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      audioCaptureDefaults: { echoCancellation: true, noiseSuppression: voicePrefs.noiseSuppression, autoGainControl: voicePrefs.noiseSuppression },
+      // Opus at a higher bitrate than LiveKit's 48 kbps default; silence still costs almost nothing (DTX).
+      publishDefaults: { audioPreset: { maxBitrate: quality.bitrate }, dtx: true, red: true },
       // Mixing through Web Audio lets people be turned up past 100%.
       webAudioMix: true,
     });
@@ -1710,6 +1715,31 @@ function voiceSounds(channelId, userIds) {
   const others = (ids) => ids.filter((id) => id !== state.me.id);
   if (others(userIds).some((id) => !before.includes(id))) playSound('join');
   else if (others(before).some((id) => !userIds.includes(id))) playSound('leave');
+}
+
+// How you sound to others. Kept on this device; takes effect the next time you join a voice room.
+const VOICE_QUALITY = {
+  standard: { bitrate: 48000, label: 'Standard (48 kbps)' },
+  high: { bitrate: 64000, label: 'High (64 kbps)' },
+  best: { bitrate: 96000, label: 'Best (96 kbps)' },
+};
+const voicePrefs = (() => {
+  const defaults = { quality: 'high', noiseSuppression: true };
+  try { return { ...defaults, ...JSON.parse(store.get('voicePrefs')) }; } catch { return defaults; }
+})();
+
+function voiceSettings() {
+  return `<h3>Voice</h3>
+    <label>Your voice quality
+      <select id="voice-quality">${Object.entries(VOICE_QUALITY).map(([k, q]) => `<option value="${k}" ${voicePrefs.quality === k ? 'selected' : ''}>${q.label}</option>`).join('')}</select>
+    </label>
+    <label class="check"><input type="checkbox" id="voice-ns" ${voicePrefs.noiseSuppression ? 'checked' : ''} /> Noise suppression</label>
+    <span class="small muted">Turn noise suppression off to play music or an instrument. Changes apply the next time you join a voice room.</span>`;
+}
+function wireVoiceSettings() {
+  const save = () => store.set('voicePrefs', JSON.stringify(voicePrefs));
+  $('#voice-quality').onchange = (e) => { voicePrefs.quality = e.target.value; save(); };
+  $('#voice-ns').onchange = (e) => { voicePrefs.noiseSuppression = e.target.checked; save(); };
 }
 
 function soundSettings() {
