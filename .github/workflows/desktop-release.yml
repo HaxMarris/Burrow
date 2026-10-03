@@ -1,11 +1,13 @@
-# Builds the desktop app for Windows, macOS and Linux whenever you push a tag
-# like v0.1.0, and attaches the installers to a GitHub Release your friends can
-# download from.
+# Builds the desktop app for Windows, macOS and Linux.
+#
+# - Publish a release on GitHub (Releases > Draft a new release, tag e.g. v0.1.0)
+#   and the installers are attached to it for your friends to download.
+# - Or run it by hand from the Actions tab to get test builds as downloadable artifacts.
 name: Desktop release
 
 on:
-  push:
-    tags: ['v*']
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -14,6 +16,7 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
@@ -26,8 +29,16 @@ jobs:
         working-directory: desktop
       - run: npm run dist -- --publish never
         working-directory: desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: burrow-${{ matrix.os }}
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/*.dmg
+            desktop/dist/*.AppImage
+          if-no-files-found: error
       - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'release'
         with:
           files: |
             desktop/dist/*.exe

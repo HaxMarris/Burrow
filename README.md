@@ -87,14 +87,12 @@ chat.example.com {
 
 **Desktop app:** the first time it opens it asks for the server address, then works the same way.
 
-To build installers, the easiest route is GitHub: push this folder to a GitHub repo, then push a tag:
+To build installers, let GitHub do it: on the repo page go to **Releases → Draft a new release**,
+type a new tag such as `v0.1.0`, and click **Publish release**. The `Desktop release` workflow then
+builds a Windows `.exe`, macOS `.dmg` and Linux `.AppImage` and attaches them to that release,
+usually within about ten minutes. Send your friends the release link.
 
-```sh
-git tag v0.1.0 && git push origin v0.1.0
-```
-
-The `Desktop release` workflow builds a Windows `.exe`, macOS `.dmg` and Linux `.AppImage`
-and attaches them to a GitHub Release your friends download from.
+You can also run the workflow by hand from the **Actions** tab to get test builds without publishing anything.
 
 To build locally instead (each OS builds its own installer best):
 
