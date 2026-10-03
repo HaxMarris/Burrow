@@ -238,6 +238,21 @@ ul { list-style: none; margin: 0; padding: 0; }
 .member-pane .avatar::after { content: ""; position: absolute; right: -3px; bottom: -3px; width: 12px; height: 12px; border-radius: 50%; border: 2.5px solid var(--bg); background: var(--muted); }
 .member-pane li.online .avatar::after { background: var(--online); }
 .owner-badge { font-size: 11px; font-weight: 800; color: var(--accent); background: var(--accent-soft); padding: 1px 7px; border-radius: 999px; margin-left: auto; }
+.owner-badge.mod { color: var(--cloudberry); background: var(--mention-bg); }
+.member-pane li .member-more { margin-left: auto; padding: 0 6px; opacity: 0; }
+.member-pane li .member-more + .owner-badge { margin-left: 4px; }
+.member-pane li:hover .member-more, .member-more:focus-visible { opacity: 1; }
+.room-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lock-icon { width: 13px; height: 13px; fill: currentColor; opacity: .6; flex: none; }
+.room-gear { margin-left: auto; padding: 2px; opacity: 0; }
+.room-gear svg { width: 15px; height: 15px; }
+#channel-list li:hover .room-gear, #voice-list li:hover .room-gear, .room-gear:focus-visible { opacity: 1; }
+label.check { flex-direction: row; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
+label.check input { width: auto; }
+.access-list { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; padding: 4px 2px; }
+.modal-row .spacer { flex: 1; }
+.ban-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; font-weight: 600; }
+.ban-list .btn { padding: 6px 14px; }
 
 /* ---------- modal ---------- */
 .modal { position: fixed; inset: 0; background: rgba(12, 20, 15, .55); backdrop-filter: blur(3px); display: grid; place-items: center; padding: 16px; z-index: 10; }

@@ -9,7 +9,8 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 **What works today**
 
 - Accounts with username and password, protected by an optional registration code so strangers can't sign up
-- Burrows (shared spaces) you create, with an invite code to share, and rooms the host can add
+- Burrows (shared spaces) you create, with an invite code to share, and rooms the host and moderators can add
+- Moderators, private rooms, and removing or banning people
 - Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) with mute and who's-talking rings
 - Image and file sharing: attach, paste or drag in up to 10 files per message, with inline image and video previews
 - Emoji reactions and replies (a reply to you counts as a mention)
@@ -172,8 +173,9 @@ Code-signing certificates fix that but cost money.
 Burrow has its own names for things: a **burrow** is a shared space for one group of friends (what Discord calls a server), and each burrow has **rooms** (channels).
 
 - Click **+** under *Your burrows* to dig a new burrow, or join one with an invite code.
-- The gear next to the burrow's name shows its invite code. The host (whoever created it) can delete the burrow there; everyone else can leave.
-- The host adds rooms with the **+** next to *Rooms*.
+- The gear next to the burrow's name shows its invite code. The host (whoever created it) can delete the burrow there; everyone else can leave. Hosts and moderators also see who's banned there, and can unban them.
+- The host and moderators add rooms with the **+** next to *Rooms*, and change or delete one with the gear that appears when you hover over it. A private room is only seen by the host, moderators and the people you tick.
+- Hover over someone in the member list and click **⋯** to remove or ban them. The host can also make them a moderator there. Moderators can manage rooms, delete anyone's messages, and remove or ban members (but not other moderators).
 - The speech-bubble tile above your burrows holds your direct messages. Start one with its **+**, or click someone in a burrow's member list.
 - Click your name in the bottom corner to set a profile picture or change your password.
 - The moon button in your profile card switches between the light "birch" theme and the dark "pine night" theme. By default it follows your system setting.
@@ -192,12 +194,11 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, and direct messages.
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, and roles (moderators and private rooms).
 
 Rough order of what would make it feel more like Discord:
 
-1. Roles and permissions (moderators, private channels)
-2. Video and screen sharing in voice rooms
+1. Video and screen sharing in voice rooms
 
 ## Alternatives
 
