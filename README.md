@@ -10,6 +10,7 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 
 - Accounts with username and password, protected by an optional registration code so strangers can't sign up
 - Burrows (shared spaces) you create, with an invite code to share, and rooms the host can add
+- Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) with mute and who's-talking rings
 - Real-time messaging over WebSockets, with typing indicators and online/offline presence
 - Full message history with infinite scroll back, edit and delete your own messages (↑ edits your last one)
 - Light formatting: `**bold**`, `*italic*`, `` `code` ``, code blocks, clickable links, `@mentions` (highlighted, and they trigger a desktop notification)
@@ -17,7 +18,7 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Desktop app for Windows, macOS and Linux (Electron), plus the same UI in any browser
 - Scandinavian-forest look with light and dark themes
 
-**Not yet:** voice/video, image and file uploads, DMs, roles and permissions, reactions. See [Roadmap](#roadmap).
+**Not yet:** video and screen sharing, image and file uploads, DMs, roles and permissions, reactions. See [Roadmap](#roadmap).
 
 ## Layout
 
@@ -63,6 +64,8 @@ Data goes to `server/data/chat.db`.
 | `REGISTRATION_CODE` | unset (open signup)    | Code people must enter to create an account. Strongly recommended. |
 | `PORT`              | `3000`                 | Port to listen on.                                                  |
 | `DB_FILE`           | `server/data/chat.db`  | SQLite database location (`/data/chat.db` in Docker).               |
+| `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | unset (voice off) | Shared with LiveKit; turns on voice rooms.             |
+| `LIVEKIT_URL`       | same address as Burrow | Where apps reach LiveKit, if not routed through Burrow's address.   |
 
 ### Letting friends reach it
 
@@ -77,9 +80,29 @@ For anything public, put HTTPS in front so passwords aren't sent in the clear.
 
 ```
 chat.example.com {
+    @livekit path /rtc /rtc/*
+    reverse_proxy @livekit localhost:7880
     reverse_proxy localhost:3000
 }
 ```
+
+The `@livekit` lines are only needed for voice rooms (below); they're harmless without them.
+
+### Voice rooms
+
+Voice runs on [LiveKit](https://livekit.io), a media server that Docker Compose starts next to Burrow.
+Voice only is light enough for a Raspberry Pi 4 or 5. The limit is usually your home upload
+speed: LiveKit sends each speaker to every listener at about 40 kbps, so a room of 10 needs up to
+about 4 Mbps of upload.
+
+1. Copy `.env.example` to `.env` in the same folder as `docker-compose.yml`, and replace the secret
+   with the output of `openssl rand -base64 32`.
+2. `docker compose up -d --build`. This now starts `livekit` too.
+3. Add the two `@livekit` lines above to your Caddyfile and restart Caddy.
+4. On your router, forward **TCP 7881** and **UDP 7882** to the server, alongside 80 and 443.
+
+The host then adds a room with **+** next to *Rooms* and picks *Voice room*. Click a voice room to
+join; the bar above your name has mute and leave.
 
 ## 2. Get your friends the app
 
@@ -136,7 +159,7 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing).
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), and voice rooms.
 
 Rough order of what would make it feel more like Discord:
 
@@ -144,7 +167,7 @@ Rough order of what would make it feel more like Discord:
 2. Emoji reactions and replies
 3. Direct messages
 4. Roles and permissions (moderators, private channels)
-5. Voice channels with WebRTC (the big one; likely via a small SFU such as mediasoup or LiveKit)
+5. Video and screen sharing in voice rooms
 
 ## Alternatives
 

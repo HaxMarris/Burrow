@@ -4,12 +4,15 @@ import { extname, join, normalize } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Db } from './db.ts';
 import { hashPassword, verifyPassword, newToken, newInviteCode } from './auth.ts';
+import { voiceToken, type VoiceOptions } from './voice.ts';
 
 export interface AppOptions {
   db: Db;
   publicDir: string;
   /** When set, new accounts must supply this code to register. */
   registrationCode?: string;
+  /** LiveKit settings; voice rooms are turned off without them. */
+  voice?: VoiceOptions;
 }
 
 type User = { id: number; username: string };
@@ -51,8 +54,8 @@ export function createApp(opts: AppOptions): Server {
     !!db.prepare('SELECT 1 FROM members WHERE server_id = ? AND user_id = ?').get(serverId, userId);
 
   const channelById = (id: number) =>
-    db.prepare('SELECT id, server_id AS serverId, name FROM channels WHERE id = ?').get(id) as
-      | { id: number; serverId: number; name: string }
+    db.prepare('SELECT id, server_id AS serverId, name, kind FROM channels WHERE id = ?').get(id) as
+      | { id: number; serverId: number; name: string; kind: 'text' | 'voice' }
       | undefined;
 
   const serverMemberIds = (serverId: number) =>
@@ -73,9 +76,9 @@ export function createApp(opts: AppOptions): Server {
     const server = db
       .prepare('SELECT id, name, owner_id AS ownerId, invite_code AS inviteCode FROM servers WHERE id = ?')
       .get(serverId) as Json;
-    const channels = db
-      .prepare('SELECT id, name FROM channels WHERE server_id = ? ORDER BY id')
-      .all(serverId);
+    const channels = (
+      db.prepare('SELECT id, name, kind FROM channels WHERE server_id = ? ORDER BY id').all(serverId) as Json[]
+    ).map((c) => (c.kind === 'voice' ? { ...c, voiceUsers: usersInVoice(c.id as number) } : c));
     const members = db
       .prepare(
         'SELECT u.id, u.username FROM members m JOIN users u ON u.id = m.user_id WHERE m.server_id = ? ORDER BY u.username',
@@ -105,6 +108,9 @@ export function createApp(opts: AppOptions): Server {
 
   const sockets = new Map<number, Set<WebSocket>>(); // userId -> open sockets
   const online = new Set<number>();
+  const inVoice = new Map<number, number>(); // userId -> voice channel they are in
+
+  const usersInVoice = (channelId: number) => [...inVoice].filter(([, c]) => c === channelId).map(([u]) => u);
 
   const sendTo = (userIds: Iterable<number>, event: Json) => {
     const data = JSON.stringify(event);
@@ -112,6 +118,22 @@ export function createApp(opts: AppOptions): Server {
   };
 
   const broadcastToServer = (serverId: number, event: Json) => sendTo(serverMemberIds(serverId), event);
+
+  // Who is in which voice room. The app reports joining and leaving; LiveKit carries the audio.
+  const setVoice = (userId: number, channelId: number | null) => {
+    const prev = inVoice.get(userId);
+    if (prev === channelId || (prev === undefined && channelId === null)) return;
+    if (prev !== undefined) {
+      inVoice.delete(userId);
+      const old = channelById(prev);
+      if (old) broadcastToServer(old.serverId, { type: 'voice_state', channelId: old.id, userIds: usersInVoice(old.id) });
+    }
+    if (channelId !== null) {
+      const channel = channelById(channelId)!;
+      inVoice.set(userId, channelId);
+      broadcastToServer(channel.serverId, { type: 'voice_state', channelId, userIds: usersInVoice(channelId) });
+    }
+  };
 
   const usersSharingServerWith = (userId: number) =>
     (
@@ -125,6 +147,7 @@ export function createApp(opts: AppOptions): Server {
   const postMessage = (user: User, channelId: number, content: unknown) => {
     const channel = channelById(channelId);
     if (!channel || !isMember(channel.serverId, user.id)) throw new HttpError(404, 'Room not found');
+    if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
     if (typeof content !== 'string' || !content.trim()) throw new HttpError(400, 'Message is empty');
     if (content.length > MAX_MESSAGE_LENGTH) throw new HttpError(400, 'Message is too long');
     const r = db
@@ -146,7 +169,7 @@ export function createApp(opts: AppOptions): Server {
   route(
     'GET',
     '/api/config',
-    () => ({ registrationCodeRequired: !!opts.registrationCode }),
+    () => ({ registrationCodeRequired: !!opts.registrationCode, voice: !!opts.voice }),
     false,
   );
 
@@ -231,8 +254,11 @@ export function createApp(opts: AppOptions): Server {
     if (!owner || !isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
     if (owner.owner_id === user.id) {
       broadcastToServer(serverId, { type: 'server_deleted', serverId });
+      for (const [u, c] of inVoice) if (channelById(c)?.serverId === serverId) inVoice.delete(u);
       db.prepare('DELETE FROM servers WHERE id = ?').run(serverId);
     } else {
+      const voiceChannel = inVoice.get(user.id);
+      if (voiceChannel !== undefined && channelById(voiceChannel)?.serverId === serverId) setVoice(user.id, null);
       db.prepare('DELETE FROM members WHERE server_id = ? AND user_id = ?').run(serverId, user.id);
       broadcastToServer(serverId, { type: 'server_updated', server: serverSummary(serverId) });
     }
@@ -246,16 +272,28 @@ export function createApp(opts: AppOptions): Server {
       | undefined;
     if (!server || !isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
     if (server.owner_id !== user.id) throw new HttpError(403, 'Only the host of this burrow can add rooms');
-    const name = cleanName(body.name, 'Room name', 32).toLowerCase().replace(/\s+/g, '-');
-    db.prepare('INSERT INTO channels (server_id, name, created_at) VALUES (?, ?, ?)').run(serverId, name, now());
+    const kind = body.kind === 'voice' ? 'voice' : 'text';
+    // Text rooms read like #game-night; voice rooms keep their spaces ("Game Night").
+    let name = cleanName(body.name, 'Room name', 32);
+    if (kind === 'text') name = name.toLowerCase().replace(/\s+/g, '-');
+    db.prepare('INSERT INTO channels (server_id, name, kind, created_at) VALUES (?, ?, ?, ?)').run(serverId, name, kind, now());
     const summary = serverSummary(serverId);
     broadcastToServer(serverId, { type: 'server_updated', server: summary });
     return summary;
   });
 
+  route('POST', '/api/channels/:id/voice', ({ user, params }) => {
+    const channel = channelById(Number(params[0]));
+    if (!channel || !isMember(channel.serverId, user.id)) throw new HttpError(404, 'Room not found');
+    if (channel.kind !== 'voice') throw new HttpError(400, 'That is not a voice room');
+    if (!opts.voice) throw new HttpError(503, 'Voice is not set up on this server');
+    return { url: opts.voice.url ?? null, token: voiceToken(opts.voice, user, `room-${channel.id}`) };
+  });
+
   route('GET', '/api/channels/:id/messages', ({ user, params, url }) => {
     const channel = channelById(Number(params[0]));
     if (!channel || !isMember(channel.serverId, user.id)) throw new HttpError(404, 'Room not found');
+    if (channel.kind === 'voice') return [];
     const before = Number(url.searchParams.get('before')) || Number.MAX_SAFE_INTEGER;
     const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 100);
     const rows = db
@@ -416,6 +454,13 @@ export function createApp(opts: AppOptions): Server {
       try {
         if (msg.type === 'send') {
           postMessage(user, Number(msg.channelId), msg.content);
+        } else if (msg.type === 'voice_join') {
+          const channel = channelById(Number(msg.channelId));
+          if (!channel || channel.kind !== 'voice' || !isMember(channel.serverId, user.id))
+            throw new HttpError(404, 'Room not found');
+          setVoice(user.id, channel.id);
+        } else if (msg.type === 'voice_leave') {
+          setVoice(user.id, null);
         } else if (msg.type === 'typing') {
           const channel = channelById(Number(msg.channelId));
           if (channel && isMember(channel.serverId, user.id))
@@ -435,6 +480,7 @@ export function createApp(opts: AppOptions): Server {
       if (set!.size === 0) {
         sockets.delete(user.id);
         online.delete(user.id);
+        setVoice(user.id, null);
         sendTo(usersSharingServerWith(user.id), { type: 'presence', userId: user.id, online: false });
       }
     });

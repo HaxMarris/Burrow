@@ -7,8 +7,29 @@ services:
     environment:
       # Friends need this code to create an account. Change it!
       REGISTRATION_CODE: "change-me"
+      # Voice rooms. Set these in a .env file next to this one (see README).
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
     volumes:
       - burrow-data:/data
+
+  # LiveKit carries the audio for voice rooms. It only starts when .env has
+  # COMPOSE_PROFILES=voice. Host networking lets it see the real network for calls.
+  livekit:
+    image: livekit/livekit-server:v1.13.7
+    restart: unless-stopped
+    profiles: ["voice"]
+    network_mode: host
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-}: ${LIVEKIT_API_SECRET:-}"
+      LIVEKIT_CONFIG: |
+        port: 7880
+        rtc:
+          tcp_port: 7881
+          udp_port: 7882
+          use_external_ip: true
+        logging:
+          level: info
 
 volumes:
   burrow-data:

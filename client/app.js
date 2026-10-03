@@ -26,6 +26,10 @@ const state = {
   typing: new Map(),        // channelId -> Map(username -> timer)
   ws: null,
   wsRetry: 0,
+  voiceEnabled: false,      // the server has LiveKit set up
+  voice: null,              // { channelId, room, muted } while in a voice room
+  speaking: new Set(),      // user ids talking right now in our voice room
+  mutedInVoice: new Set(),  // user ids muted in our voice room
 };
 
 // ---------------------------------------------------------------- API
@@ -136,6 +140,7 @@ $('#auth-form').addEventListener('submit', async (e) => {
 });
 
 async function logout(callServer = true) {
+  leaveVoice();
   if (callServer) api('/api/logout', { method: 'POST' }).catch(() => {});
   state.token = null;
   state.me = null;
@@ -154,6 +159,7 @@ async function enterApp() {
   $('#me-name').textContent = state.me.username;
   setAvatar($('#me-avatar'), state.me.username);
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+  state.voiceEnabled = !!(await api('/api/config').catch(() => ({}))).voice;
   await loadServers();
   connect();
 }
@@ -179,6 +185,8 @@ function connect() {
     state.wsRetry = 0;
     $('#conn-status').classList.add('ok');
     $('#conn-status').textContent = 'Connected';
+    // The server forgets who's in voice when we drop off, so tell it again.
+    if (state.voice) ws.send(JSON.stringify({ type: 'voice_join', channelId: state.voice.channelId }));
     // Catch up on anything missed while disconnected.
     if (wasRetry) loadServers().catch(() => {});
   };
@@ -239,6 +247,11 @@ function handleEvent(ev) {
     case 'typing':
       showTyping(ev.channelId, ev.username);
       break;
+    case 'voice_state':
+      for (const s of state.servers.values())
+        for (const c of s.channels) if (c.id === ev.channelId) c.voiceUsers = ev.userIds;
+      renderChannels();
+      break;
     case 'error':
       console.warn('Server error:', ev.error);
       break;
@@ -289,23 +302,53 @@ async function selectServer(id, initial = false) {
   renderMembers();
   if (!s) { state.channelId = null; renderChannels(); state.messages = []; renderMessages(); return; }
   const remembered = state.lastChannel[id];
-  const ch = s.channels.find((c) => c.id === remembered) ?? s.channels[0];
+  const textRooms = s.channels.filter((c) => c.kind !== 'voice');
+  const ch = textRooms.find((c) => c.id === remembered) ?? textRooms[0];
   if (initial && ch && ch.id === state.channelId) return renderChannels();
   await selectChannel(ch?.id ?? null);
 }
 
 function renderChannels() {
   const s = state.servers.get(state.serverId);
-  $('#channel-list').replaceChildren(
-    ...(s?.channels ?? []).map((c) => {
-      const li = document.createElement('li');
-      li.textContent = c.name;
-      if (c.id === state.channelId) li.className = 'active';
-      else if (state.unread.has(c.id)) li.className = 'unread';
-      li.onclick = () => selectChannel(c.id);
-      return li;
-    }),
-  );
+  const channels = s?.channels ?? [];
+  const textRooms = channels.filter((c) => c.kind !== 'voice').map((c) => {
+    const li = document.createElement('li');
+    li.textContent = c.name;
+    if (c.id === state.channelId) li.className = 'active';
+    else if (state.unread.has(c.id)) li.className = 'unread';
+    li.onclick = () => selectChannel(c.id);
+    return li;
+  });
+  const voiceRooms = channels.filter((c) => c.kind === 'voice').map((c) => {
+    const li = document.createElement('li');
+    li.className = 'voice-room' + (state.voice?.channelId === c.id ? ' joined' : '');
+    li.innerHTML = `<div class="voice-room-name">${SPEAKER_ICON}<span>${escapeHtml(c.name)}</span></div>`;
+    li.title = state.voice?.channelId === c.id ? "You're here" : 'Join voice';
+    li.onclick = () => joinVoice(c.id);
+    const people = (c.voiceUsers ?? []).map((id) => {
+      const name = s.members.find((m) => m.id === id)?.username ?? '?';
+      const row = document.createElement('div');
+      row.className = 'voice-person' + (state.speaking.has(id) ? ' speaking' : '');
+      const av = document.createElement('span');
+      av.className = 'avatar xs';
+      setAvatar(av, name);
+      const label = document.createElement('span');
+      label.textContent = name;
+      row.append(av, label);
+      if (state.mutedInVoice.has(id)) row.insertAdjacentHTML('beforeend', MUTED_ICON);
+      return row;
+    });
+    if (people.length) {
+      const list = document.createElement('div');
+      list.className = 'voice-people';
+      list.append(...people);
+      li.append(list);
+    }
+    return li;
+  });
+  $('#channel-list').replaceChildren(...textRooms);
+  $('#voice-list').replaceChildren(...voiceRooms);
+  $('#voice-section').classList.toggle('hidden', !voiceRooms.length && !(state.voiceEnabled && s?.ownerId === state.me?.id));
 }
 
 async function selectChannel(id) {
@@ -642,19 +685,135 @@ $('#add-channel').onclick = () => {
   modal(`<h2>New room</h2>
     <form id="channel-form">
       <label>Room name<input id="new-channel-name" placeholder="e.g. game-night" maxlength="32" required /></label>
+      ${state.voiceEnabled ? `<div class="kind-choice">
+        <label><input type="radio" name="kind" value="text" checked /> Text room</label>
+        <label><input type="radio" name="kind" value="voice" /> Voice room</label>
+      </div>` : ''}
       <div class="error" id="modal-error"></div>
       <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">Create room</button></div>
     </form>`);
   $('#channel-form').onsubmit = async (e) => {
     e.preventDefault();
     try {
-      const s = await api(`/api/servers/${state.serverId}/channels`, { method: 'POST', body: { name: $('#new-channel-name').value } });
+      const kind = $('input[name="kind"]:checked')?.value ?? 'text';
+      const s = await api(`/api/servers/${state.serverId}/channels`, { method: 'POST', body: { name: $('#new-channel-name').value, kind } });
       state.servers.set(s.id, s);
       closeModal();
-      selectChannel(s.channels[s.channels.length - 1].id);
+      if (kind === 'voice') renderChannels();
+      else selectChannel(s.channels[s.channels.length - 1].id);
     } catch (err) { $('#modal-error').textContent = err.message; }
   };
 };
+
+// ---------------------------------------------------------------- voice rooms
+//
+// Audio goes through LiveKit, which runs next to the Burrow server. Burrow hands out
+// a token for the room, and tells everyone in the burrow who has joined.
+
+const SPEAKER_ICON = '<svg viewBox="0 0 24 24" class="voice-icon"><path d="M4 9h4l5-4v14l-5-4H4V9Zm12.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4Zm-2.5-8.8v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6Z"/></svg>';
+const MUTED_ICON = '<svg viewBox="0 0 24 24" class="muted-icon" aria-label="Muted"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm6-3a6 6 0 0 1-.6 2.6l1.5 1.5A8 8 0 0 0 20 11h-2ZM3.3 2 2 3.3l16.7 16.7 1.3-1.3L3.3 2ZM6 11H4a8 8 0 0 0 7 7.9V22h2v-3.1c.8-.1 1.5-.3 2.2-.6l-1.6-1.6A6 6 0 0 1 6 11Z"/></svg>';
+
+let livekitLoading = null;
+function loadLivekit() {
+  if (window.LivekitClient) return Promise.resolve(window.LivekitClient);
+  livekitLoading ??= new Promise((resolve, reject) => {
+    const tag = document.createElement('script');
+    tag.src = 'vendor/livekit-client.umd.js';
+    tag.onload = () => resolve(window.LivekitClient);
+    tag.onerror = () => { livekitLoading = null; reject(new Error("Couldn't load the voice library.")); };
+    document.head.append(tag);
+  });
+  return livekitLoading;
+}
+
+async function joinVoice(channelId) {
+  if (state.voice?.channelId === channelId) return;
+  if (!state.voiceEnabled) return alert('Voice is not set up on this server yet.');
+  leaveVoice();
+  const voice = { channelId, room: null, muted: false };
+  state.voice = voice;
+  renderVoiceBar('Connecting…');
+  try {
+    const LK = await loadLivekit();
+    const { url, token } = await api(`/api/channels/${channelId}/voice`, { method: 'POST' });
+    if (state.voice !== voice) return;
+    const room = new LK.Room({
+      audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    voice.room = room;
+    room
+      .on(LK.RoomEvent.TrackSubscribed, (track) => {
+        if (track.kind === 'audio') $('#voice-audio').append(track.attach());
+      })
+      .on(LK.RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach((el) => el.remove()))
+      .on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
+        state.speaking = new Set(speakers.map((p) => Number(p.identity)));
+        renderChannels();
+      })
+      .on(LK.RoomEvent.TrackMuted, (pub, p) => setMuted(p, true))
+      .on(LK.RoomEvent.TrackUnmuted, (pub, p) => setMuted(p, false))
+      .on(LK.RoomEvent.Reconnecting, () => renderVoiceBar('Reconnecting…'))
+      .on(LK.RoomEvent.Reconnected, () => renderVoiceBar())
+      .on(LK.RoomEvent.Disconnected, () => { if (state.voice === voice) leaveVoice(); });
+    await room.connect(url || state.serverUrl.replace(/^http/, 'ws'), token);
+    await room.startAudio();
+    await room.localParticipant.setMicrophoneEnabled(true);
+    if (state.voice !== voice) return room.disconnect();
+    state.ws?.send(JSON.stringify({ type: 'voice_join', channelId }));
+    renderVoiceBar();
+  } catch (err) {
+    if (state.voice === voice) leaveVoice();
+    const denied = err?.name === 'NotAllowedError' || /permission/i.test(err?.message ?? '');
+    alert(denied ? 'Burrow needs microphone access for voice. Allow it in your system settings and try again.'
+                 : `Couldn't join voice: ${err?.message || err}`);
+  }
+}
+
+function setMuted(participant, muted) {
+  const id = Number(participant.identity);
+  if (muted) state.mutedInVoice.add(id);
+  else state.mutedInVoice.delete(id);
+  renderChannels();
+}
+
+function leaveVoice() {
+  const voice = state.voice;
+  if (!voice) return;
+  state.voice = null;
+  state.speaking.clear();
+  state.mutedInVoice.clear();
+  voice.room?.disconnect();
+  $('#voice-audio').replaceChildren();
+  if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: 'voice_leave' }));
+  renderVoiceBar();
+  renderChannels();
+}
+
+function toggleMute() {
+  const voice = state.voice;
+  if (!voice?.room) return;
+  voice.muted = !voice.muted;
+  voice.room.localParticipant.setMicrophoneEnabled(!voice.muted);
+  if (voice.muted) state.mutedInVoice.add(state.me.id);
+  else state.mutedInVoice.delete(state.me.id);
+  renderVoiceBar();
+  renderChannels();
+}
+
+function renderVoiceBar(status) {
+  const voice = state.voice;
+  $('#voice-bar').classList.toggle('hidden', !voice);
+  if (!voice) return;
+  const ch = [...state.servers.values()].flatMap((s) => s.channels).find((c) => c.id === voice.channelId);
+  $('#voice-status').textContent = status ?? 'Voice connected';
+  $('#voice-status').classList.toggle('ok', !status);
+  $('#voice-room-name').textContent = ch?.name ?? '';
+  $('#voice-mute').classList.toggle('on', voice.muted);
+  $('#voice-mute').title = voice.muted ? 'Unmute' : 'Mute';
+}
+
+$('#voice-mute').onclick = toggleMute;
+$('#voice-leave').onclick = leaveVoice;
 
 // ---------------------------------------------------------------- helpers
 
