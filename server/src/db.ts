@@ -51,5 +51,9 @@ export function openDb(file: string): Db {
     );
     CREATE INDEX IF NOT EXISTS messages_by_channel ON messages(channel_id, id);
   `);
+  // Added with voice rooms: 'text' or 'voice'.
+  const channelCols = db.prepare('PRAGMA table_info(channels)').all() as { name: string }[];
+  if (!channelCols.some((c) => c.name === 'kind'))
+    db.exec("ALTER TABLE channels ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'");
   return db;
 }

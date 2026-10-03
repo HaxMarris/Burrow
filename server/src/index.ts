@@ -11,6 +11,14 @@ const app = createApp({
   db: openDb(dbFile),
   publicDir: resolve(process.env.PUBLIC_DIR ?? resolve(here, '../../client')),
   registrationCode: process.env.REGISTRATION_CODE || undefined,
+  voice:
+    process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET
+      ? {
+          apiKey: process.env.LIVEKIT_API_KEY,
+          apiSecret: process.env.LIVEKIT_API_SECRET,
+          url: process.env.LIVEKIT_URL || undefined,
+        }
+      : undefined,
 });
 
 app.listen(port, () => {
@@ -18,4 +26,5 @@ app.listen(port, () => {
   console.log(`Database: ${dbFile}`);
   if (!process.env.REGISTRATION_CODE)
     console.log('Warning: REGISTRATION_CODE is not set, so anyone who can reach this server can sign up.');
+  if (!process.env.LIVEKIT_API_KEY) console.log('Voice rooms are off (set LIVEKIT_API_KEY and LIVEKIT_API_SECRET to turn them on).');
 });
