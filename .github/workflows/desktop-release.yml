@@ -27,6 +27,12 @@ jobs:
           node-version: 22
       - run: npm install
         working-directory: desktop
+      # The app's version comes from the release tag (v0.2.0 -> 0.2.0), so the
+      # built-in updater can tell which release is newer.
+      - if: github.event_name == 'release'
+        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
+        shell: bash
+        working-directory: desktop
       - run: npm run dist -- --publish never
         working-directory: desktop
       - uses: actions/upload-artifact@v4
@@ -37,6 +43,7 @@ jobs:
             desktop/dist/*.dmg
             desktop/dist/*.AppImage
           if-no-files-found: error
+      # latest*.yml and .blockmap files are what installed apps read to update themselves.
       - uses: softprops/action-gh-release@v2
         if: github.event_name == 'release'
         with:
@@ -44,3 +51,5 @@ jobs:
             desktop/dist/*.exe
             desktop/dist/*.dmg
             desktop/dist/*.AppImage
+            desktop/dist/latest*.yml
+            desktop/dist/*.blockmap
