@@ -40,14 +40,20 @@ and runs TypeScript directly, so there is no build step. It needs Node 22.18 or 
 
 ### With Docker (recommended)
 
-Edit `docker-compose.yml` and change `REGISTRATION_CODE` to something only your
-friends will know, then:
+Copy the settings file and set a registration code only your friends will know:
 
 ```sh
+cp .env.example .env
+nano .env        # change REGISTRATION_CODE (and the voice secret, or remove the voice lines)
 docker compose up -d --build
 ```
 
-The server is now on port 3000, and its database lives in the `burrow-data` volume.
+The server is now on port 3000, and its database lives in the `burrow-data` volume. All your
+settings stay in `.env`, so updating is always:
+
+```sh
+git pull && docker compose up -d --build
+```
 
 ### Without Docker
 
@@ -66,6 +72,8 @@ Data goes to `server/data/chat.db`.
 | `REGISTRATION_CODE` | unset (open signup)    | Code people must enter to create an account. Strongly recommended. |
 | `PORT`              | `3000`                 | Port to listen on.                                                  |
 | `DB_FILE`           | `server/data/chat.db`  | SQLite database location (`/data/chat.db` in Docker).               |
+| `BACKUP_DIR`        | `backups/` next to the database | Where the daily database copies go (`/data/backups` in Docker). |
+| `BACKUP_KEEP`       | `7`                    | How many daily copies to keep. `0` turns backups off.               |
 | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | unset (voice off) | Shared with LiveKit; turns on voice rooms.             |
 | `UPLOAD_DIR`        | `uploads/` next to the database | Where shared files are stored (`/data/uploads` in Docker).  |
 | `MAX_UPLOAD_MB`     | `25`                   | Largest file someone can share.                                     |
@@ -107,6 +115,23 @@ about 4 Mbps of upload.
 
 The host then adds a room with **+** next to *Rooms* and picks *Voice room*. Click a voice room to
 join; the bar above your name has mute and leave.
+
+### Backups
+
+Burrow copies its database once a day and keeps the last 7 copies. They sit on the same disk as
+the server, so now and then copy them somewhere else. With Docker:
+
+```sh
+docker compose cp burrow:/data/backups ./backups
+```
+
+To restore one (swap in the date you want):
+
+```sh
+docker compose stop burrow
+docker compose run --rm --entrypoint sh burrow -c "cp /data/backups/burrow-2026-10-05.db /data/chat.db && rm -f /data/chat.db-wal /data/chat.db-shm"
+docker compose up -d
+```
 
 ## 2. Get your friends the app
 

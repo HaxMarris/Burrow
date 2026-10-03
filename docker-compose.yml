@@ -5,9 +5,10 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # Friends need this code to create an account. Change it!
-      REGISTRATION_CODE: "change-me"
-      # Voice rooms. Set these in a .env file next to this one (see README).
+      # All settings live in a .env file next to this one (copy .env.example),
+      # so updating Burrow never touches your edits.
+      REGISTRATION_CODE: ${REGISTRATION_CODE:?Set REGISTRATION_CODE in .env (copy .env.example to .env)}
+      # Voice rooms (see README).
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
     volumes:
