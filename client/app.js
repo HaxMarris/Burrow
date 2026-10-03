@@ -237,7 +237,10 @@ function handleEvent(ev) {
         renderServers();
         renderChannels();
       }
-      if (m.authorId !== state.me.id && (document.hidden || m.channelId !== state.channelId)) notify(m);
+      if (m.authorId !== state.me.id && (document.hidden || m.channelId !== state.channelId)) {
+        notify(m);
+        playSound('message');
+      }
       break;
     }
     case 'message_updated': {
@@ -299,6 +302,7 @@ function handleEvent(ev) {
       applyUser(ev.user);
       break;
     case 'voice_state':
+      if (state.voice?.channelId === ev.channelId) voiceSounds(ev.channelId, ev.userIds);
       for (const s of state.servers.values())
         for (const c of s.channels) if (c.id === ev.channelId) c.voiceUsers = ev.userIds;
       renderChannels();
@@ -407,6 +411,13 @@ function renderChannels() {
       label.textContent = name;
       row.append(av, label);
       if (state.mutedInVoice.has(id)) row.insertAdjacentHTML('beforeend', MUTED_ICON);
+      if (id !== state.me.id) {
+        const v = volumeFor(id);
+        if (v !== 1) row.insertAdjacentHTML('beforeend', `<span class="volume-tag">${Math.round(v * 100)}%</span>`);
+        row.classList.add('adjustable');
+        row.title = `${name}'s volume`;
+        row.onclick = (e) => { e.stopPropagation(); openVolume(row, id, name); };
+      }
       return row;
     });
     if (people.length) {
@@ -1187,6 +1198,7 @@ $('#account-btn').onclick = () => {
       <input type="file" id="avatar-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
     </div>
     <div class="error" id="avatar-error"></div>` : ''}
+    ${soundSettings()}
     <h3>Change password</h3>
     <form id="password-form">
       <input type="text" autocomplete="username" value="${escapeHtml(state.me.username)}" hidden />
@@ -1197,6 +1209,7 @@ $('#account-btn').onclick = () => {
       <div class="error" id="pw-status"></div>
       <div class="modal-row"><button type="button" class="btn secondary" data-close>Close</button><button type="submit" class="btn">Change password</button></div>
     </form>`);
+  wireSoundSettings();
   if (state.maxUploadBytes) {
     setAvatar($('#account-avatar'), state.me.username, state.me.avatar);
     $('#avatar-remove').classList.toggle('hidden', !state.me.avatar);
@@ -1514,7 +1527,7 @@ function loadLivekit() {
 async function joinVoice(channelId) {
   if (state.voice?.channelId === channelId) return;
   if (!state.voiceEnabled) return alert('Voice is not set up on this server yet.');
-  leaveVoice();
+  leaveVoice(true);
   const voice = { channelId, room: null, muted: false };
   state.voice = voice;
   renderVoiceBar('Connecting…');
@@ -1524,11 +1537,15 @@ async function joinVoice(channelId) {
     if (state.voice !== voice) return;
     const room = new LK.Room({
       audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      // Mixing through Web Audio lets people be turned up past 100%.
+      webAudioMix: true,
     });
     voice.room = room;
     room
-      .on(LK.RoomEvent.TrackSubscribed, (track) => {
-        if (track.kind === 'audio') $('#voice-audio').append(track.attach());
+      .on(LK.RoomEvent.TrackSubscribed, (track, pub, participant) => {
+        if (track.kind !== 'audio') return;
+        $('#voice-audio').append(track.attach());
+        participant.setVolume(volumeFor(Number(participant.identity)));
       })
       .on(LK.RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach((el) => el.remove()))
       .on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
@@ -1546,8 +1563,9 @@ async function joinVoice(channelId) {
     if (state.voice !== voice) return room.disconnect();
     state.ws?.send(JSON.stringify({ type: 'voice_join', channelId }));
     renderVoiceBar();
+    playSound('join');
   } catch (err) {
-    if (state.voice === voice) leaveVoice();
+    if (state.voice === voice) leaveVoice(true);
     const denied = err?.name === 'NotAllowedError' || /permission/i.test(err?.message ?? '');
     alert(denied ? 'Burrow needs microphone access for voice. Allow it in your system settings and try again.'
                  : `Couldn't join voice: ${err?.message || err}`);
@@ -1561,10 +1579,12 @@ function setMuted(participant, muted) {
   renderChannels();
 }
 
-function leaveVoice() {
+// quiet: no leave sound, when switching rooms or when joining failed.
+function leaveVoice(quiet) {
   const voice = state.voice;
   if (!voice) return;
   state.voice = null;
+  if (quiet !== true) playSound('leave');
   state.speaking.clear();
   state.mutedInVoice.clear();
   voice.room?.disconnect();
@@ -1598,7 +1618,115 @@ function renderVoiceBar(status) {
 }
 
 $('#voice-mute').onclick = toggleMute;
-$('#voice-leave').onclick = leaveVoice;
+$('#voice-leave').onclick = () => leaveVoice();
+
+// ---------------------------------------------------------------- volume and sounds
+//
+// Each person's voice volume is your own setting, kept on this device: 0% to 200%.
+
+const volumes = (() => { try { return JSON.parse(store.get('volumes')) ?? {}; } catch { return {}; } })();
+const volumeFor = (userId) => volumes[userId] ?? 1;
+
+function setVolume(userId, value) {
+  if (value === 1) delete volumes[userId];
+  else volumes[userId] = value;
+  store.set('volumes', JSON.stringify(volumes));
+  state.voice?.room?.remoteParticipants.forEach((p) => { if (Number(p.identity) === userId) p.setVolume(value); });
+}
+
+function openVolume(anchor, userId, name) {
+  closeVolume();
+  const pop = document.createElement('div');
+  pop.className = 'volume-pop';
+  pop.id = 'volume-pop';
+  const pct = Math.round(volumeFor(userId) * 100);
+  pop.innerHTML = `<div class="volume-head"><b>${escapeHtml(name)}</b><span id="volume-value">${pct}%</span></div>
+    <input type="range" id="volume-range" min="0" max="200" step="5" value="${pct}" aria-label="${escapeHtml(name)}'s volume" />
+    <div class="volume-foot"><span class="small muted">Only changes it for you</span><button class="link-btn" id="volume-reset">Reset</button></div>`;
+  pop.onclick = (e) => e.stopPropagation();
+  document.body.append(pop);
+  const r = anchor.getBoundingClientRect();
+  pop.style.left = `${Math.min(r.left, window.innerWidth - pop.offsetWidth - 8)}px`;
+  pop.style.top = `${Math.min(r.bottom + 6, window.innerHeight - pop.offsetHeight - 8)}px`;
+  const apply = (value) => {
+    $('#volume-range').value = value;
+    $('#volume-value').textContent = `${value}%`;
+    setVolume(userId, value / 100);
+  };
+  $('#volume-range').oninput = (e) => apply(Number(e.target.value));
+  $('#volume-range').onchange = () => renderChannels();
+  $('#volume-reset').onclick = () => { apply(100); renderChannels(); };
+  $('#volume-range').focus();
+}
+function closeVolume() { $('#volume-pop')?.remove(); }
+document.addEventListener('click', closeVolume);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeVolume(); });
+
+// Short chimes made on the fly, so there are no sound files to ship.
+const soundPrefs = (() => {
+  const defaults = { messages: true, voice: true, volume: 0.5 };
+  try { return { ...defaults, ...JSON.parse(store.get('sounds')) }; } catch { return defaults; }
+})();
+const saveSoundPrefs = () => store.set('sounds', JSON.stringify(soundPrefs));
+const SOUNDS = {
+  // [frequency, start, length] in Hz and seconds
+  message: { pref: 'messages', notes: [[987.8, 0, 0.12], [1318.5, 0.07, 0.2]] },
+  join: { pref: 'voice', notes: [[523.3, 0, 0.14], [784, 0.09, 0.22]] },
+  leave: { pref: 'voice', notes: [[784, 0, 0.14], [523.3, 0.09, 0.22]] },
+};
+let soundCtx = null;
+let lastMessageSound = 0;
+
+function playSound(name, force = false) {
+  const sound = SOUNDS[name];
+  if (!force && (!soundPrefs[sound.pref] || !soundPrefs.volume)) return;
+  // A busy room shouldn't turn into a wind chime.
+  if (name === 'message' && !force) {
+    if (Date.now() - lastMessageSound < 1500) return;
+    lastMessageSound = Date.now();
+  }
+  try {
+    soundCtx ??= new AudioContext();
+    if (soundCtx.state === 'suspended') soundCtx.resume();
+    const t0 = soundCtx.currentTime + 0.01;
+    for (const [freq, start, length] of sound.notes) {
+      const osc = soundCtx.createOscillator();
+      const gain = soundCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, t0 + start);
+      gain.gain.exponentialRampToValueAtTime(0.25 * soundPrefs.volume, t0 + start + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + start + length);
+      osc.connect(gain).connect(soundCtx.destination);
+      osc.start(t0 + start);
+      osc.stop(t0 + start + length + 0.02);
+    }
+  } catch {}
+}
+
+/** Someone else came into or left the voice room you're in. */
+function voiceSounds(channelId, userIds) {
+  const before = [...state.servers.values()].flatMap((s) => s.channels).find((c) => c.id === channelId)?.voiceUsers ?? [];
+  const others = (ids) => ids.filter((id) => id !== state.me.id);
+  if (others(userIds).some((id) => !before.includes(id))) playSound('join');
+  else if (others(before).some((id) => !userIds.includes(id))) playSound('leave');
+}
+
+function soundSettings() {
+  return `<h3>Sounds</h3>
+    <label class="check"><input type="checkbox" id="sound-messages" ${soundPrefs.messages ? 'checked' : ''} /> New messages</label>
+    <label class="check"><input type="checkbox" id="sound-voice" ${soundPrefs.voice ? 'checked' : ''} /> People joining and leaving voice</label>
+    <label>Sound volume
+      <div class="sound-volume"><input type="range" id="sound-volume" min="0" max="100" step="5" value="${Math.round(soundPrefs.volume * 100)}" /><button type="button" class="btn secondary" id="sound-test">Test</button></div>
+    </label>`;
+}
+function wireSoundSettings() {
+  $('#sound-messages').onchange = (e) => { soundPrefs.messages = e.target.checked; saveSoundPrefs(); };
+  $('#sound-voice').onchange = (e) => { soundPrefs.voice = e.target.checked; saveSoundPrefs(); };
+  $('#sound-volume').oninput = (e) => { soundPrefs.volume = Number(e.target.value) / 100; saveSoundPrefs(); };
+  $('#sound-volume').onchange = () => playSound('message', true);
+  $('#sound-test').onclick = () => playSound('message', true);
+}
 
 // ---------------------------------------------------------------- helpers
 

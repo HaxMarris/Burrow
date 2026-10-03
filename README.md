@@ -11,7 +11,7 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Accounts with username and password, protected by an optional registration code so strangers can't sign up
 - Burrows (shared spaces) you create, with an invite code to share, and rooms that the host (or anyone whose role allows it) can add
 - Custom roles with their own name, color and permissions, private rooms, and removing or banning people
-- Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) with mute and who's-talking rings
+- Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) with mute, who's-talking rings, and a volume slider for each person
 - Image and file sharing: attach, paste or drag in up to 10 files per message, with inline image and video previews
 - Emoji reactions and replies (a reply to you counts as a mention)
 - Direct messages with anyone you share a burrow with
@@ -117,7 +117,8 @@ about 4 Mbps of upload.
 4. On your router, forward **TCP 7881** and **UDP 7882** to the server, alongside 80 and 443.
 
 The host then adds a room with **+** next to *Rooms* and picks *Voice room*. Click a voice room to
-join; the bar above your name has mute and leave.
+join; the bar above your name has mute and leave. Click someone in a voice room to turn them up or down
+(0% to 200%, only for you).
 
 ### Backups
 
@@ -176,6 +177,7 @@ Burrow has its own names for things: a **burrow** is a shared space for one grou
 - The gear next to the burrow's name shows its invite code. The host (whoever created it) can delete the burrow there; everyone else can leave. People whose role lets them ban also see who's banned there, and can unban them. People who can manage roles open **Roles** there.
 - **Roles:** every burrow starts with a *Moderator* role. Under **Roles** you can make your own (like *Admins* or *Friends*), pick a color, choose what each one can do (manage rooms, delete messages, remove people, ban people, manage roles), and move them up or down. Names show in the color of their highest role. People can only change roles, and remove people, below their own highest role, and can't hand out permissions they don't have. A role with no permissions is just a colored label.
 - People who can manage rooms add them with the **+** next to *Rooms*, and change or delete one with the gear that appears when you hover over it. A private room is only seen by people who manage rooms, plus the roles and people you tick.
+- Your account (your name, bottom left) has sound settings: chimes for new messages and for people joining or leaving your voice room, and how loud they are.
 - Hover over someone in the member list and click **⋯** to give them roles, or to remove or ban them, depending on what your roles allow.
 - The speech-bubble tile above your burrows holds your direct messages. Start one with its **+**, or click someone in a burrow's member list.
 - Click your name in the bottom corner to set a profile picture or change your password.
@@ -195,7 +197,7 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, and custom roles with private rooms.
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, and notification sounds.
 
 Rough order of what would make it feel more like Discord:
 
