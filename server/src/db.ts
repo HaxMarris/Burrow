@@ -86,7 +86,8 @@ export function openDb(file: string): Db {
   if (!serverCols.some((c) => c.name === 'kind')) db.exec("ALTER TABLE servers ADD COLUMN kind TEXT NOT NULL DEFAULT 'burrow'");
   if (!serverCols.some((c) => c.name === 'dm_key')) db.exec('ALTER TABLE servers ADD COLUMN dm_key TEXT');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS servers_by_dm_key ON servers(dm_key)');
-  // Added with roles: 'member' or 'mod' (the host is servers.owner_id), private rooms, and bans.
+  // Added with moderators: 'member' or 'mod'. Replaced by custom roles below, and only read to move moderators over.
+  // Private rooms and bans came at the same time.
   const memberCols = db.prepare('PRAGMA table_info(members)').all() as { name: string }[];
   if (!memberCols.some((c) => c.name === 'role')) db.exec("ALTER TABLE members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'");
   if (!channelCols.some((c) => c.name === 'private')) db.exec('ALTER TABLE channels ADD COLUMN private INTEGER NOT NULL DEFAULT 0');
@@ -103,5 +104,47 @@ export function openDb(file: string): Db {
       PRIMARY KEY (server_id, user_id)
     );
   `);
+  // Added with custom roles: each burrow has its own roles with a name, a color and permissions.
+  // position 1 is the top role; people can only act on those below their own highest role.
+  const hadRoles = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'roles'").get();
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS roles (
+      id         INTEGER PRIMARY KEY,
+      server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      name       TEXT NOT NULL,
+      color      TEXT NOT NULL,
+      perms      TEXT NOT NULL DEFAULT '',
+      position   INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS member_roles (
+      server_id INTEGER NOT NULL,
+      user_id   INTEGER NOT NULL,
+      role_id   INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+      PRIMARY KEY (role_id, user_id),
+      FOREIGN KEY (server_id, user_id) REFERENCES members(server_id, user_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS member_roles_by_member ON member_roles(server_id, user_id);
+    CREATE TABLE IF NOT EXISTS channel_role_access (
+      channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      role_id    INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+      PRIMARY KEY (channel_id, role_id)
+    );
+  `);
+  // Burrows from before custom roles get a Moderator role, given to everyone who was a moderator.
+  if (!hadRoles) {
+    for (const { id } of db.prepare("SELECT id FROM servers WHERE kind = 'burrow'").all() as { id: number }[]) {
+      const roleId = addModeratorRole(db, id);
+      db.prepare("INSERT INTO member_roles (server_id, user_id, role_id) SELECT server_id, user_id, ? FROM members WHERE server_id = ? AND role = 'mod'").run(roleId, id);
+    }
+  }
   return db;
+}
+
+/** Every new burrow starts with a Moderator role, which the host can change or delete. */
+export function addModeratorRole(db: Db, serverId: number) {
+  const r = db
+    .prepare("INSERT INTO roles (server_id, name, color, perms, position, created_at) VALUES (?, 'Moderator', '#4f8a5b', 'rooms,messages,remove,ban', 1, ?)")
+    .run(serverId, Date.now());
+  return Number(r.lastInsertRowid);
 }

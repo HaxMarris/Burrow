@@ -9,8 +9,8 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 **What works today**
 
 - Accounts with username and password, protected by an optional registration code so strangers can't sign up
-- Burrows (shared spaces) you create, with an invite code to share, and rooms the host and moderators can add
-- Moderators, private rooms, and removing or banning people
+- Burrows (shared spaces) you create, with an invite code to share, and rooms that the host (or anyone whose role allows it) can add
+- Custom roles with their own name, color and permissions, private rooms, and removing or banning people
 - Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) with mute and who's-talking rings
 - Image and file sharing: attach, paste or drag in up to 10 files per message, with inline image and video previews
 - Emoji reactions and replies (a reply to you counts as a mention)
@@ -23,7 +23,7 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Desktop app for Windows, macOS and Linux (Electron), plus the same UI in any browser
 - Scandinavian-forest look with light and dark themes
 
-**Not yet:** video and screen sharing, DMs, roles and permissions. See [Roadmap](#roadmap).
+**Not yet:** video and screen sharing. See [Roadmap](#roadmap).
 
 ## Layout
 
@@ -173,9 +173,10 @@ Code-signing certificates fix that but cost money.
 Burrow has its own names for things: a **burrow** is a shared space for one group of friends (what Discord calls a server), and each burrow has **rooms** (channels).
 
 - Click **+** under *Your burrows* to dig a new burrow, or join one with an invite code.
-- The gear next to the burrow's name shows its invite code. The host (whoever created it) can delete the burrow there; everyone else can leave. Hosts and moderators also see who's banned there, and can unban them.
-- The host and moderators add rooms with the **+** next to *Rooms*, and change or delete one with the gear that appears when you hover over it. A private room is only seen by the host, moderators and the people you tick.
-- Hover over someone in the member list and click **⋯** to remove or ban them. The host can also make them a moderator there. Moderators can manage rooms, delete anyone's messages, and remove or ban members (but not other moderators).
+- The gear next to the burrow's name shows its invite code. The host (whoever created it) can delete the burrow there; everyone else can leave. People whose role lets them ban also see who's banned there, and can unban them. People who can manage roles open **Roles** there.
+- **Roles:** every burrow starts with a *Moderator* role. Under **Roles** you can make your own (like *Admins* or *Friends*), pick a color, choose what each one can do (manage rooms, delete messages, remove people, ban people, manage roles), and move them up or down. Names show in the color of their highest role. People can only change roles, and remove people, below their own highest role, and can't hand out permissions they don't have. A role with no permissions is just a colored label.
+- People who can manage rooms add them with the **+** next to *Rooms*, and change or delete one with the gear that appears when you hover over it. A private room is only seen by people who manage rooms, plus the roles and people you tick.
+- Hover over someone in the member list and click **⋯** to give them roles, or to remove or ban them, depending on what your roles allow.
 - The speech-bubble tile above your burrows holds your direct messages. Start one with its **+**, or click someone in a burrow's member list.
 - Click your name in the bottom corner to set a profile picture or change your password.
 - The moon button in your profile card switches between the light "birch" theme and the dark "pine night" theme. By default it follows your system setting.
@@ -194,7 +195,7 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, and roles (moderators and private rooms).
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, and custom roles with private rooms.
 
 Rough order of what would make it feel more like Discord:
 

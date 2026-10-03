@@ -372,7 +372,7 @@ function renderChannels() {
   $('#server-name').textContent = state.inDms ? 'Direct messages' : s?.name ?? 'No burrow yet';
   $('#rooms-title').textContent = state.inDms ? 'Conversations' : 'Rooms';
   $('#server-menu-btn').classList.toggle('hidden', !s || state.inDms);
-  $('#add-channel').classList.toggle('hidden', !state.inDms && !canManage(s));
+  $('#add-channel').classList.toggle('hidden', !state.inDms && !can(s, 'rooms'));
   $('#add-channel').title = state.inDms ? 'New message' : 'New room';
   if (state.inDms) return renderDmList();
   const channels = s?.channels ?? [];
@@ -386,14 +386,14 @@ function renderChannels() {
     if (c.id === state.channelId) li.className = 'active';
     else if (state.unread.has(c.id)) li.className = 'unread';
     li.onclick = () => selectChannel(c.id);
-    if (canManage(s)) li.append(roomSettingsButton(c));
+    if (can(s, 'rooms')) li.append(roomSettingsButton(c));
     return li;
   });
   const voiceRooms = channels.filter((c) => c.kind === 'voice').map((c) => {
     const li = document.createElement('li');
     li.className = 'voice-room' + (state.voice?.channelId === c.id ? ' joined' : '');
     li.innerHTML = `<div class="voice-room-name">${SPEAKER_ICON}<span class="room-name">${escapeHtml(c.name)}</span>${c.private ? LOCK_ICON : ''}</div>`;
-    if (canManage(s)) li.firstChild.append(roomSettingsButton(c));
+    if (can(s, 'rooms')) li.firstChild.append(roomSettingsButton(c));
     li.title = state.voice?.channelId === c.id ? "You're here" : 'Join voice';
     li.onclick = () => joinVoice(c.id);
     const people = (c.voiceUsers ?? []).map((id) => {
@@ -419,7 +419,7 @@ function renderChannels() {
   });
   $('#channel-list').replaceChildren(...textRooms);
   $('#voice-list').replaceChildren(...voiceRooms);
-  $('#voice-section').classList.toggle('hidden', !voiceRooms.length && !(state.voiceEnabled && canManage(s)));
+  $('#voice-section').classList.toggle('hidden', !voiceRooms.length && !(state.voiceEnabled && can(s, 'rooms')));
 }
 
 async function selectChannel(id) {
@@ -458,7 +458,8 @@ async function selectChannel(id) {
 
 function renderMembers() {
   const s = state.servers.get(state.serverId);
-  const members = [...(s?.members ?? [])].sort((a, b) => a.username.localeCompare(b.username));
+  // Highest roles first, then by name.
+  const members = [...(s?.members ?? [])].sort((a, b) => rankOf(s, a) - rankOf(s, b) || a.username.localeCompare(b.username));
   const section = (title, list) => {
     if (!list.length) return [];
     const h = document.createElement('h3');
@@ -473,17 +474,27 @@ function renderMembers() {
         setAvatar(av, m.username, avatarOf(m.id, m.avatar));
         const name = document.createElement('span');
         name.textContent = m.username;
+        const color = roleColor(s, m.id);
+        if (color) name.style.color = color;
         li.append(av, name);
         if (!isDm(s) && m.id !== state.me.id) {
           li.classList.add('can-dm');
           li.title = `Send ${m.username} a message`;
           li.onclick = () => openDm(m.id);
         }
-        if (!isDm(s) && (m.role === 'host' || m.role === 'mod')) {
+        const top = rolesOf(s, m)[0];
+        if (isHost(s, m.id) || top) {
           const badge = document.createElement('span');
-          badge.className = 'owner-badge' + (m.role === 'mod' ? ' mod' : '');
-          badge.title = m.role === 'host' ? 'Created this burrow' : 'Moderator: can manage rooms, messages and members';
-          badge.textContent = m.role;
+          badge.className = 'owner-badge';
+          if (isHost(s, m.id)) {
+            badge.title = 'Created this burrow';
+            badge.textContent = 'host';
+          } else {
+            badge.classList.add('role');
+            badge.style.setProperty('--role', top.color);
+            badge.title = rolesOf(s, m).map((r) => r.name).join(', ');
+            badge.textContent = top.name;
+          }
           li.append(badge);
         }
         if (canActOn(s, m)) {
@@ -552,7 +563,8 @@ function renderMessages({ stick = false } = {}) {
       setAvatar(av, m.author, avatarOf(m.authorId, m.authorAvatar));
       body = document.createElement('div');
       const time = new Date(m.createdAt);
-      body.innerHTML = `<div class="head"><span class="author">${escapeHtml(m.author)}</span>
+      const color = roleColor(state.servers.get(state.serverId), m.authorId);
+      body.innerHTML = `<div class="head"><span class="author"${color ? ` style="color:${escapeHtml(color)}"` : ''}>${escapeHtml(m.author)}</span>
         <span class="time" title="${escapeHtml(time.toLocaleString())}">${escapeHtml(formatTime(time))}</span></div>`;
       group.append(av, body);
       frag.append(group);
@@ -588,7 +600,7 @@ function renderLine(m) {
   replyBtn.innerHTML = REPLY_ICON;
   actions.append(reactBtn, replyBtn);
   if (m.authorId === state.me.id) actions.append(iconButton('Edit', 'Edit message', () => startEdit(m, content)));
-  if (m.authorId === state.me.id || canManage(state.servers.get(state.serverId)))
+  if (m.authorId === state.me.id || can(state.servers.get(state.serverId), 'messages'))
     actions.append(iconButton('Delete', 'Delete message', () => confirmDelete(m)));
   el.append(actions);
   return el;
@@ -790,12 +802,14 @@ $('#server-menu-btn').onclick = () => {
       <div class="invite-box"><input id="invite" readonly value="${escapeHtml(s.inviteCode)}" /><button class="btn" id="copy-invite">Copy</button></div>
     </label>
     <p class="small muted">They'll also need the server address: <b>${escapeHtml(state.serverUrl)}</b></p>
-    ${canManage(s) ? '<div id="ban-list"></div>' : ''}
+    ${can(s, 'roles') ? `<button class="btn secondary" id="open-roles">Roles${s.roles.length ? ` · ${s.roles.length}` : ''}</button>` : ''}
+    ${can(s, 'ban') ? '<div id="ban-list"></div>' : ''}
     <div class="modal-row">
       <button class="btn danger" id="leave-server">${owner ? 'Delete burrow' : 'Leave burrow'}</button>
       <button class="btn secondary" data-close>Close</button>
     </div>`);
-  if (canManage(s)) renderBans(s);
+  if (can(s, 'ban')) renderBans(s);
+  $('#open-roles')?.addEventListener('click', () => openRoles(s.id));
   $('#copy-invite').onclick = () => { navigator.clipboard?.writeText(s.inviteCode); $('#copy-invite').textContent = 'Copied!'; };
   $('#leave-server').onclick = async () => {
     if (owner && !confirm(`Delete "${s.name}" and all its messages for everyone?`)) return;
@@ -844,11 +858,30 @@ $('#add-channel').onclick = () => {
 const LOCK_ICON = '<svg viewBox="0 0 24 24" class="lock-icon" aria-label="Private"><path d="M7 10V7a5 5 0 0 1 10 0v3h1a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h1Zm2 0h6V7a3 3 0 0 0-6 0v3Z"/></svg>';
 const GEAR_ICON = '<svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm8.9 3-1.6-.4a7.4 7.4 0 0 0-.7-1.7l.9-1.4-1.9-1.9-1.4.9a7.4 7.4 0 0 0-1.7-.7L13 3.1h-2l-.4 1.7a7.4 7.4 0 0 0-1.7.7l-1.4-.9-1.9 1.9.9 1.4a7.4 7.4 0 0 0-.7 1.7l-1.7.4v2l1.7.4c.2.6.4 1.2.7 1.7l-.9 1.4 1.9 1.9 1.4-.9c.5.3 1.1.5 1.7.7l.4 1.7h2l.4-1.7c.6-.2 1.2-.4 1.7-.7l1.4.9 1.9-1.9-.9-1.4c.3-.5.5-1.1.7-1.7l1.6-.4v-2Z"/></svg>';
 
-const myRole = (s) => s?.members.find((m) => m.id === state.me.id)?.role ?? null;
-/** Hosts and moderators look after a burrow. */
-const canManage = (s) => !!s && !isDm(s) && ['host', 'mod'].includes(myRole(s));
-/** The host can manage anyone; moderators only regular members. */
-const canActOn = (s, m) => canManage(s) && m.id !== state.me.id && m.role !== 'host' && (m.role !== 'mod' || myRole(s) === 'host');
+// Each burrow has its own roles, highest first. The host can do everything; everyone else
+// gets what their roles allow, and can only act on people and roles below their highest role.
+const PERMS = [
+  ['rooms', 'Manage rooms', 'Add, change and delete rooms, and see every private room'],
+  ['messages', 'Delete messages', "Delete other people's messages"],
+  ['remove', 'Remove people', 'Take people out of the burrow (they can come back with the invite)'],
+  ['ban', 'Ban people', "Remove people for good, and see and lift bans"],
+  ['roles', 'Manage roles', 'Make, change and hand out the roles below their own'],
+];
+const ROLE_COLORS = ['#4f8a5b', '#2f7d74', '#3f6fa8', '#7a5aa6', '#b0527a', '#c2553d', '#c98a2b', '#8a8f87'];
+
+const isHost = (s, id) => s?.ownerId === id && !isDm(s);
+const rolesOf = (s, m) => (s?.roles ?? []).filter((r) => m?.roleIds?.includes(r.id));
+/** Position of someone's highest role (lower is higher); the host is above everyone. */
+const rankOf = (s, m) => (isHost(s, m?.id) ? 0 : Math.min(Infinity, ...rolesOf(s, m).map((r) => r.position)));
+const me = (s) => s?.members.find((m) => m.id === state.me.id);
+const can = (s, perm) => !!s && !isDm(s) && (isHost(s, state.me.id) || rolesOf(s, me(s)).some((r) => r.perms.includes(perm)));
+/** The color someone's name shows in: their highest role's. */
+const roleColor = (s, userId) => (isDm(s) ? null : rolesOf(s, s?.members.find((m) => m.id === userId))[0]?.color ?? null);
+/** Whether the ⋯ menu has anything for this person. */
+const canActOn = (s, m) => {
+  if (can(s, 'roles') && (m.id === state.me.id || rankOf(s, m) > rankOf(s, me(s)))) return true;
+  return m.id !== state.me.id && (can(s, 'remove') || can(s, 'ban')) && rankOf(s, m) > rankOf(s, me(s));
+};
 
 function leaveVoiceIfGone() {
   if (!state.voice) return;
@@ -863,13 +896,19 @@ function roomSettingsButton(c) {
   return b;
 }
 
-// The "private" checkbox and, under it, who else gets in. The host and moderators always can.
-function privacyFields(s, isPrivate, memberIds) {
-  const people = s.members.filter((m) => m.role === 'member');
+const roleDot = (color) => `<span class="role-dot" style="background:${escapeHtml(color)}"></span>`;
+
+// The "private" checkbox and, under it, which roles and people get in. People who manage rooms always can.
+function privacyFields(s, isPrivate, memberIds, roleIds = []) {
+  const managers = (m) => isHost(s, m.id) || rolesOf(s, m).some((r) => r.perms.includes('rooms'));
+  const people = s.members.filter((m) => !managers(m));
+  const roles = s.roles ?? [];
   return `<label class="check"><input type="checkbox" id="room-private" ${isPrivate ? 'checked' : ''} /> Private room</label>
     <div id="room-access" class="${isPrivate ? '' : 'hidden'}">
-      <p class="small muted">The host and moderators can always see it. Who else can?</p>
-      ${people.length ? `<ul class="access-list">${people.map((m) => `<li><label class="check"><input type="checkbox" value="${m.id}" ${memberIds.includes(m.id) ? 'checked' : ''} /> ${escapeHtml(m.username)}</label></li>`).join('')}</ul>`
+      <p class="small muted">The host and anyone who can manage rooms can always see it. Who else can?</p>
+      ${roles.length ? `<h4>Roles</h4><ul class="access-list" id="access-roles">${roles.map((r) => `<li><label class="check"><input type="checkbox" value="${r.id}" ${roleIds.includes(r.id) ? 'checked' : ''} /> ${roleDot(r.color)}${escapeHtml(r.name)}</label></li>`).join('')}</ul>` : ''}
+      <h4>People</h4>
+      ${people.length ? `<ul class="access-list" id="access-people">${people.map((m) => `<li><label class="check"><input type="checkbox" value="${m.id}" ${memberIds.includes(m.id) ? 'checked' : ''} /> ${escapeHtml(m.username)}</label></li>`).join('')}</ul>`
         : '<p class="small muted">Nobody else is in this burrow yet.</p>'}
     </div>`;
 }
@@ -878,7 +917,8 @@ function wirePrivacyFields() {
 }
 function readPrivacyFields() {
   const isPrivate = $('#room-private').checked;
-  return { private: isPrivate, memberIds: isPrivate ? [...document.querySelectorAll('#room-access input:checked')].map((i) => Number(i.value)) : [] };
+  const checked = (sel) => (isPrivate ? [...document.querySelectorAll(`${sel} input:checked`)].map((i) => Number(i.value)) : []);
+  return { private: isPrivate, memberIds: checked('#access-people'), roleIds: checked('#access-roles') };
 }
 
 function openRoomSettings(c) {
@@ -886,7 +926,7 @@ function openRoomSettings(c) {
   modal(`<h2>Room settings</h2>
     <form id="room-form">
       <label>Room name<input id="room-name" maxlength="32" required value="${escapeHtml(c.name)}" /></label>
-      ${privacyFields(s, c.private, c.memberIds ?? [])}
+      ${privacyFields(s, c.private, c.memberIds ?? [], c.roleIds ?? [])}
       <div class="error" id="modal-error"></div>
       <div class="modal-row">
         <button type="button" class="btn danger" id="room-delete">Delete room</button>
@@ -916,23 +956,30 @@ function openRoomSettings(c) {
 }
 
 function openMemberMenu(s, m) {
-  const host = myRole(s) === 'host';
+  const myRank = rankOf(s, me(s));
+  const self = m.id === state.me.id;
+  const above = rankOf(s, m) > myRank;
+  const roles = s.roles ?? [];
+  const editRoles = can(s, 'roles') && (self || above) && roles.length;
+  const removable = !self && above;
+  const current = rolesOf(s, m);
   modal(`<h2>${escapeHtml(m.username)}</h2>
-    <p class="muted">${m.role === 'mod' ? 'Moderator of' : 'Member of'} ${escapeHtml(s.name)}</p>
-    ${host ? `<button class="btn secondary" id="member-role">${m.role === 'mod' ? 'Remove moderator' : 'Make moderator'}</button>
-      <p class="small muted">Moderators can add, change and delete rooms, delete anyone's messages, and remove or ban members.</p>` : ''}
-    <button class="btn secondary" id="member-remove">Remove from burrow</button>
-    <button class="btn danger" id="member-ban">Ban from burrow</button>
-    <p class="small muted">Removed people can come back with the invite code. Banned people can't, until they're unbanned in the burrow's settings.</p>
+    <p class="muted">${isHost(s, m.id) ? 'Host of' : current.length ? `${current.map((r) => escapeHtml(r.name)).join(', ')} in` : 'Member of'} ${escapeHtml(s.name)}</p>
+    ${editRoles ? `<h4>Roles</h4><ul class="access-list" id="member-roles">${roles.map((r) => `<li><label class="check"><input type="checkbox" value="${r.id}" ${m.roleIds.includes(r.id) ? 'checked' : ''} ${r.position > myRank ? '' : 'disabled'} /> ${roleDot(r.color)}${escapeHtml(r.name)}</label></li>`).join('')}</ul>
+      <button class="btn" id="member-save-roles">Save roles</button>` : ''}
+    ${removable && can(s, 'remove') ? '<button class="btn secondary" id="member-remove">Remove from burrow</button>' : ''}
+    ${removable && can(s, 'ban') ? '<button class="btn danger" id="member-ban">Ban from burrow</button>' : ''}
+    ${removable && (can(s, 'remove') || can(s, 'ban')) ? `<p class="small muted">Removed people can come back with the invite code. Banned people can't, until they're unbanned in the burrow's settings.</p>` : ''}
     <div class="error" id="modal-error"></div>
     <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
   const act = async (path, body) => {
     try { await api(`/api/servers/${s.id}/members/${m.id}/${path}`, { method: 'POST', body }); closeModal(); }
     catch (err) { $('#modal-error').textContent = err.message; }
   };
-  if (host) $('#member-role').onclick = () => act('role', { role: m.role === 'mod' ? 'member' : 'mod' });
-  $('#member-remove').onclick = () => confirm(`Remove ${m.username} from ${s.name}?`) && act('remove', { ban: false });
-  $('#member-ban').onclick = () => confirm(`Ban ${m.username} from ${s.name}?`) && act('remove', { ban: true });
+  if (editRoles) $('#member-save-roles').onclick = () =>
+    act('roles', { roleIds: [...document.querySelectorAll('#member-roles input:checked')].map((i) => Number(i.value)) });
+  $('#member-remove')?.addEventListener('click', () => confirm(`Remove ${m.username} from ${s.name}?`) && act('remove', { ban: false }));
+  $('#member-ban')?.addEventListener('click', () => confirm(`Ban ${m.username} from ${s.name}?`) && act('remove', { ban: true }));
 }
 
 async function renderBans(s) {
@@ -947,6 +994,89 @@ async function renderBans(s) {
     await api(`/api/servers/${s.id}/bans/${b.dataset.unban}`, { method: 'DELETE' }).catch(alertError);
     renderBans(s);
   }));
+}
+
+// The list of roles, highest first, with buttons to move them and open each one.
+function openRoles(serverId) {
+  const s = state.servers.get(serverId);
+  if (!s) return closeModal();
+  const myRank = rankOf(s, me(s));
+  const counts = (r) => s.members.filter((m) => m.roleIds.includes(r.id)).length;
+  modal(`<h2>Roles in ${escapeHtml(s.name)}</h2>
+    <p class="small muted">Higher roles come first. People can only change roles below their own, and names show in their highest role's color.</p>
+    <ul class="role-list">${s.roles.map((r, i) => {
+      const mine = r.position > myRank;
+      return `<li>
+        ${roleDot(r.color)}<span class="role-name" style="color:${escapeHtml(r.color)}">${escapeHtml(r.name)}</span>
+        <span class="small muted">${counts(r)} ${counts(r) === 1 ? 'person' : 'people'}</span>
+        <span class="spacer"></span>
+        ${mine ? `<button class="icon-btn" data-move="up" data-id="${r.id}" title="Move up" ${i === 0 || s.roles[i - 1].position <= myRank ? 'disabled' : ''}>▲</button>
+        <button class="icon-btn" data-move="down" data-id="${r.id}" title="Move down" ${i === s.roles.length - 1 ? 'disabled' : ''}>▼</button>
+        <button class="btn secondary" data-edit="${r.id}">Edit</button>` : ''}
+      </li>`;
+    }).join('')}</ul>
+    ${s.roles.length ? '' : '<p class="muted">No roles yet.</p>'}
+    <div class="error" id="modal-error"></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button><button class="btn" id="role-new">New role</button></div>`);
+  const refresh = (updated) => { state.servers.set(updated.id, updated); openRoles(serverId); };
+  $('#modal-card').querySelectorAll('[data-move]').forEach((b) => (b.onclick = async () => {
+    try { refresh(await api(`/api/roles/${b.dataset.id}`, { method: 'PATCH', body: { move: b.dataset.move } })); }
+    catch (err) { $('#modal-error').textContent = err.message; }
+  }));
+  $('#modal-card').querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => openRoleEditor(serverId, Number(b.dataset.edit))));
+  $('#role-new').onclick = () => openRoleEditor(serverId, null);
+}
+
+function openRoleEditor(serverId, roleId) {
+  const s = state.servers.get(serverId);
+  const role = s.roles.find((r) => r.id === roleId) ?? { name: '', color: ROLE_COLORS[s.roles.length % ROLE_COLORS.length], perms: [] };
+  modal(`<h2>${roleId ? 'Edit role' : 'New role'}</h2>
+    <form id="role-form">
+      <label>Name<input id="role-name" maxlength="32" required value="${escapeHtml(role.name)}" placeholder="e.g. Admins" /></label>
+      <label>Color</label>
+      <div class="color-row">
+        ${ROLE_COLORS.map((c) => `<button type="button" class="swatch" data-color="${c}" style="background:${c}" title="${c}"></button>`).join('')}
+        <input type="color" id="role-color" value="${escapeHtml(role.color)}" title="Pick any color" />
+        <span class="role-preview" id="role-preview">${escapeHtml(role.name || state.me.username)}</span>
+      </div>
+      <h4>What this role can do</h4>
+      <ul class="perm-list">${PERMS.map(([key, label, hint]) => `<li><label class="check">
+        <input type="checkbox" value="${key}" ${role.perms.includes(key) ? 'checked' : ''} ${can(s, key) ? '' : 'disabled'} />
+        <span><b>${label}</b><br /><span class="small muted">${hint}</span></span></label></li>`).join('')}</ul>
+      <p class="small muted">A role with nothing ticked is just a colored label, like "Friends".</p>
+      <div class="error" id="modal-error"></div>
+      <div class="modal-row">
+        ${roleId ? '<button type="button" class="btn danger" id="role-delete">Delete role</button>' : ''}
+        <span class="spacer"></span>
+        <button type="button" class="btn secondary" id="role-back">Back</button>
+        <button type="submit" class="btn">${roleId ? 'Save' : 'Create role'}</button>
+      </div>
+    </form>`);
+  const preview = () => {
+    $('#role-preview').style.color = $('#role-color').value;
+    $('#role-preview').textContent = $('#role-name').value || state.me.username;
+  };
+  $('#role-name').oninput = preview;
+  $('#role-color').oninput = preview;
+  $('#modal-card').querySelectorAll('.swatch').forEach((b) => (b.onclick = () => { $('#role-color').value = b.dataset.color; preview(); }));
+  preview();
+  $('#role-back').onclick = () => openRoles(serverId);
+  const done = (updated) => { state.servers.set(updated.id, updated); openRoles(serverId); };
+  $('#role-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const body = {
+      name: $('#role-name').value,
+      color: $('#role-color').value,
+      perms: [...document.querySelectorAll('.perm-list input:checked')].map((i) => i.value),
+    };
+    try { done(await api(roleId ? `/api/roles/${roleId}` : `/api/servers/${serverId}/roles`, { method: roleId ? 'PATCH' : 'POST', body })); }
+    catch (err) { $('#modal-error').textContent = err.message; }
+  };
+  $('#role-delete')?.addEventListener('click', async () => {
+    if (!confirm(`Delete the ${role.name} role? Everyone who has it loses it.`)) return;
+    try { done(await api(`/api/roles/${roleId}`, { method: 'DELETE' })); }
+    catch (err) { $('#modal-error').textContent = err.message; }
+  });
 }
 
 // ---------------------------------------------------------------- direct messages

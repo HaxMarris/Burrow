@@ -46,13 +46,16 @@ test('moderators, private rooms, removing and banning', async () => {
   const general = burrow.channels[0].id;
   const myView = async (u: any) => (await call('/api/servers', { token: u.token })).data[0];
 
-  // Only the host chooses moderators.
-  assert.equal((await call(`/api/servers/${sid}/members/${amy.user.id}/role`, { body: { role: 'mod' }, token: amy.token })).status, 403);
-  assert.equal((await call(`/api/servers/${sid}/members/${host.user.id}/role`, { body: { role: 'member' }, token: host.token })).status, 400);
-  assert.equal((await call(`/api/servers/${sid}/members/${mod.user.id}/role`, { body: { role: 'mod' }, token: host.token })).status, 200);
+  // Every burrow starts with a Moderator role, and the host hands it out.
+  const modRole = burrow.roles.find((r: any) => r.name === 'Moderator').id;
+  const makeMod = (who: any, target: any) =>
+    call(`/api/servers/${sid}/members/${target.user.id}/roles`, { body: { roleIds: [modRole] }, token: who.token });
+  assert.equal((await makeMod(amy, amy)).status, 403);
+  assert.equal((await makeMod(host, mod)).status, 200);
   const roles = Object.fromEntries((await myView(amy)).members.map((m: any) => [m.username, m.role]));
   assert.deepEqual(roles, { amy: 'member', bob: 'member', host: 'host', mod: 'mod' });
-  assert.equal((await call(`/api/servers/${sid}/members/${amy.user.id}/role`, { body: { role: 'mod' }, token: mod.token })).status, 403);
+  assert.deepEqual((await myView(amy)).members.find((m: any) => m.username === 'mod').roleIds, [modRole]);
+  assert.equal((await makeMod(mod, amy)).status, 403);
 
   // Moderators can make rooms; members can't.
   assert.equal((await call(`/api/servers/${sid}/channels`, { body: { name: 'nope' }, token: amy.token })).status, 403);
@@ -100,7 +103,7 @@ test('moderators, private rooms, removing and banning', async () => {
   assert.equal((await remove(mod, host)).status, 403);
   const mod2 = await reg('mod2');
   await call('/api/join', { body: { inviteCode: burrow.inviteCode }, token: mod2.token });
-  await call(`/api/servers/${sid}/members/${mod2.user.id}/role`, { body: { role: 'mod' }, token: host.token });
+  await makeMod(host, mod2);
   assert.equal((await remove(mod, mod2)).status, 403);
 
   // Removed people can come back with the invite; banned people can't until unbanned.
