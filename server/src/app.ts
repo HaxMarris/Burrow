@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { readFile, writeFile, mkdir, unlink, stat } from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { extname, join, normalize } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { addModeratorRole, type Db } from './db.ts';
@@ -41,6 +41,37 @@ const MAX_MESSAGE_LENGTH = 4000;
 const MAX_ATTACHMENTS = 10;
 const MAX_REACTIONS = 20; // different emoji on one message
 const MAX_ROLES = 30;
+const SESSION_IDLE_MS = 30 * 24 * 60 * 60 * 1000; // logins unused for 30 days expire
+const APP_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "media-src 'self' blob:",
+  "font-src 'self'",
+  // Voice may live on another address (LIVEKIT_URL).
+  "connect-src 'self' https: wss: ws:",
+  "worker-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
+
+/** Compares secrets without leaking how much of them matched through timing. */
+function sameText(a: unknown, b: string) {
+  const x = Buffer.from(String(a ?? ''));
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
+/** The visitor's address. Behind Caddy on the same machine, Caddy passes it along in X-Forwarded-For. */
+function clientIp(req: IncomingMessage) {
+  const direct = req.socket.remoteAddress ?? '';
+  const forwarded = String(req.headers['x-forwarded-for'] ?? '').split(',').pop()?.trim();
+  const local = direct === '127.0.0.1' || direct === '::1' || direct === '::ffff:127.0.0.1' || /^(::ffff:)?(172|10)\./.test(direct);
+  return local && forwarded ? forwarded : direct;
+}
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 // A user's picture link, from their users.avatar file name (or null).
 const avatarUrl = (col: string) => `CASE WHEN ${col} IS NULL THEN NULL ELSE '/api/avatars/' || ${col} END`;
@@ -73,12 +104,50 @@ export function createApp(opts: AppOptions): Server {
 
   // ---- data helpers -------------------------------------------------------
 
+  // A login lasts until it goes unused for SESSION_IDLE_MS. Using it keeps it going.
   const userByToken = (token: string | undefined): User | undefined => {
     if (!token) return undefined;
-    return db
-      .prepare(`SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`)
-      .get(token) as User | undefined;
+    const row = db
+      .prepare(
+        `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar, COALESCE(s.last_used_at, s.created_at) AS lastUsed
+         FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`,
+      )
+      .get(token) as (User & { lastUsed: number }) | undefined;
+    if (!row) return undefined;
+    const t = now();
+    if (t - row.lastUsed > SESSION_IDLE_MS) {
+      db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+      return undefined;
+    }
+    if (t - row.lastUsed > 60 * 60 * 1000) db.prepare('UPDATE sessions SET last_used_at = ? WHERE token = ?').run(t, token);
+    const { lastUsed: _, ...user } = row;
+    return user;
   };
+
+  // ---- guessing limits ----------------------------------------------------
+  // Wrong passwords and registration codes are counted per person and per address;
+  // too many in a row and that door closes for a while.
+  const failures = new Map<string, { count: number; until: number }>();
+  const checkTries = (keys: string[], limit: number) => {
+    const t = now();
+    for (const key of keys) {
+      const f = failures.get(key);
+      if (f && f.until > t && f.count >= limit) {
+        const minutes = Math.ceil((f.until - t) / 60000);
+        throw new HttpError(429, `Too many tries. Wait ${minutes} minute${minutes === 1 ? '' : 's'} and try again.`);
+      }
+    }
+  };
+  const failedTry = (keys: string[], windowMs = 15 * 60 * 1000) => {
+    const t = now();
+    for (const key of keys) {
+      const f = failures.get(key);
+      if (!f || f.until <= t) failures.set(key, { count: 1, until: t + windowMs });
+      else f.count++;
+    }
+    if (failures.size > 10000) for (const [k, f] of failures) if (f.until <= t) failures.delete(k);
+  };
+  const clearTries = (key: string) => failures.delete(key);
 
   const isMember = (serverId: number, userId: number) =>
     !!db.prepare('SELECT 1 FROM members WHERE server_id = ? AND user_id = ?').get(serverId, userId);
@@ -335,7 +404,7 @@ export function createApp(opts: AppOptions): Server {
 
   // ---- HTTP routes --------------------------------------------------------
 
-  type Handler = (ctx: { user: User; params: string[]; body: Json; url: URL; token: string | undefined }) => unknown;
+  type Handler = (ctx: { user: User; params: string[]; body: Json; url: URL; token: string | undefined; ip: string }) => unknown;
   type Route = { method: string; pattern: RegExp; auth: boolean; handler: Handler };
   const routes: Route[] = [];
   const route = (method: string, path: string, handler: Handler, auth = true) =>
@@ -351,13 +420,16 @@ export function createApp(opts: AppOptions): Server {
   route(
     'POST',
     '/api/register',
-    ({ body }) => {
+    ({ body, ip }) => {
+      checkTries([`register-ip:${ip}`], 10);
       const username = cleanName(body.username, 'Username', 32);
       if (!/^[\w.-]+$/.test(username)) throw new HttpError(400, 'Username may only use letters, numbers, _ . -');
       if (typeof body.password !== 'string' || body.password.length < 8)
         throw new HttpError(400, 'Password must be at least 8 characters');
-      if (opts.registrationCode && body.registrationCode !== opts.registrationCode)
+      if (opts.registrationCode && !sameText(body.registrationCode, opts.registrationCode)) {
+        failedTry([`register-ip:${ip}`], 60 * 60 * 1000);
         throw new HttpError(403, 'Invalid registration code');
+      }
       if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username))
         throw new HttpError(409, 'That username is taken');
       const r = db
@@ -371,12 +443,19 @@ export function createApp(opts: AppOptions): Server {
   route(
     'POST',
     '/api/login',
-    ({ body }) => {
+    ({ body, ip }) => {
+      const name = String(body.username ?? '').toLowerCase();
+      const keys = [`login-user:${name}`, `login-ip:${ip}`];
+      checkTries(keys.slice(0, 1), 10);
+      checkTries(keys.slice(1), 30);
       const row = db
         .prepare(`SELECT id, username, ${avatarUrl('avatar')} AS avatar, password_hash FROM users WHERE username = ?`)
         .get(String(body.username ?? '')) as (User & { password_hash: string }) | undefined;
-      if (!row || !verifyPassword(String(body.password ?? ''), row.password_hash))
+      if (!row || !verifyPassword(String(body.password ?? ''), row.password_hash)) {
+        failedTry(keys);
         throw new HttpError(401, 'Wrong username or password');
+      }
+      clearTries(keys[0]);
       return startSession({ id: row.id, username: row.username, avatar: row.avatar });
     },
     false,
@@ -391,9 +470,14 @@ export function createApp(opts: AppOptions): Server {
 
   // Changing your password signs you out everywhere else.
   route('POST', '/api/me/password', ({ user, body, token }) => {
+    const key = `password-user:${user.id}`;
+    checkTries([key], 10);
     const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(user.id) as { password_hash: string };
-    if (!verifyPassword(String(body.currentPassword ?? ''), row.password_hash))
+    if (!verifyPassword(String(body.currentPassword ?? ''), row.password_hash)) {
+      failedTry([key]);
       throw new HttpError(403, 'Your current password is wrong');
+    }
+    clearTries(key);
     if (typeof body.newPassword !== 'string' || body.newPassword.length < 8)
       throw new HttpError(400, 'New password must be at least 8 characters');
     db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(body.newPassword), user.id);
@@ -997,6 +1081,10 @@ export function createApp(opts: AppOptions): Server {
   };
 
   const server = createServer(async (req, res) => {
+    res.setHeader('x-content-type-options', 'nosniff');
+    res.setHeader('referrer-policy', 'no-referrer');
+    // Behind HTTPS (Caddy says so), tell browsers never to use plain HTTP for this site.
+    if (req.headers['x-forwarded-proto'] === 'https') res.setHeader('strict-transport-security', 'max-age=31536000');
     // The desktop client loads its UI locally and talks to this server cross-origin.
     res.setHeader('access-control-allow-origin', '*');
     res.setHeader('access-control-allow-headers', 'authorization, content-type, x-filename');
@@ -1004,7 +1092,13 @@ export function createApp(opts: AppOptions): Server {
     if (req.method === 'OPTIONS') return res.writeHead(204).end();
 
     const url = new URL(req.url ?? '/', 'http://localhost');
-    if (!url.pathname.startsWith('/api/')) return serveStatic(res, url.pathname);
+    if (!url.pathname.startsWith('/api/')) {
+      // The web app may only run its own scripts, and can't be framed by other sites.
+      res.setHeader('content-security-policy', APP_CSP);
+      res.setHeader('x-frame-options', 'DENY');
+      res.setHeader('permissions-policy', 'camera=(), geolocation=(), microphone=(self)');
+      return serveStatic(res, url.pathname);
+    }
 
     try {
       const upload = req.method === 'POST' && url.pathname.match(/^\/api\/channels\/(\d+)\/attachments$/);
@@ -1022,7 +1116,7 @@ export function createApp(opts: AppOptions): Server {
         if (r.auth && !user) throw new HttpError(401, 'Not logged in');
         const body = req.method === 'GET' ? {} : await readBody(req);
         if (url.pathname === '/api/logout') body.token = token;
-        return send(res, 200, await r.handler({ user: user!, params: m.slice(1), body, url, token }));
+        return send(res, 200, await r.handler({ user: user!, params: m.slice(1), body, url, token, ip: clientIp(req) }));
       }
       throw new HttpError(404, 'Not found');
     } catch (err) {

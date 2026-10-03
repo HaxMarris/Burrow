@@ -3,7 +3,9 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      # Only Caddy (on this machine) talks to Burrow directly. Set BURROW_BIND=0.0.0.0 in .env
+      # to reach it on port 3000 from other machines without a reverse proxy.
+      - "${BURROW_BIND:-127.0.0.1}:3000:3000"
     environment:
       # All settings live in a .env file next to this one (copy .env.example),
       # so updating Burrow never touches your edits.
