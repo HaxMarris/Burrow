@@ -14,8 +14,10 @@ const state = {
   serverUrl: isDesktop ? store.get('serverUrl') || '' : location.origin,
   token: store.get('token'),
   me: null,
-  servers: new Map(),       // id -> { id, name, ownerId, inviteCode, channels, members }
-  serverOrder: [],
+  servers: new Map(),       // id -> { id, name, kind, ownerId, inviteCode, channels, members }; DMs are kind 'dm'
+  serverOrder: [],          // burrow ids, in the order they're shown
+  dmOrder: [],              // direct message conversation ids, most recent first
+  inDms: false,             // showing direct messages instead of a burrow
   serverId: Number(store.get('lastServer')) || null,
   channelId: null,
   lastChannel: JSON.parse(store.get('lastChannel') || '{}'), // serverId -> channelId
@@ -173,11 +175,13 @@ async function enterApp() {
 }
 
 async function loadServers() {
-  const list = await api('/api/servers');
-  list.forEach(rememberAvatars);
-  state.servers = new Map(list.map((s) => [s.id, s]));
+  const [list, dms] = await Promise.all([api('/api/servers'), api('/api/dms')]);
+  [...list, ...dms].forEach(rememberAvatars);
+  state.servers = new Map([...list, ...dms].map((s) => [s.id, s]));
   state.serverOrder = list.map((s) => s.id);
-  if (!state.servers.has(state.serverId)) state.serverId = state.serverOrder[0] ?? null;
+  state.dmOrder = dms.map((s) => s.id);
+  if (state.servers.has(state.serverId)) state.inDms = isDm(state.servers.get(state.serverId));
+  else state.serverId = state.inDms ? state.dmOrder[0] ?? null : state.serverOrder[0] ?? null;
   renderServers();
   await selectServer(state.serverId, true);
 }
@@ -219,6 +223,11 @@ function handleEvent(ev) {
   switch (ev.type) {
     case 'message': {
       const m = ev.message;
+      const dm = state.dmOrder.find((id) => state.servers.get(id).channels.some((c) => c.id === m.channelId));
+      if (dm) {
+        state.dmOrder = [dm, ...state.dmOrder.filter((id) => id !== dm)];
+        if (state.inDms) renderChannels();
+      }
       if (m.channelId === state.channelId) {
         state.messages.push(m);
         clearTyping(m.channelId, m.author);
@@ -251,6 +260,13 @@ function handleEvent(ev) {
     }
     case 'server_updated': {
       rememberAvatars(ev.server);
+      if (isDm(ev.server)) {
+        addDm(ev.server);
+        renderServers();
+        if (state.inDms) renderChannels();
+        if (ev.server.id === state.serverId) renderMembers();
+        break;
+      }
       const isNew = !state.servers.has(ev.server.id);
       state.servers.set(ev.server.id, ev.server);
       if (isNew) state.serverOrder.push(ev.server.id);
@@ -287,22 +303,31 @@ function handleEvent(ev) {
 }
 
 function notify(m) {
-  const mentioned = new RegExp('@' + escapeRegex(state.me.username) + '\\b', 'i').test(m.content) || m.replyTo?.authorId === state.me.id;
-  if (!mentioned && !document.hidden) return;
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
   const server = [...state.servers.values()].find((s) => s.channels.some((c) => c.id === m.channelId));
   const channel = server?.channels.find((c) => c.id === m.channelId);
-  const n = new Notification(`${m.author} in ${channel?.name ?? 'Burrow'}`, { body: m.content.slice(0, 200), silent: !mentioned });
+  // A direct message is always for you, like a mention.
+  const mentioned = isDm(server) || new RegExp('@' + escapeRegex(state.me.username) + '\\b', 'i').test(m.content) || m.replyTo?.authorId === state.me.id;
+  if (!mentioned && !document.hidden) return;
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const title = isDm(server) ? `${m.author} (direct message)` : `${m.author} in ${channel?.name ?? 'Burrow'}`;
+  const n = new Notification(title, { body: m.content.slice(0, 200) || 'Sent a file', silent: !mentioned });
   n.onclick = () => { window.focus(); if (server) selectServer(server.id).then(() => selectChannel(m.channelId)); };
 }
 
 // ---------------------------------------------------------------- servers & channels
 
 function renderServers() {
+  const dmTile = document.createElement('button');
+  dmTile.className = 'tile dm-tile' + (state.inDms ? ' active' : '');
+  if (!state.inDms && state.dmOrder.some((id) => state.servers.get(id).channels.some((c) => state.unread.has(c.id))))
+    dmTile.classList.add('unread');
+  dmTile.title = 'Direct messages';
+  dmTile.innerHTML = CHAT_ICON;
+  dmTile.onclick = openDms;
   const tiles = state.serverOrder.map((id) => {
     const s = state.servers.get(id);
     const b = document.createElement('button');
-    b.className = 'tile' + (id === state.serverId ? ' active' : '');
+    b.className = 'tile' + (id === state.serverId && !state.inDms ? ' active' : '');
     if (id !== state.serverId && s.channels.some((c) => state.unread.has(c.id))) b.classList.add('unread');
     b.title = s.name;
     b.textContent = initials(s.name);
@@ -315,18 +340,21 @@ function renderServers() {
   add.title = 'Create or join a burrow';
   add.textContent = '+';
   add.onclick = openAddServer;
-  $('#server-list').replaceChildren(...tiles, add);
-  $('#empty-state').classList.toggle('hidden', state.serverOrder.length > 0);
+  $('#server-list').replaceChildren(dmTile, ...tiles, add);
+  $('#empty-state').classList.toggle('hidden', state.serverOrder.length > 0 || state.inDms);
 }
 
 async function selectServer(id, initial = false) {
+  const s = state.servers.get(id);
+  if (s) state.inDms = isDm(s);
   state.serverId = id;
   store.set('lastServer', id);
   renderServers();
-  const s = state.servers.get(id);
-  $('#server-name').textContent = s?.name ?? 'No burrow yet';
-  $('#server-menu-btn').classList.toggle('hidden', !s);
-  $('#add-channel').classList.toggle('hidden', !s || s.ownerId !== state.me.id);
+  $('#server-name').textContent = state.inDms ? 'Direct messages' : s?.name ?? 'No burrow yet';
+  $('#rooms-title').textContent = state.inDms ? 'Conversations' : 'Rooms';
+  $('#server-menu-btn').classList.toggle('hidden', !s || state.inDms);
+  $('#add-channel').classList.toggle('hidden', !state.inDms && (!s || s.ownerId !== state.me.id));
+  $('#add-channel').title = state.inDms ? 'New message' : 'New room';
   renderMembers();
   if (!s) { state.channelId = null; renderChannels(); state.messages = []; renderMessages(); return; }
   const remembered = state.lastChannel[id];
@@ -337,6 +365,7 @@ async function selectServer(id, initial = false) {
 }
 
 function renderChannels() {
+  if (state.inDms) return renderDmList();
   const s = state.servers.get(state.serverId);
   const channels = s?.channels ?? [];
   const textRooms = channels.filter((c) => c.kind !== 'voice').map((c) => {
@@ -393,10 +422,12 @@ async function selectChannel(id) {
   store.set('lastChannel', JSON.stringify(state.lastChannel));
   renderChannels();
   renderServers();
-  const ch = state.servers.get(state.serverId)?.channels.find((c) => c.id === id);
-  $('#channel-name').textContent = ch?.name ?? '';
+  const server = state.servers.get(state.serverId);
+  const ch = server?.channels.find((c) => c.id === id);
+  const title = isDm(server) ? partner(server).username : ch?.name ?? '';
+  $('#channel-name').textContent = title;
   renderChannelSub();
-  $('#composer-input').placeholder = ch ? `Say something in ${ch.name}` : '';
+  $('#composer-input').placeholder = !ch ? '' : isDm(server) ? `Message ${title}` : `Say something in ${title}`;
   $('#composer-input').disabled = !ch;
   $('#send-btn').disabled = !ch;
   state.messages = [];
@@ -429,7 +460,12 @@ function renderMembers() {
         const name = document.createElement('span');
         name.textContent = m.username;
         li.append(av, name);
-        if (m.id === s.ownerId) {
+        if (!isDm(s) && m.id !== state.me.id) {
+          li.classList.add('can-dm');
+          li.title = `Send ${m.username} a message`;
+          li.onclick = () => openDm(m.id);
+        }
+        if (m.id === s.ownerId && !isDm(s)) {
           const badge = document.createElement('span');
           badge.className = 'owner-badge';
           badge.title = 'Created this burrow';
@@ -451,6 +487,7 @@ function renderMembers() {
 function renderChannelSub() {
   const s = state.servers.get(state.serverId);
   if (!s || !state.channelId) return ($('#channel-sub').textContent = '');
+  if (isDm(s)) return ($('#channel-sub').textContent = `Direct message · ${partner(s).online ? 'around' : 'away'}`);
   const here = s.members.filter((m) => m.online).length;
   $('#channel-sub').textContent = `${s.name} · ${here} of ${s.members.length} around`;
 }
@@ -463,11 +500,14 @@ const GROUP_WINDOW = 7 * 60 * 1000;
 function renderMessages({ stick = false } = {}) {
   const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
   const frag = document.createDocumentFragment();
-  const ch = state.servers.get(state.serverId)?.channels.find((c) => c.id === state.channelId);
+  const server = state.servers.get(state.serverId);
+  const ch = server?.channels.find((c) => c.id === state.channelId);
   if (ch && state.reachedStart) {
     const start = document.createElement('div');
     start.className = 'history-start';
-    start.innerHTML = `<h2>This is the beginning of ${escapeHtml(ch.name)}</h2><div class="muted">Pull up a stump and say hello.</div>`;
+    start.innerHTML = isDm(server)
+      ? `<h2>This is the beginning of your conversation with ${escapeHtml(partner(server).username)}</h2><div class="muted">Only the two of you can see it.</div>`
+      : `<h2>This is the beginning of ${escapeHtml(ch.name)}</h2><div class="muted">Pull up a stump and say hello.</div>`;
     frag.append(start);
   }
   let prev = null;
@@ -747,6 +787,7 @@ $('#server-menu-btn').onclick = () => {
 };
 
 $('#add-channel').onclick = () => {
+  if (state.inDms) return openNewDm();
   modal(`<h2>New room</h2>
     <form id="channel-form">
       <label>Room name<input id="new-channel-name" placeholder="e.g. game-night" maxlength="32" required /></label>
@@ -769,6 +810,96 @@ $('#add-channel').onclick = () => {
     } catch (err) { $('#modal-error').textContent = err.message; }
   };
 };
+
+// ---------------------------------------------------------------- direct messages
+
+const CHAT_ICON = '<svg viewBox="0 0 24 24"><path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9l-5 4V5a1 1 0 0 1 1-1Z" fill="currentColor"/></svg>';
+
+const isDm = (s) => s?.kind === 'dm';
+// The other person in a conversation.
+const partner = (s) => s.members.find((m) => m.id !== state.me.id) ?? s.members[0];
+
+function addDm(s) {
+  rememberAvatars(s);
+  state.servers.set(s.id, s);
+  if (!state.dmOrder.includes(s.id)) state.dmOrder.unshift(s.id);
+}
+
+function openDms() {
+  state.inDms = true;
+  const last = Number(store.get('lastDm'));
+  const id = state.dmOrder.includes(last) ? last : state.dmOrder[0] ?? null;
+  selectServer(id);
+}
+
+async function openDm(userId) {
+  try {
+    let id = state.dmOrder.find((d) => partner(state.servers.get(d)).id === userId);
+    if (!id) {
+      const s = await api('/api/dms', { method: 'POST', body: { userId } });
+      addDm(s);
+      id = s.id;
+    }
+    closeModal();
+    store.set('lastDm', id);
+    selectServer(id);
+  } catch (err) { alertError(err); }
+}
+
+function renderDmList() {
+  const items = state.dmOrder.map((id) => {
+    const s = state.servers.get(id);
+    const p = partner(s);
+    const li = document.createElement('li');
+    li.className = 'dm' + (id === state.serverId ? ' active' : s.channels.some((c) => state.unread.has(c.id)) ? ' unread' : '');
+    const av = document.createElement('span');
+    av.className = 'avatar xs';
+    setAvatar(av, p.username, avatarOf(p.id, p.avatar));
+    const name = document.createElement('span');
+    name.textContent = p.username;
+    li.append(av, name);
+    li.onclick = () => { store.set('lastDm', id); selectServer(id); };
+    return li;
+  });
+  if (!items.length) {
+    const hint = document.createElement('li');
+    hint.className = 'hint';
+    hint.textContent = 'No conversations yet. Press + or click someone in a burrow\'s member list.';
+    items.push(hint);
+  }
+  $('#channel-list').replaceChildren(...items);
+  $('#voice-list').replaceChildren();
+  $('#voice-section').classList.add('hidden');
+}
+
+// Pick someone you share a burrow with.
+function openNewDm() {
+  const people = new Map();
+  for (const id of state.serverOrder)
+    for (const m of state.servers.get(id).members) if (m.id !== state.me.id) people.set(m.id, m);
+  const list = [...people.values()].sort((a, b) => a.username.localeCompare(b.username));
+  modal(`<h2>New message</h2>
+    ${list.length ? '<input id="dm-filter" placeholder="Find someone" />' : '<p class="muted">Join a burrow first. You can message anyone who shares one with you.</p>'}
+    <ul class="people-picker" id="dm-people"></ul>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
+  const render = (q = '') => {
+    $('#dm-people').replaceChildren(
+      ...list.filter((m) => m.username.toLowerCase().includes(q.toLowerCase())).map((m) => {
+        const li = document.createElement('li');
+        const av = document.createElement('span');
+        av.className = 'avatar';
+        setAvatar(av, m.username, avatarOf(m.id, m.avatar));
+        const name = document.createElement('span');
+        name.textContent = m.username;
+        li.append(av, name);
+        li.onclick = () => openDm(m.id);
+        return li;
+      }),
+    );
+  };
+  render();
+  $('#dm-filter')?.addEventListener('input', (e) => render(e.target.value));
+}
 
 // ---------------------------------------------------------------- your account
 
