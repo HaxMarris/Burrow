@@ -30,7 +30,7 @@ const state = {
 
 // ---------------------------------------------------------------- API
 
-async function api(path, { method = 'GET', body } = {}) {
+async function api(path, { method = 'GET', body } = {}, retried = false) {
   const res = await fetch(state.serverUrl + path, {
     method,
     headers: {
@@ -39,10 +39,30 @@ async function api(path, { method = 'GET', body } = {}) {
     },
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (res.redirected) adoptOrigin(res.url);
+  if (res.redirected && res.status === 401 && !retried) return api(path, { method, body }, true);
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && state.token && path !== '/api/login') logout(false);
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
+}
+
+// The server can move us, usually from http:// to https:// behind Caddy. Browsers drop
+// the login header on that hop and refuse it entirely for JSON requests, so follow it
+// once with a plain request and remember where we landed.
+function adoptOrigin(url) {
+  const origin = new URL(url).origin;
+  if (!state.serverUrl || origin === new URL(state.serverUrl).origin) return;
+  state.serverUrl = origin;
+  if (isDesktop) store.set('serverUrl', origin);
+}
+
+async function resolveServerUrl() {
+  if (!isDesktop || !state.serverUrl) return;
+  try {
+    const res = await fetch(state.serverUrl + '/api/config');
+    if (res.redirected) adoptOrigin(res.url);
+  } catch {}
 }
 
 // ---------------------------------------------------------------- auth screen
@@ -82,10 +102,14 @@ $('#server-url').addEventListener('change', () => {
   renderAuthMode();
 });
 
+// Typed without http:// or https://? Public names get https://; local addresses
+// (localhost, an IP, a .local name, or anything with a :port) get http://.
 function normalizeServerUrl(v) {
   v = v.trim().replace(/\/+$/, '');
-  if (v && !/^https?:\/\//i.test(v)) v = 'http://' + v;
-  return v;
+  if (!v || /^https?:\/\//i.test(v)) return v;
+  const host = v.split('/')[0];
+  const local = /^(localhost|\d{1,3}(\.\d{1,3}){3}|\[[0-9a-f:]+\])(:\d+)?$/i.test(host) || /\.local(:\d+)?$/i.test(host) || /:\d+$/.test(host);
+  return (local ? 'http://' : 'https://') + v;
 }
 
 $('#auth-form').addEventListener('submit', async (e) => {
@@ -94,6 +118,7 @@ $('#auth-form').addEventListener('submit', async (e) => {
   if (!state.serverUrl) return ($('#auth-error').textContent = 'Enter the server address.');
   $('#auth-submit').disabled = true;
   try {
+    await resolveServerUrl();
     const body = { username: $('#username').value.trim(), password: $('#password').value };
     if (registering) body.registrationCode = $('#reg-code').value.trim();
     const { token, user } = await api(registering ? '/api/register' : '/api/login', { method: 'POST', body });
@@ -713,5 +738,5 @@ $('#members-toggle').onclick = () => {
 
 // ---------------------------------------------------------------- start
 
-if (state.token && state.serverUrl) enterApp().catch(() => showAuth());
+if (state.token && state.serverUrl) resolveServerUrl().then(enterApp).catch(() => showAuth());
 else showAuth();
