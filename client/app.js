@@ -27,6 +27,8 @@ const state = {
   ws: null,
   wsRetry: 0,
   voiceEnabled: false,      // the server has LiveKit set up
+  maxUploadBytes: 0,        // 0 = uploads are off on this server
+  pending: [],              // files attached to the composer: { file, previewUrl, progress, attachment, error, done }
   voice: null,              // { channelId, room, muted } while in a voice room
   speaking: new Set(),      // user ids talking right now in our voice room
   mutedInVoice: new Set(),  // user ids muted in our voice room
@@ -159,7 +161,10 @@ async function enterApp() {
   $('#me-name').textContent = state.me.username;
   setAvatar($('#me-avatar'), state.me.username);
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
-  state.voiceEnabled = !!(await api('/api/config').catch(() => ({}))).voice;
+  const config = await api('/api/config').catch(() => ({}));
+  state.voiceEnabled = !!config.voice;
+  state.maxUploadBytes = config.maxUploadBytes || 0;
+  $('#attach-btn').classList.toggle('hidden', !state.maxUploadBytes);
   await loadServers();
   connect();
 }
@@ -352,6 +357,12 @@ function renderChannels() {
 }
 
 async function selectChannel(id) {
+  // Files upload into a specific room, so switching rooms drops any not yet sent.
+  if (id !== state.channelId && state.pending.length) {
+    state.pending.forEach((p) => { p.xhr?.abort(); if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
+    state.pending = [];
+    renderPending();
+  }
   state.channelId = id;
   state.unread.delete(id);
   state.lastChannel[state.serverId] = id;
@@ -479,7 +490,9 @@ function renderLine(m) {
   const content = document.createElement('div');
   content.className = 'content';
   content.innerHTML = formatContent(m.content) + (m.editedAt ? ' <span class="edited">(edited)</span>' : '');
+  if (!m.content && !m.editedAt) content.classList.add('hidden');
   el.append(content);
+  if (m.attachments?.length) el.append(renderAttachments(m.attachments));
 
   if (m.authorId === state.me.id) {
     const actions = document.createElement('div');
@@ -545,16 +558,31 @@ messagesEl.addEventListener('scroll', async () => {
 const input = $('#composer-input');
 let lastTypingSent = 0;
 
-function sendComposer() {
+async function sendComposer() {
   const content = input.value.trim();
-  if (!content || !state.channelId) return;
-  if (state.ws?.readyState === WebSocket.OPEN) {
-    state.ws.send(JSON.stringify({ type: 'send', channelId: state.channelId, content }));
-  } else {
-    api(`/api/channels/${state.channelId}/messages`, { method: 'POST', body: { content } }).catch(alertError);
-  }
+  const channelId = state.channelId;
+  const files = state.pending;
+  if ((!content && !files.length) || !channelId) return;
+  if (files.some((p) => p.error)) return alert('Remove the files that failed to upload first.');
   input.value = '';
   autosize();
+  state.pending = [];
+  renderPending();
+  try {
+    const attachmentIds = (await Promise.all(files.map((p) => p.done))).map((a) => a.id);
+    files.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl));
+    if (state.ws?.readyState === WebSocket.OPEN) {
+      state.ws.send(JSON.stringify({ type: 'send', channelId, content, attachmentIds }));
+    } else {
+      await api(`/api/channels/${channelId}/messages`, { method: 'POST', body: { content, attachmentIds } });
+    }
+  } catch (err) {
+    // Put everything back so nothing is lost.
+    if (!input.value) input.value = content;
+    state.pending = files.concat(state.pending);
+    renderPending();
+    alertError(err);
+  }
   lastTypingSent = 0;
   input.focus();
 }
@@ -612,6 +640,7 @@ function renderTyping() {
 // ---------------------------------------------------------------- modals
 
 function modal(html) {
+  $('#modal-card').className = 'modal-card';
   $('#modal-card').innerHTML = html;
   $('#modal').classList.remove('hidden');
   $('#modal-card').querySelectorAll('[data-close]').forEach((b) => (b.onclick = closeModal));
@@ -704,6 +733,147 @@ $('#add-channel').onclick = () => {
     } catch (err) { $('#modal-error').textContent = err.message; }
   };
 };
+
+// ---------------------------------------------------------------- attachments
+
+const IMAGE_TYPES = /^image\/(png|jpeg|gif|webp|avif)$/;
+
+function addFiles(fileList) {
+  if (!state.maxUploadBytes || !state.channelId) return;
+  for (const file of fileList) {
+    if (state.pending.length >= 10) { alert('You can attach up to 10 files at a time.'); break; }
+    if (file.size > state.maxUploadBytes) {
+      alert(`"${file.name}" is too big. Files can be at most ${formatSize(state.maxUploadBytes)}.`);
+      continue;
+    }
+    const p = { file, previewUrl: IMAGE_TYPES.test(file.type) ? URL.createObjectURL(file) : null, progress: 0, error: null };
+    p.done = uploadFile(state.channelId, p);
+    p.done.catch(() => {}); // failures show on the chip
+    state.pending.push(p);
+  }
+  renderPending();
+  input.focus();
+}
+
+function uploadFile(channelId, p) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    p.xhr = xhr;
+    xhr.open('POST', `${state.serverUrl}/api/channels/${channelId}/attachments`);
+    xhr.setRequestHeader('authorization', 'Bearer ' + state.token);
+    xhr.setRequestHeader('content-type', p.file.type || 'application/octet-stream');
+    xhr.setRequestHeader('x-filename', encodeURIComponent(p.file.name || 'pasted-image.png'));
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) { p.progress = e.loaded / e.total; renderPending(); } };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status === 200) { p.progress = 1; p.attachment = data; renderPending(); resolve(data); }
+      else fail(new Error(data.error || `Upload failed (${xhr.status})`));
+    };
+    xhr.onerror = () => fail(new Error("Couldn't upload " + p.file.name));
+    xhr.onabort = () => reject(new Error('Upload cancelled'));
+    function fail(err) { p.error = err.message; renderPending(); reject(err); }
+    xhr.send(p.file);
+  });
+}
+
+function renderPending() {
+  const tray = $('#pending-files');
+  tray.classList.toggle('hidden', !state.pending.length);
+  tray.replaceChildren(...state.pending.map((p) => {
+    const chip = document.createElement('div');
+    chip.className = 'pending' + (p.error ? ' failed' : '');
+    chip.title = p.error || p.file.name;
+    chip.innerHTML = (p.previewUrl ? `<img src="${p.previewUrl}" alt="" />` : `<span class="file-icon">${FILE_ICON}</span>`)
+      + `<span class="pending-name">${escapeHtml(p.file.name || 'image')}</span>`
+      + `<span class="pending-meta">${p.error ? 'Failed' : p.progress < 1 ? Math.round(p.progress * 100) + '%' : formatSize(p.file.size)}</span>`
+      + `<span class="bar" style="width:${p.error ? 0 : Math.round(p.progress * 100)}%"></span>`;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'pending-remove';
+    x.title = 'Remove';
+    x.textContent = '×';
+    x.onclick = () => {
+      p.xhr?.abort();
+      if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
+      state.pending = state.pending.filter((q) => q !== p);
+      renderPending();
+    };
+    chip.append(x);
+    return chip;
+  }));
+}
+
+function renderAttachments(list) {
+  const wrap = document.createElement('div');
+  wrap.className = 'attachments';
+  for (const a of list) {
+    const url = state.serverUrl + a.url;
+    if (IMAGE_TYPES.test(a.type)) {
+      const img = document.createElement('img');
+      img.className = 'att-image';
+      img.src = url;
+      img.alt = a.name;
+      img.loading = 'lazy';
+      img.onload = () => { if (messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 400) messagesEl.scrollTop = messagesEl.scrollHeight; };
+      img.onclick = () => openImage(a, url);
+      wrap.append(img);
+    } else if (/^video\/(mp4|webm)$/.test(a.type)) {
+      const v = document.createElement('video');
+      v.className = 'att-video';
+      v.src = url;
+      v.controls = true;
+      v.preload = 'metadata';
+      wrap.append(v);
+    } else if (/^audio\//.test(a.type)) {
+      const au = document.createElement('audio');
+      au.src = url;
+      au.controls = true;
+      wrap.append(au);
+    } else {
+      const card = document.createElement('a');
+      card.className = 'att-file';
+      card.href = url;
+      card.target = '_blank';
+      card.rel = 'noopener';
+      card.innerHTML = `<span class="file-icon">${FILE_ICON}</span><span class="att-file-text"><span class="att-file-name">${escapeHtml(a.name)}</span><span class="muted small">${formatSize(a.size)}</span></span>`;
+      wrap.append(card);
+    }
+  }
+  return wrap;
+}
+
+function openImage(a, url) {
+  modal(`<div class="lightbox"><img src="${escapeHtml(url)}" alt="${escapeHtml(a.name)}" />
+    <div class="modal-row"><a class="btn secondary" href="${escapeHtml(url)}" target="_blank" rel="noopener">Open original</a><button class="btn" data-close>Close</button></div></div>`);
+  $('#modal-card').classList.add('wide');
+}
+
+function formatSize(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return Math.round(n / 1024) + ' KB';
+  return (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
+}
+
+const FILE_ICON = '<svg viewBox="0 0 24 24"><path d="M6 2h8l6 6v14H6V2Zm8 1.5V9h5.5L14 3.5Z"/></svg>';
+
+$('#attach-btn').onclick = () => $('#file-input').click();
+$('#file-input').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; };
+input.addEventListener('paste', (e) => {
+  const files = [...(e.clipboardData?.files ?? [])];
+  if (files.length) { e.preventDefault(); addFiles(files); }
+});
+const chatEl = $('.chat');
+let dragDepth = 0;
+chatEl.addEventListener('dragenter', (e) => { if (e.dataTransfer?.types.includes('Files') && state.maxUploadBytes) { dragDepth++; chatEl.classList.add('dropping'); } });
+chatEl.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; chatEl.classList.remove('dropping'); } });
+chatEl.addEventListener('dragover', (e) => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault(); });
+chatEl.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  chatEl.classList.remove('dropping');
+  if (e.dataTransfer?.files.length) addFiles(e.dataTransfer.files);
+});
 
 // ---------------------------------------------------------------- voice rooms
 //

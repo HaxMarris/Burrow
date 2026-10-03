@@ -1,4 +1,4 @@
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDb } from './db.ts';
 import { createApp } from './app.ts';
@@ -11,6 +11,8 @@ const app = createApp({
   db: openDb(dbFile),
   publicDir: resolve(process.env.PUBLIC_DIR ?? resolve(here, '../../client')),
   registrationCode: process.env.REGISTRATION_CODE || undefined,
+  uploadDir: process.env.UPLOAD_DIR ?? join(dirname(dbFile), 'uploads'),
+  maxUploadBytes: Number(process.env.MAX_UPLOAD_MB ?? 25) * 1024 * 1024,
   voice:
     process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET
       ? {

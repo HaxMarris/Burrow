@@ -122,7 +122,12 @@
       <div id="messages" class="messages"></div>
       <div class="composer-wrap">
         <div id="typing" class="typing"></div>
+        <div id="pending-files" class="pending-files hidden"></div>
         <form id="composer" class="composer">
+          <button type="button" class="icon-btn attach hidden" id="attach-btn" title="Attach files (or paste / drop them)">
+            <svg viewBox="0 0 24 24"><path d="M16.5 6.5 8.4 14.6a1.5 1.5 0 0 0 2.1 2.1l8.2-8.2a3.5 3.5 0 0 0-5-5L5.4 11.9a5.5 5.5 0 0 0 7.8 7.8l7.3-7.3-1.4-1.4-7.3 7.3a3.5 3.5 0 0 1-5-5l8.3-8.4a1.5 1.5 0 0 1 2.1 2.1l-8.2 8.2-.1.1 1.4 1.4Z"/></svg>
+          </button>
+          <input type="file" id="file-input" multiple hidden />
           <textarea id="composer-input" rows="1" placeholder="Say something" maxlength="4000"></textarea>
           <button type="submit" class="send" id="send-btn" title="Send">
             <svg viewBox="0 0 24 24"><path d="M4 12 20 4l-4 16-4-6-8-2Z"/></svg>
