@@ -80,5 +80,11 @@ export function openDb(file: string): Db {
   // Added with profile pictures: the picture's file name in the uploads folder.
   const userCols = db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
   if (!userCols.some((c) => c.name === 'avatar')) db.exec('ALTER TABLE users ADD COLUMN avatar TEXT');
+  // Added with direct messages: a DM is a tiny private 'dm' server with two members and one room.
+  // dm_key ("smallerId:largerId") keeps it to one conversation per pair of people.
+  const serverCols = db.prepare('PRAGMA table_info(servers)').all() as { name: string }[];
+  if (!serverCols.some((c) => c.name === 'kind')) db.exec("ALTER TABLE servers ADD COLUMN kind TEXT NOT NULL DEFAULT 'burrow'");
+  if (!serverCols.some((c) => c.name === 'dm_key')) db.exec('ALTER TABLE servers ADD COLUMN dm_key TEXT');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS servers_by_dm_key ON servers(dm_key)');
   return db;
 }

@@ -145,8 +145,9 @@ export function createApp(opts: AppOptions): Server {
 
   const serverSummary = (serverId: number) => {
     const server = db
-      .prepare('SELECT id, name, owner_id AS ownerId, invite_code AS inviteCode FROM servers WHERE id = ?')
+      .prepare('SELECT id, name, kind, owner_id AS ownerId, invite_code AS inviteCode FROM servers WHERE id = ?')
       .get(serverId) as Json;
+    if (server.kind === 'dm') delete server.inviteCode;
     const channels = (
       db.prepare('SELECT id, name, kind FROM channels WHERE server_id = ? ORDER BY id').all(serverId) as Json[]
     ).map((c) => (c.kind === 'voice' ? { ...c, voiceUsers: usersInVoice(c.id as number) } : c));
@@ -327,9 +328,53 @@ export function createApp(opts: AppOptions): Server {
 
   route('GET', '/api/servers', ({ user }) => {
     const ids = db
-      .prepare('SELECT server_id FROM members WHERE user_id = ? ORDER BY joined_at')
+      .prepare(
+        "SELECT m.server_id FROM members m JOIN servers s ON s.id = m.server_id WHERE m.user_id = ? AND s.kind = 'burrow' ORDER BY m.joined_at",
+      )
       .all(user.id) as { server_id: number }[];
     return ids.map((r) => serverSummary(r.server_id));
+  });
+
+  // ---- direct messages ----------------------------------------------------
+
+  /** Your conversations, most recently active first. */
+  route('GET', '/api/dms', ({ user }) => {
+    const rows = db
+      .prepare(
+        `SELECT s.id, COALESCE((SELECT MAX(msg.created_at) FROM channels c JOIN messages msg ON msg.channel_id = c.id
+                                WHERE c.server_id = s.id), s.created_at) AS lastActive
+         FROM members m JOIN servers s ON s.id = m.server_id
+         WHERE m.user_id = ? AND s.kind = 'dm' ORDER BY lastActive DESC`,
+      )
+      .all(user.id) as { id: number; lastActive: number }[];
+    return rows.map((r) => ({ ...serverSummary(r.id), lastActive: r.lastActive }));
+  });
+
+  /** Opens your conversation with someone, starting it if needed. You can only start one with people you share a burrow with. */
+  route('POST', '/api/dms', ({ user, body }) => {
+    const otherId = Number(body.userId);
+    if (otherId === user.id) throw new HttpError(400, "You can't message yourself");
+    const key = [user.id, otherId].sort((a, b) => a - b).join(':');
+    const existing = db.prepare('SELECT id FROM servers WHERE dm_key = ?').get(key) as { id: number } | undefined;
+    if (existing) return serverSummary(existing.id);
+    const sharesBurrow = db
+      .prepare(
+        `SELECT 1 FROM members a JOIN members b ON a.server_id = b.server_id JOIN servers s ON s.id = a.server_id
+         WHERE a.user_id = ? AND b.user_id = ? AND s.kind = 'burrow'`,
+      )
+      .get(user.id, otherId);
+    if (!sharesBurrow) throw new HttpError(403, 'You can only message people who share a burrow with you');
+    const t = now();
+    const r = db
+      .prepare("INSERT INTO servers (name, owner_id, invite_code, created_at, kind, dm_key) VALUES ('', ?, ?, ?, 'dm', ?)")
+      .run(user.id, newInviteCode(), t, key);
+    const serverId = Number(r.lastInsertRowid);
+    for (const id of [user.id, otherId])
+      db.prepare('INSERT INTO members (server_id, user_id, joined_at) VALUES (?, ?, ?)').run(serverId, id, t);
+    db.prepare('INSERT INTO channels (server_id, name, created_at) VALUES (?, ?, ?)').run(serverId, 'dm', t);
+    const summary = serverSummary(serverId);
+    broadcastToServer(serverId, { type: 'server_updated', server: summary });
+    return summary;
   });
 
   route('POST', '/api/servers', ({ user, body }) => {
@@ -346,7 +391,7 @@ export function createApp(opts: AppOptions): Server {
 
   route('POST', '/api/join', ({ user, body }) => {
     const code = String(body.inviteCode ?? '').trim().split('/').pop();
-    const server = db.prepare('SELECT id FROM servers WHERE invite_code = ?').get(code ?? '') as
+    const server = db.prepare("SELECT id FROM servers WHERE invite_code = ? AND kind = 'burrow'").get(code ?? '') as
       | { id: number }
       | undefined;
     if (!server) throw new HttpError(404, 'Invite code not found');
@@ -359,7 +404,7 @@ export function createApp(opts: AppOptions): Server {
 
   route('POST', '/api/servers/:id/leave', ({ user, params }) => {
     const serverId = Number(params[0]);
-    const owner = db.prepare('SELECT owner_id FROM servers WHERE id = ?').get(serverId) as
+    const owner = db.prepare("SELECT owner_id FROM servers WHERE id = ? AND kind = 'burrow'").get(serverId) as
       | { owner_id: number }
       | undefined;
     if (!owner || !isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
@@ -383,7 +428,7 @@ export function createApp(opts: AppOptions): Server {
 
   route('POST', '/api/servers/:id/channels', ({ user, params, body }) => {
     const serverId = Number(params[0]);
-    const server = db.prepare('SELECT owner_id FROM servers WHERE id = ?').get(serverId) as
+    const server = db.prepare("SELECT owner_id FROM servers WHERE id = ? AND kind = 'burrow'").get(serverId) as
       | { owner_id: number }
       | undefined;
     if (!server || !isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
