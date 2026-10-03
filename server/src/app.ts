@@ -22,6 +22,8 @@ export interface AppOptions {
 }
 
 type User = { id: number; username: string; avatar: string | null };
+type Role = 'host' | 'mod' | 'member';
+type Channel = { id: number; serverId: number; name: string; kind: 'text' | 'voice'; private: number };
 type Json = Record<string, unknown>;
 
 class HttpError extends Error {
@@ -78,9 +80,33 @@ export function createApp(opts: AppOptions): Server {
     !!db.prepare('SELECT 1 FROM members WHERE server_id = ? AND user_id = ?').get(serverId, userId);
 
   const channelById = (id: number) =>
-    db.prepare('SELECT id, server_id AS serverId, name, kind FROM channels WHERE id = ?').get(id) as
-      | { id: number; serverId: number; name: string; kind: 'text' | 'voice' }
+    db.prepare('SELECT id, server_id AS serverId, name, kind, private FROM channels WHERE id = ?').get(id) as
+      | Channel
       | undefined;
+
+  // ---- roles: the host (whoever created the burrow), moderators and members --------
+
+  /** 'host', 'mod' or 'member' in a burrow; null if not in it. DMs have no host. */
+  const roleOf = (serverId: number, userId: number): Role | null => {
+    const row = db
+      .prepare('SELECT s.owner_id, s.kind, m.role FROM members m JOIN servers s ON s.id = m.server_id WHERE m.server_id = ? AND m.user_id = ?')
+      .get(serverId, userId) as { owner_id: number; kind: string; role: Role } | undefined;
+    if (!row) return null;
+    if (row.kind === 'burrow' && row.owner_id === userId) return 'host';
+    return row.role;
+  };
+  /** Hosts and moderators look after a burrow: rooms, other people's messages, removing people. */
+  const canManage = (serverId: number, userId: number) => {
+    const role = roleOf(serverId, userId);
+    return role === 'host' || role === 'mod';
+  };
+  /** Private rooms are seen by the host, moderators and the people let in. */
+  const canSee = (channel: Channel, userId: number) => {
+    if (!isMember(channel.serverId, userId)) return false;
+    if (!channel.private || canManage(channel.serverId, userId)) return true;
+    return !!db.prepare('SELECT 1 FROM channel_access WHERE channel_id = ? AND user_id = ?').get(channel.id, userId);
+  };
+  const channelAudience = (channel: Channel) => serverMemberIds(channel.serverId).filter((id) => canSee(channel, id));
 
   const serverMemberIds = (serverId: number) =>
     (db.prepare('SELECT user_id FROM members WHERE server_id = ?').all(serverId) as { user_id: number }[]).map(
@@ -143,24 +169,38 @@ export function createApp(opts: AppOptions): Server {
     return row && withAttachments([row])[0];
   };
 
-  const serverSummary = (serverId: number) => {
+  /** A burrow as one person sees it: private rooms they can't enter are left out. */
+  const serverSummary = (serverId: number, viewerId: number) => {
     const server = db
       .prepare('SELECT id, name, kind, owner_id AS ownerId, invite_code AS inviteCode FROM servers WHERE id = ?')
       .get(serverId) as Json;
     if (server.kind === 'dm') delete server.inviteCode;
+    const manager = canManage(serverId, viewerId);
     const channels = (
-      db.prepare('SELECT id, name, kind FROM channels WHERE server_id = ? ORDER BY id').all(serverId) as Json[]
-    ).map((c) => (c.kind === 'voice' ? { ...c, voiceUsers: usersInVoice(c.id as number) } : c));
+      db.prepare('SELECT id, server_id AS serverId, name, kind, private FROM channels WHERE server_id = ? ORDER BY id').all(serverId) as Channel[]
+    )
+      .filter((c) => canSee(c, viewerId))
+      .map(({ serverId: _, private: priv, ...c }) => ({
+        ...c,
+        private: !!priv,
+        ...(c.kind === 'voice' ? { voiceUsers: usersInVoice(c.id) } : {}),
+        // Who has been let in, for the people who can change it.
+        ...(priv && manager ? { memberIds: (db.prepare('SELECT user_id FROM channel_access WHERE channel_id = ?').all(c.id) as { user_id: number }[]).map((r) => r.user_id) } : {}),
+      }));
     const members = db
       .prepare(
-        `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar FROM members m JOIN users u ON u.id = m.user_id
+        `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar, m.role FROM members m JOIN users u ON u.id = m.user_id
          WHERE m.server_id = ? ORDER BY u.username`,
       )
-      .all(serverId) as User[];
+      .all(serverId) as (User & { role: Role })[];
     return {
       ...server,
       channels,
-      members: members.map((m) => ({ ...m, online: online.has(m.id) })),
+      members: members.map((m) => ({
+        ...m,
+        role: server.kind === 'burrow' && m.id === server.ownerId ? 'host' : server.kind === 'dm' ? 'member' : m.role,
+        online: online.has(m.id),
+      })),
     };
   };
 
@@ -192,6 +232,11 @@ export function createApp(opts: AppOptions): Server {
   };
 
   const broadcastToServer = (serverId: number, event: Json) => sendTo(serverMemberIds(serverId), event);
+  const broadcastToChannel = (channel: Channel, event: Json) => sendTo(channelAudience(channel), event);
+  /** Everyone in a burrow gets their own view of it, since private rooms differ person to person. */
+  const sendServerUpdate = (serverId: number) => {
+    for (const id of serverMemberIds(serverId)) sendTo([id], { type: 'server_updated', server: serverSummary(serverId, id) });
+  };
 
   // Who is in which voice room. The app reports joining and leaving; LiveKit carries the audio.
   const setVoice = (userId: number, channelId: number | null) => {
@@ -200,12 +245,12 @@ export function createApp(opts: AppOptions): Server {
     if (prev !== undefined) {
       inVoice.delete(userId);
       const old = channelById(prev);
-      if (old) broadcastToServer(old.serverId, { type: 'voice_state', channelId: old.id, userIds: usersInVoice(old.id) });
+      if (old) broadcastToChannel(old, { type: 'voice_state', channelId: old.id, userIds: usersInVoice(old.id) });
     }
     if (channelId !== null) {
       const channel = channelById(channelId)!;
       inVoice.set(userId, channelId);
-      broadcastToServer(channel.serverId, { type: 'voice_state', channelId, userIds: usersInVoice(channelId) });
+      broadcastToChannel(channel, { type: 'voice_state', channelId, userIds: usersInVoice(channelId) });
     }
   };
 
@@ -220,7 +265,7 @@ export function createApp(opts: AppOptions): Server {
 
   const postMessage = (user: User, channelId: number, content: unknown, attachmentIds: unknown = [], replyTo: unknown = null) => {
     const channel = channelById(channelId);
-    if (!channel || !isMember(channel.serverId, user.id)) throw new HttpError(404, 'Room not found');
+    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
     if (content == null) content = '';
     if (typeof content !== 'string') throw new HttpError(400, 'Message is empty');
@@ -251,7 +296,7 @@ export function createApp(opts: AppOptions): Server {
       db.prepare('UPDATE attachments SET message_id = ?, position = ? WHERE id = ?').run(Number(r.lastInsertRowid), position, id),
     );
     const message = messageById(Number(r.lastInsertRowid))!;
-    broadcastToServer(channel.serverId, { type: 'message', message });
+    broadcastToChannel(channel, { type: 'message', message });
     return message;
   };
 
@@ -332,7 +377,7 @@ export function createApp(opts: AppOptions): Server {
         "SELECT m.server_id FROM members m JOIN servers s ON s.id = m.server_id WHERE m.user_id = ? AND s.kind = 'burrow' ORDER BY m.joined_at",
       )
       .all(user.id) as { server_id: number }[];
-    return ids.map((r) => serverSummary(r.server_id));
+    return ids.map((r) => serverSummary(r.server_id, user.id));
   });
 
   // ---- direct messages ----------------------------------------------------
@@ -347,7 +392,7 @@ export function createApp(opts: AppOptions): Server {
          WHERE m.user_id = ? AND s.kind = 'dm' ORDER BY lastActive DESC`,
       )
       .all(user.id) as { id: number; lastActive: number }[];
-    return rows.map((r) => ({ ...serverSummary(r.id), lastActive: r.lastActive }));
+    return rows.map((r) => ({ ...serverSummary(r.id, user.id), lastActive: r.lastActive }));
   });
 
   /** Opens your conversation with someone, starting it if needed. You can only start one with people you share a burrow with. */
@@ -356,7 +401,7 @@ export function createApp(opts: AppOptions): Server {
     if (otherId === user.id) throw new HttpError(400, "You can't message yourself");
     const key = [user.id, otherId].sort((a, b) => a - b).join(':');
     const existing = db.prepare('SELECT id FROM servers WHERE dm_key = ?').get(key) as { id: number } | undefined;
-    if (existing) return serverSummary(existing.id);
+    if (existing) return serverSummary(existing.id, user.id);
     const sharesBurrow = db
       .prepare(
         `SELECT 1 FROM members a JOIN members b ON a.server_id = b.server_id JOIN servers s ON s.id = a.server_id
@@ -372,9 +417,8 @@ export function createApp(opts: AppOptions): Server {
     for (const id of [user.id, otherId])
       db.prepare('INSERT INTO members (server_id, user_id, joined_at) VALUES (?, ?, ?)').run(serverId, id, t);
     db.prepare('INSERT INTO channels (server_id, name, created_at) VALUES (?, ?, ?)').run(serverId, 'dm', t);
-    const summary = serverSummary(serverId);
-    broadcastToServer(serverId, { type: 'server_updated', server: summary });
-    return summary;
+    sendServerUpdate(serverId);
+    return serverSummary(serverId, user.id);
   });
 
   route('POST', '/api/servers', ({ user, body }) => {
@@ -386,7 +430,7 @@ export function createApp(opts: AppOptions): Server {
     const serverId = Number(r.lastInsertRowid);
     db.prepare('INSERT INTO members (server_id, user_id, joined_at) VALUES (?, ?, ?)').run(serverId, user.id, t);
     db.prepare('INSERT INTO channels (server_id, name, created_at) VALUES (?, ?, ?)').run(serverId, 'general', t);
-    return serverSummary(serverId);
+    return serverSummary(serverId, user.id);
   });
 
   route('POST', '/api/join', ({ user, body }) => {
@@ -395,11 +439,13 @@ export function createApp(opts: AppOptions): Server {
       | { id: number }
       | undefined;
     if (!server) throw new HttpError(404, 'Invite code not found');
+    if (db.prepare('SELECT 1 FROM bans WHERE server_id = ? AND user_id = ?').get(server.id, user.id))
+      throw new HttpError(403, "You've been banned from this burrow");
     if (!isMember(server.id, user.id)) {
       db.prepare('INSERT INTO members (server_id, user_id, joined_at) VALUES (?, ?, ?)').run(server.id, user.id, now());
-      broadcastToServer(server.id, { type: 'server_updated', server: serverSummary(server.id) });
+      sendServerUpdate(server.id);
     }
-    return serverSummary(server.id);
+    return serverSummary(server.id, user.id);
   });
 
   route('POST', '/api/servers/:id/leave', ({ user, params }) => {
@@ -418,34 +464,134 @@ export function createApp(opts: AppOptions): Server {
       );
       db.prepare('DELETE FROM servers WHERE id = ?').run(serverId);
     } else {
-      const voiceChannel = inVoice.get(user.id);
-      if (voiceChannel !== undefined && channelById(voiceChannel)?.serverId === serverId) setVoice(user.id, null);
-      db.prepare('DELETE FROM members WHERE server_id = ? AND user_id = ?').run(serverId, user.id);
-      broadcastToServer(serverId, { type: 'server_updated', server: serverSummary(serverId) });
+      removeMember(serverId, user.id);
     }
+    return { ok: true };
+  });
+
+  /** Takes someone out of a burrow: out of its voice rooms, its private rooms and its member list. */
+  const removeMember = (serverId: number, userId: number) => {
+    const voiceChannel = inVoice.get(userId);
+    if (voiceChannel !== undefined && channelById(voiceChannel)?.serverId === serverId) setVoice(userId, null);
+    db.prepare('DELETE FROM channel_access WHERE user_id = ? AND channel_id IN (SELECT id FROM channels WHERE server_id = ?)').run(userId, serverId);
+    db.prepare('DELETE FROM members WHERE server_id = ? AND user_id = ?').run(serverId, userId);
+    sendServerUpdate(serverId);
+  };
+
+  /** The burrow and your role in it, if you're allowed to look after it. */
+  const managedBurrow = (serverId: number, user: User) => {
+    const kind = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind;
+    const role = kind === 'burrow' ? roleOf(serverId, user.id) : null;
+    if (!role) throw new HttpError(404, 'Burrow not found');
+    if (role === 'member') throw new HttpError(403, 'Only the host and moderators can do that');
+    return role;
+  };
+
+  /** Checks a private room's guest list: people in the burrow, without duplicates. */
+  const accessList = (serverId: number, ids: unknown) => {
+    const members = new Set(serverMemberIds(serverId));
+    return [...new Set(Array.isArray(ids) ? ids.map(Number) : [])].filter((id) => members.has(id));
+  };
+  const setAccess = (channelId: number, ids: number[]) => {
+    db.prepare('DELETE FROM channel_access WHERE channel_id = ?').run(channelId);
+    for (const id of ids) db.prepare('INSERT INTO channel_access (channel_id, user_id) VALUES (?, ?)').run(channelId, id);
+  };
+
+  // The host makes and unmakes moderators.
+  route('POST', '/api/servers/:id/members/:id/role', ({ user, params, body }) => {
+    const [serverId, targetId] = params.map(Number);
+    if (managedBurrow(serverId, user) !== 'host') throw new HttpError(403, 'Only the host can choose moderators');
+    const target = roleOf(serverId, targetId);
+    if (!target) throw new HttpError(404, "They aren't in this burrow");
+    if (target === 'host') throw new HttpError(400, 'The host is already in charge');
+    if (body.role !== 'mod' && body.role !== 'member') throw new HttpError(400, 'Role must be mod or member');
+    db.prepare('UPDATE members SET role = ? WHERE server_id = ? AND user_id = ?').run(body.role, serverId, targetId);
+    sendServerUpdate(serverId);
+    return { ok: true };
+  });
+
+  // Removes someone; with ban: true they can't come back with the invite code.
+  // Moderators can remove members, but only the host can remove a moderator.
+  route('POST', '/api/servers/:id/members/:id/remove', ({ user, params, body }) => {
+    const [serverId, targetId] = params.map(Number);
+    const myRole = managedBurrow(serverId, user);
+    const target = roleOf(serverId, targetId);
+    if (!target) throw new HttpError(404, "They aren't in this burrow");
+    if (target === 'host' || (target === 'mod' && myRole !== 'host') || targetId === user.id)
+      throw new HttpError(403, "You can't remove them");
+    if (body.ban) db.prepare('INSERT OR IGNORE INTO bans (server_id, user_id, banned_at) VALUES (?, ?, ?)').run(serverId, targetId, now());
+    removeMember(serverId, targetId);
+    sendTo([targetId], { type: 'server_deleted', serverId });
+    return { ok: true };
+  });
+
+  route('GET', '/api/servers/:id/bans', ({ user, params }) => {
+    managedBurrow(Number(params[0]), user);
+    return db
+      .prepare(
+        `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar, b.banned_at AS bannedAt
+         FROM bans b JOIN users u ON u.id = b.user_id WHERE b.server_id = ? ORDER BY b.banned_at DESC`,
+      )
+      .all(Number(params[0]));
+  });
+
+  route('DELETE', '/api/servers/:id/bans/:id', ({ user, params }) => {
+    const [serverId, targetId] = params.map(Number);
+    managedBurrow(serverId, user);
+    db.prepare('DELETE FROM bans WHERE server_id = ? AND user_id = ?').run(serverId, targetId);
     return { ok: true };
   });
 
   route('POST', '/api/servers/:id/channels', ({ user, params, body }) => {
     const serverId = Number(params[0]);
-    const server = db.prepare("SELECT owner_id FROM servers WHERE id = ? AND kind = 'burrow'").get(serverId) as
-      | { owner_id: number }
-      | undefined;
-    if (!server || !isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
-    if (server.owner_id !== user.id) throw new HttpError(403, 'Only the host of this burrow can add rooms');
+    managedBurrow(serverId, user);
     const kind = body.kind === 'voice' ? 'voice' : 'text';
-    // Text rooms read like #game-night; voice rooms keep their spaces ("Game Night").
-    let name = cleanName(body.name, 'Room name', 32);
-    if (kind === 'text') name = name.toLowerCase().replace(/\s+/g, '-');
-    db.prepare('INSERT INTO channels (server_id, name, kind, created_at) VALUES (?, ?, ?, ?)').run(serverId, name, kind, now());
-    const summary = serverSummary(serverId);
-    broadcastToServer(serverId, { type: 'server_updated', server: summary });
-    return summary;
+    const name = roomName(body.name, kind);
+    const r = db
+      .prepare('INSERT INTO channels (server_id, name, kind, private, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(serverId, name, kind, body.private ? 1 : 0, now());
+    if (body.private) setAccess(Number(r.lastInsertRowid), accessList(serverId, body.memberIds));
+    sendServerUpdate(serverId);
+    return serverSummary(serverId, user.id);
+  });
+
+  // Text rooms read like #game-night; voice rooms keep their spaces ("Game Night").
+  const roomName = (value: unknown, kind: string) => {
+    const name = cleanName(value, 'Room name', 32);
+    return kind === 'text' ? name.toLowerCase().replace(/\s+/g, '-') : name;
+  };
+
+  // Rename a room, make it private or public, or change who's let in.
+  route('PATCH', '/api/channels/:id', ({ user, params, body }) => {
+    const channel = channelById(Number(params[0]));
+    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    managedBurrow(channel.serverId, user);
+    if (body.name !== undefined) db.prepare('UPDATE channels SET name = ? WHERE id = ?').run(roomName(body.name, channel.kind), channel.id);
+    if (body.private !== undefined) db.prepare('UPDATE channels SET private = ? WHERE id = ?').run(body.private ? 1 : 0, channel.id);
+    if (body.memberIds !== undefined) setAccess(channel.id, accessList(channel.serverId, body.memberIds));
+    // Anyone in a voice room they can no longer see is taken out of it.
+    const updated = channelById(channel.id)!;
+    for (const [u, c] of inVoice) if (c === channel.id && !canSee(updated, u)) setVoice(u, null);
+    sendServerUpdate(channel.serverId);
+    return serverSummary(channel.serverId, user.id);
+  });
+
+  route('DELETE', '/api/channels/:id', ({ user, params }) => {
+    const channel = channelById(Number(params[0]));
+    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    managedBurrow(channel.serverId, user);
+    const textRooms = db.prepare("SELECT COUNT(*) AS n FROM channels WHERE server_id = ? AND kind = 'text'").get(channel.serverId) as { n: number };
+    if (channel.kind === 'text' && textRooms.n <= 1) throw new HttpError(400, 'A burrow needs at least one text room');
+    for (const [u, c] of inVoice) if (c === channel.id) setVoice(u, null);
+    removeFiles(db.prepare('SELECT id FROM attachments WHERE channel_id = ?').all(channel.id) as Json[]);
+    db.prepare('DELETE FROM channels WHERE id = ?').run(channel.id);
+    sendServerUpdate(channel.serverId);
+    return { ok: true };
   });
 
   route('POST', '/api/channels/:id/voice', ({ user, params }) => {
     const channel = channelById(Number(params[0]));
-    if (!channel || !isMember(channel.serverId, user.id)) throw new HttpError(404, 'Room not found');
+    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
     if (channel.kind !== 'voice') throw new HttpError(400, 'That is not a voice room');
     if (!opts.voice) throw new HttpError(503, 'Voice is not set up on this server');
     return { url: opts.voice.url ?? null, token: voiceToken(opts.voice, user, `room-${channel.id}`) };
@@ -453,7 +599,7 @@ export function createApp(opts: AppOptions): Server {
 
   route('GET', '/api/channels/:id/messages', ({ user, params, url }) => {
     const channel = channelById(Number(params[0]));
-    if (!channel || !isMember(channel.serverId, user.id)) throw new HttpError(404, 'Room not found');
+    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
     if (channel.kind === 'voice') return [];
     const before = Number(url.searchParams.get('before')) || Number.MAX_SAFE_INTEGER;
     const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 100);
@@ -489,7 +635,7 @@ export function createApp(opts: AppOptions): Server {
     if (body.content.length > MAX_MESSAGE_LENGTH) throw new HttpError(400, 'Message is too long');
     db.prepare('UPDATE messages SET content = ?, edited_at = ? WHERE id = ?').run(body.content, now(), id);
     const message = messageById(id)!;
-    broadcastToServer(channel.serverId, { type: 'message_updated', message });
+    broadcastToChannel(channel, { type: 'message_updated', message });
     return message;
   });
 
@@ -498,7 +644,7 @@ export function createApp(opts: AppOptions): Server {
     const id = Number(params[0]);
     const msg = db.prepare('SELECT channel_id FROM messages WHERE id = ?').get(id) as { channel_id: number } | undefined;
     const channel = msg && channelById(msg.channel_id);
-    if (!channel || !isMember(channel.serverId, user.id)) throw new HttpError(404, 'Message not found');
+    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Message not found');
     const emoji = typeof body.emoji === 'string' ? body.emoji.trim() : '';
     if (!emoji || emoji.length > 16 || !EMOJI.test(emoji)) throw new HttpError(400, 'That is not an emoji');
     const mine = db.prepare('SELECT 1 FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?').get(id, user.id, emoji);
@@ -511,16 +657,23 @@ export function createApp(opts: AppOptions): Server {
       db.prepare('INSERT INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)').run(id, user.id, emoji, now());
     }
     const reactions = reactionsFor(id);
-    broadcastToServer(channel.serverId, { type: 'reactions', messageId: id, channelId: channel.id, reactions });
+    broadcastToChannel(channel, { type: 'reactions', messageId: id, channelId: channel.id, reactions });
     return { reactions };
   });
 
+  // Your own messages, or anyone's if you look after the burrow.
   route('DELETE', '/api/messages/:id', ({ user, params }) => {
     const id = Number(params[0]);
-    const channel = ownMessage(user, id);
+    const msg = db.prepare('SELECT author_id, channel_id FROM messages WHERE id = ?').get(id) as
+      | { author_id: number; channel_id: number }
+      | undefined;
+    const channel = msg && channelById(msg.channel_id);
+    if (!msg || !channel || !canSee(channel, user.id)) throw new HttpError(404, 'Message not found');
+    if (msg.author_id !== user.id && !canManage(channel.serverId, user.id))
+      throw new HttpError(403, 'You can only delete your own messages');
     removeFiles(db.prepare('SELECT id FROM attachments WHERE message_id = ?').all(id) as Json[]);
     db.prepare('DELETE FROM messages WHERE id = ?').run(id);
-    broadcastToServer(channel.serverId, { type: 'message_deleted', id, channelId: channel.id });
+    broadcastToChannel(channel, { type: 'message_deleted', id, channelId: channel.id });
     return { ok: true };
   });
 
@@ -539,7 +692,7 @@ export function createApp(opts: AppOptions): Server {
     if (!user) throw new HttpError(401, 'Not logged in');
     if (!opts.uploadDir) throw new HttpError(503, 'Uploads are not set up on this server');
     const channel = channelById(channelId);
-    if (!channel || !isMember(channel.serverId, user.id)) throw new HttpError(404, 'Room not found');
+    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
     const declared = Number(req.headers['content-length']);
     if (declared > maxUpload) throw new HttpError(413, `Files can be at most ${Math.round(maxUpload / 1048576)} MB`);
@@ -797,16 +950,16 @@ export function createApp(opts: AppOptions): Server {
           postMessage(user, Number(msg.channelId), msg.content, msg.attachmentIds, msg.replyTo);
         } else if (msg.type === 'voice_join') {
           const channel = channelById(Number(msg.channelId));
-          if (!channel || channel.kind !== 'voice' || !isMember(channel.serverId, user.id))
+          if (!channel || channel.kind !== 'voice' || !canSee(channel, user.id))
             throw new HttpError(404, 'Room not found');
           setVoice(user.id, channel.id);
         } else if (msg.type === 'voice_leave') {
           setVoice(user.id, null);
         } else if (msg.type === 'typing') {
           const channel = channelById(Number(msg.channelId));
-          if (channel && isMember(channel.serverId, user.id))
+          if (channel && canSee(channel, user.id))
             sendTo(
-              serverMemberIds(channel.serverId).filter((id) => id !== user.id),
+              channelAudience(channel).filter((id) => id !== user.id),
               { type: 'typing', channelId: channel.id, userId: user.id, username: user.username },
             );
         }

@@ -271,12 +271,19 @@ function handleEvent(ev) {
       state.servers.set(ev.server.id, ev.server);
       if (isNew) state.serverOrder.push(ev.server.id);
       renderServers();
-      if (ev.server.id === state.serverId) { renderChannels(); renderMembers(); }
+      leaveVoiceIfGone();
+      if (ev.server.id === state.serverId) {
+        // The room we're in was deleted or made private without us.
+        if (!state.inDms && !ev.server.channels.some((c) => c.id === state.channelId)) selectServer(ev.server.id);
+        else { renderChannels(); renderMembers(); renderMessages(); }
+      }
       break;
     }
     case 'server_deleted':
+      // Deleted, or we were removed from it.
       state.servers.delete(ev.serverId);
       state.serverOrder = state.serverOrder.filter((id) => id !== ev.serverId);
+      leaveVoiceIfGone();
       if (state.serverId === ev.serverId) selectServer(state.serverOrder[0] ?? null);
       else renderServers();
       break;
@@ -350,11 +357,6 @@ async function selectServer(id, initial = false) {
   state.serverId = id;
   store.set('lastServer', id);
   renderServers();
-  $('#server-name').textContent = state.inDms ? 'Direct messages' : s?.name ?? 'No burrow yet';
-  $('#rooms-title').textContent = state.inDms ? 'Conversations' : 'Rooms';
-  $('#server-menu-btn').classList.toggle('hidden', !s || state.inDms);
-  $('#add-channel').classList.toggle('hidden', !state.inDms && (!s || s.ownerId !== state.me.id));
-  $('#add-channel').title = state.inDms ? 'New message' : 'New room';
   renderMembers();
   if (!s) { state.channelId = null; renderChannels(); state.messages = []; renderMessages(); return; }
   const remembered = state.lastChannel[id];
@@ -365,21 +367,33 @@ async function selectServer(id, initial = false) {
 }
 
 function renderChannels() {
-  if (state.inDms) return renderDmList();
+  // The card's heading and buttons follow the burrow and your role in it, which can change at any time.
   const s = state.servers.get(state.serverId);
+  $('#server-name').textContent = state.inDms ? 'Direct messages' : s?.name ?? 'No burrow yet';
+  $('#rooms-title').textContent = state.inDms ? 'Conversations' : 'Rooms';
+  $('#server-menu-btn').classList.toggle('hidden', !s || state.inDms);
+  $('#add-channel').classList.toggle('hidden', !state.inDms && !canManage(s));
+  $('#add-channel').title = state.inDms ? 'New message' : 'New room';
+  if (state.inDms) return renderDmList();
   const channels = s?.channels ?? [];
   const textRooms = channels.filter((c) => c.kind !== 'voice').map((c) => {
     const li = document.createElement('li');
-    li.textContent = c.name;
+    const name = document.createElement('span');
+    name.className = 'room-name';
+    name.textContent = c.name;
+    li.append(name);
+    if (c.private) li.insertAdjacentHTML('beforeend', LOCK_ICON);
     if (c.id === state.channelId) li.className = 'active';
     else if (state.unread.has(c.id)) li.className = 'unread';
     li.onclick = () => selectChannel(c.id);
+    if (canManage(s)) li.append(roomSettingsButton(c));
     return li;
   });
   const voiceRooms = channels.filter((c) => c.kind === 'voice').map((c) => {
     const li = document.createElement('li');
     li.className = 'voice-room' + (state.voice?.channelId === c.id ? ' joined' : '');
-    li.innerHTML = `<div class="voice-room-name">${SPEAKER_ICON}<span>${escapeHtml(c.name)}</span></div>`;
+    li.innerHTML = `<div class="voice-room-name">${SPEAKER_ICON}<span class="room-name">${escapeHtml(c.name)}</span>${c.private ? LOCK_ICON : ''}</div>`;
+    if (canManage(s)) li.firstChild.append(roomSettingsButton(c));
     li.title = state.voice?.channelId === c.id ? "You're here" : 'Join voice';
     li.onclick = () => joinVoice(c.id);
     const people = (c.voiceUsers ?? []).map((id) => {
@@ -405,7 +419,7 @@ function renderChannels() {
   });
   $('#channel-list').replaceChildren(...textRooms);
   $('#voice-list').replaceChildren(...voiceRooms);
-  $('#voice-section').classList.toggle('hidden', !voiceRooms.length && !(state.voiceEnabled && s?.ownerId === state.me?.id));
+  $('#voice-section').classList.toggle('hidden', !voiceRooms.length && !(state.voiceEnabled && canManage(s)));
 }
 
 async function selectChannel(id) {
@@ -465,12 +479,18 @@ function renderMembers() {
           li.title = `Send ${m.username} a message`;
           li.onclick = () => openDm(m.id);
         }
-        if (m.id === s.ownerId && !isDm(s)) {
+        if (!isDm(s) && (m.role === 'host' || m.role === 'mod')) {
           const badge = document.createElement('span');
-          badge.className = 'owner-badge';
-          badge.title = 'Created this burrow';
-          badge.textContent = 'host';
+          badge.className = 'owner-badge' + (m.role === 'mod' ? ' mod' : '');
+          badge.title = m.role === 'host' ? 'Created this burrow' : 'Moderator: can manage rooms, messages and members';
+          badge.textContent = m.role;
           li.append(badge);
+        }
+        if (canActOn(s, m)) {
+          const more = iconButton('⋯', `Manage ${m.username}`, (e) => { e.stopPropagation(); openMemberMenu(s, m); });
+          more.classList.add('member-more');
+          // Before the badge, so badges stay lined up on the right.
+          li.insertBefore(more, li.querySelector('.owner-badge'));
         }
         return li;
       }),
@@ -567,8 +587,9 @@ function renderLine(m) {
   const replyBtn = iconButton('', 'Reply', () => setReply(m));
   replyBtn.innerHTML = REPLY_ICON;
   actions.append(reactBtn, replyBtn);
-  if (m.authorId === state.me.id)
-    actions.append(iconButton('Edit', 'Edit message', () => startEdit(m, content)), iconButton('Delete', 'Delete message', () => confirmDelete(m)));
+  if (m.authorId === state.me.id) actions.append(iconButton('Edit', 'Edit message', () => startEdit(m, content)));
+  if (m.authorId === state.me.id || canManage(state.servers.get(state.serverId)))
+    actions.append(iconButton('Delete', 'Delete message', () => confirmDelete(m)));
   el.append(actions);
   return el;
 }
@@ -769,10 +790,12 @@ $('#server-menu-btn').onclick = () => {
       <div class="invite-box"><input id="invite" readonly value="${escapeHtml(s.inviteCode)}" /><button class="btn" id="copy-invite">Copy</button></div>
     </label>
     <p class="small muted">They'll also need the server address: <b>${escapeHtml(state.serverUrl)}</b></p>
+    ${canManage(s) ? '<div id="ban-list"></div>' : ''}
     <div class="modal-row">
       <button class="btn danger" id="leave-server">${owner ? 'Delete burrow' : 'Leave burrow'}</button>
       <button class="btn secondary" data-close>Close</button>
     </div>`);
+  if (canManage(s)) renderBans(s);
   $('#copy-invite').onclick = () => { navigator.clipboard?.writeText(s.inviteCode); $('#copy-invite').textContent = 'Copied!'; };
   $('#leave-server').onclick = async () => {
     if (owner && !confirm(`Delete "${s.name}" and all its messages for everyone?`)) return;
@@ -795,14 +818,19 @@ $('#add-channel').onclick = () => {
         <label><input type="radio" name="kind" value="text" checked /> Text room</label>
         <label><input type="radio" name="kind" value="voice" /> Voice room</label>
       </div>` : ''}
+      ${privacyFields(state.servers.get(state.serverId), false, [])}
       <div class="error" id="modal-error"></div>
       <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">Create room</button></div>
     </form>`);
+  wirePrivacyFields();
   $('#channel-form').onsubmit = async (e) => {
     e.preventDefault();
     try {
       const kind = $('input[name="kind"]:checked')?.value ?? 'text';
-      const s = await api(`/api/servers/${state.serverId}/channels`, { method: 'POST', body: { name: $('#new-channel-name').value, kind } });
+      const s = await api(`/api/servers/${state.serverId}/channels`, {
+        method: 'POST',
+        body: { name: $('#new-channel-name').value, kind, ...readPrivacyFields() },
+      });
       state.servers.set(s.id, s);
       closeModal();
       if (kind === 'voice') renderChannels();
@@ -810,6 +838,116 @@ $('#add-channel').onclick = () => {
     } catch (err) { $('#modal-error').textContent = err.message; }
   };
 };
+
+// ---------------------------------------------------------------- roles: host, moderators, private rooms
+
+const LOCK_ICON = '<svg viewBox="0 0 24 24" class="lock-icon" aria-label="Private"><path d="M7 10V7a5 5 0 0 1 10 0v3h1a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h1Zm2 0h6V7a3 3 0 0 0-6 0v3Z"/></svg>';
+const GEAR_ICON = '<svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm8.9 3-1.6-.4a7.4 7.4 0 0 0-.7-1.7l.9-1.4-1.9-1.9-1.4.9a7.4 7.4 0 0 0-1.7-.7L13 3.1h-2l-.4 1.7a7.4 7.4 0 0 0-1.7.7l-1.4-.9-1.9 1.9.9 1.4a7.4 7.4 0 0 0-.7 1.7l-1.7.4v2l1.7.4c.2.6.4 1.2.7 1.7l-.9 1.4 1.9 1.9 1.4-.9c.5.3 1.1.5 1.7.7l.4 1.7h2l.4-1.7c.6-.2 1.2-.4 1.7-.7l1.4.9 1.9-1.9-.9-1.4c.3-.5.5-1.1.7-1.7l1.6-.4v-2Z"/></svg>';
+
+const myRole = (s) => s?.members.find((m) => m.id === state.me.id)?.role ?? null;
+/** Hosts and moderators look after a burrow. */
+const canManage = (s) => !!s && !isDm(s) && ['host', 'mod'].includes(myRole(s));
+/** The host can manage anyone; moderators only regular members. */
+const canActOn = (s, m) => canManage(s) && m.id !== state.me.id && m.role !== 'host' && (m.role !== 'mod' || myRole(s) === 'host');
+
+function leaveVoiceIfGone() {
+  if (!state.voice) return;
+  const stillThere = [...state.servers.values()].some((s) => s.channels.some((c) => c.id === state.voice.channelId));
+  if (!stillThere) leaveVoice();
+}
+
+function roomSettingsButton(c) {
+  const b = iconButton('', 'Room settings', (e) => { e.stopPropagation(); openRoomSettings(c); });
+  b.classList.add('room-gear');
+  b.innerHTML = GEAR_ICON;
+  return b;
+}
+
+// The "private" checkbox and, under it, who else gets in. The host and moderators always can.
+function privacyFields(s, isPrivate, memberIds) {
+  const people = s.members.filter((m) => m.role === 'member');
+  return `<label class="check"><input type="checkbox" id="room-private" ${isPrivate ? 'checked' : ''} /> Private room</label>
+    <div id="room-access" class="${isPrivate ? '' : 'hidden'}">
+      <p class="small muted">The host and moderators can always see it. Who else can?</p>
+      ${people.length ? `<ul class="access-list">${people.map((m) => `<li><label class="check"><input type="checkbox" value="${m.id}" ${memberIds.includes(m.id) ? 'checked' : ''} /> ${escapeHtml(m.username)}</label></li>`).join('')}</ul>`
+        : '<p class="small muted">Nobody else is in this burrow yet.</p>'}
+    </div>`;
+}
+function wirePrivacyFields() {
+  $('#room-private').onchange = (e) => $('#room-access').classList.toggle('hidden', !e.target.checked);
+}
+function readPrivacyFields() {
+  const isPrivate = $('#room-private').checked;
+  return { private: isPrivate, memberIds: isPrivate ? [...document.querySelectorAll('#room-access input:checked')].map((i) => Number(i.value)) : [] };
+}
+
+function openRoomSettings(c) {
+  const s = state.servers.get(state.serverId);
+  modal(`<h2>Room settings</h2>
+    <form id="room-form">
+      <label>Room name<input id="room-name" maxlength="32" required value="${escapeHtml(c.name)}" /></label>
+      ${privacyFields(s, c.private, c.memberIds ?? [])}
+      <div class="error" id="modal-error"></div>
+      <div class="modal-row">
+        <button type="button" class="btn danger" id="room-delete">Delete room</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn secondary" data-close>Cancel</button>
+        <button type="submit" class="btn">Save</button>
+      </div>
+    </form>`);
+  wirePrivacyFields();
+  $('#room-form').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const updated = await api(`/api/channels/${c.id}`, { method: 'PATCH', body: { name: $('#room-name').value, ...readPrivacyFields() } });
+      state.servers.set(updated.id, updated);
+      closeModal();
+      renderChannels();
+      if (c.id === state.channelId) $('#channel-name').textContent = updated.channels.find((x) => x.id === c.id)?.name ?? '';
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+  $('#room-delete').onclick = async () => {
+    if (!confirm(`Delete ${c.name} and everything said in it?`)) return;
+    try {
+      await api(`/api/channels/${c.id}`, { method: 'DELETE' });
+      closeModal();
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+}
+
+function openMemberMenu(s, m) {
+  const host = myRole(s) === 'host';
+  modal(`<h2>${escapeHtml(m.username)}</h2>
+    <p class="muted">${m.role === 'mod' ? 'Moderator of' : 'Member of'} ${escapeHtml(s.name)}</p>
+    ${host ? `<button class="btn secondary" id="member-role">${m.role === 'mod' ? 'Remove moderator' : 'Make moderator'}</button>
+      <p class="small muted">Moderators can add, change and delete rooms, delete anyone's messages, and remove or ban members.</p>` : ''}
+    <button class="btn secondary" id="member-remove">Remove from burrow</button>
+    <button class="btn danger" id="member-ban">Ban from burrow</button>
+    <p class="small muted">Removed people can come back with the invite code. Banned people can't, until they're unbanned in the burrow's settings.</p>
+    <div class="error" id="modal-error"></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
+  const act = async (path, body) => {
+    try { await api(`/api/servers/${s.id}/members/${m.id}/${path}`, { method: 'POST', body }); closeModal(); }
+    catch (err) { $('#modal-error').textContent = err.message; }
+  };
+  if (host) $('#member-role').onclick = () => act('role', { role: m.role === 'mod' ? 'member' : 'mod' });
+  $('#member-remove').onclick = () => confirm(`Remove ${m.username} from ${s.name}?`) && act('remove', { ban: false });
+  $('#member-ban').onclick = () => confirm(`Ban ${m.username} from ${s.name}?`) && act('remove', { ban: true });
+}
+
+async function renderBans(s) {
+  const bans = await api(`/api/servers/${s.id}/bans`).catch(() => []);
+  const el = $('#ban-list');
+  if (!el) return;
+  if (!bans.length) return (el.innerHTML = '');
+  el.innerHTML = `<h3>Banned</h3><ul class="ban-list">${bans
+    .map((b) => `<li><span>${escapeHtml(b.username)}</span><button class="btn secondary" data-unban="${b.id}">Unban</button></li>`)
+    .join('')}</ul>`;
+  el.querySelectorAll('[data-unban]').forEach((b) => (b.onclick = async () => {
+    await api(`/api/servers/${s.id}/bans/${b.dataset.unban}`, { method: 'DELETE' }).catch(alertError);
+    renderBans(s);
+  }));
+}
 
 // ---------------------------------------------------------------- direct messages
 
