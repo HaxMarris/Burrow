@@ -238,7 +238,7 @@ function handleEvent(ev) {
       if (m.channelId === state.channelId) {
         state.messages.push(m);
         clearTyping(m.channelId, m.author);
-        renderMessages({ stick: m.authorId === state.me.id });
+        appendMessage(m, { stick: m.authorId === state.me.id });
       } else {
         state.unread.add(m.channelId);
         renderServers();
@@ -253,8 +253,9 @@ function handleEvent(ev) {
     case 'message_updated': {
       const i = state.messages.findIndex((x) => x.id === ev.message.id);
       if (i >= 0) state.messages[i] = ev.message;
-      for (const x of state.messages) if (x.replyTo?.id === ev.message.id) x.replyTo.content = ev.message.content.slice(0, 160);
-      renderMessages();
+      refreshLine(ev.message.id);
+      for (const x of state.messages)
+        if (x.replyTo?.id === ev.message.id) { x.replyTo.content = ev.message.content.slice(0, 160); refreshLine(x.id); }
       break;
     }
     case 'message_deleted':
@@ -265,7 +266,7 @@ function handleEvent(ev) {
       break;
     case 'reactions': {
       const m = state.messages.find((x) => x.id === ev.messageId);
-      if (m) { m.reactions = ev.reactions; renderMessages(); }
+      if (m) { m.reactions = ev.reactions; refreshLine(m.id); }
       break;
     }
     case 'server_updated': {
@@ -816,38 +817,78 @@ function renderMessages({ stick = false } = {}) {
     frag.append(start);
   }
   let prev = null;
-  let body = null; // the current author group's message column
+  let body = null;
   for (const m of state.messages) {
-    const day = new Date(m.createdAt).toDateString();
-    if (!prev || new Date(prev.createdAt).toDateString() !== day) {
-      const d = document.createElement('div');
-      d.className = 'day-divider';
-      const label = document.createElement('span');
-      label.textContent = new Date(m.createdAt).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
-      d.append(label);
-      frag.append(d);
-      prev = null;
-    }
-    const grouped = prev && !m.replyTo && prev.authorId === m.authorId && m.createdAt - prev.createdAt < GROUP_WINDOW;
-    if (!grouped) {
-      const group = document.createElement('div');
-      group.className = 'group' + (m.authorId === state.me.id ? ' mine' : '');
-      const av = document.createElement('span');
-      av.className = 'avatar lg';
-      setAvatar(av, m.author, avatarOf(m.authorId, m.authorAvatar));
-      body = document.createElement('div');
-      const time = new Date(m.createdAt);
-      const color = roleColor(state.servers.get(state.serverId), m.authorId);
-      body.innerHTML = `<div class="head"><span class="author"${color ? ` style="color:${escapeHtml(color)}"` : ''}>${escapeHtml(m.author)}</span>
-        <span class="time" title="${escapeHtml(time.toLocaleString())}">${escapeHtml(formatTime(time))}</span></div>`;
-      group.append(av, body);
-      frag.append(group);
-    }
-    body.append(renderLine(m));
+    body = addMessageNodes(frag, m, prev, body);
     prev = m;
   }
   messagesEl.replaceChildren(frag);
+  tailBody = body;
   if (stick || nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// The last author group's message column, so a new message can join it without a redraw.
+let tailBody = null;
+
+// Adds message m (and a day divider or a new author group when it needs one) after prev.
+// body is prev's group column; returns m's.
+function addMessageNodes(parent, m, prev, body) {
+  if (!prev || new Date(prev.createdAt).toDateString() !== new Date(m.createdAt).toDateString()) {
+    const d = document.createElement('div');
+    d.className = 'day-divider';
+    const label = document.createElement('span');
+    label.textContent = new Date(m.createdAt).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+    d.append(label);
+    parent.append(d);
+    prev = null;
+  }
+  const grouped = prev && !m.replyTo && prev.authorId === m.authorId && m.createdAt - prev.createdAt < GROUP_WINDOW;
+  if (!grouped) {
+    const group = document.createElement('div');
+    group.className = 'group' + (m.authorId === state.me.id ? ' mine' : '');
+    const av = document.createElement('span');
+    av.className = 'avatar lg';
+    setAvatar(av, m.author, avatarOf(m.authorId, m.authorAvatar));
+    body = document.createElement('div');
+    const time = new Date(m.createdAt);
+    const color = roleColor(state.servers.get(state.serverId), m.authorId);
+    body.innerHTML = `<div class="head"><span class="author"${color ? ` style="color:${escapeHtml(color)}"` : ''}>${escapeHtml(m.author)}</span>
+        <span class="time" title="${escapeHtml(time.toLocaleString())}">${escapeHtml(formatTime(time))}</span></div>`;
+    group.append(av, body);
+    parent.append(group);
+  }
+  body.append(renderLine(m));
+  return body;
+}
+
+// How many messages a room keeps in memory while you follow along at the bottom;
+// older ones load again when you scroll up.
+const KEEP_MESSAGES = 300;
+
+// Shows a message that just arrived (already pushed to state.messages) without redrawing the others.
+function appendMessage(m, { stick = false } = {}) {
+  const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+  const prev = state.messages.at(-2);
+  if (state.messages.length > KEEP_MESSAGES + 100 && (stick || nearBottom)) {
+    state.messages = state.messages.slice(-KEEP_MESSAGES);
+    state.reachedStart = false;
+    return renderMessages({ stick: true });
+  }
+  if (!prev || !tailBody?.isConnected) return renderMessages({ stick });
+  tailBody = addMessageNodes(messagesEl, m, prev, tailBody);
+  if (stick || nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// Redraws one message after an edit or a reaction.
+function refreshLine(id) {
+  const m = state.messages.find((x) => x.id === id);
+  const old = messagesEl.querySelector(`.line[data-id="${id}"]`);
+  if (!m || !old) return;
+  const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+  const line = renderLine(m);
+  if (old.classList.contains('touched')) line.classList.add('touched');
+  old.replaceWith(line);
+  if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 function renderLine(m) {
@@ -1702,7 +1743,7 @@ function renderReactions(m) {
 
 function toggleReaction(m, emoji) {
   api(`/api/messages/${m.id}/reactions`, { method: 'POST', body: { emoji } })
-    .then(({ reactions }) => { m.reactions = reactions; renderMessages(); })
+    .then(({ reactions }) => { m.reactions = reactions; refreshLine(m.id); })
     .catch(alertError);
 }
 
@@ -1738,19 +1779,57 @@ const IMAGE_TYPES = /^image\/(png|jpeg|gif|webp|avif)$/;
 
 function addFiles(fileList) {
   if (!state.maxUploadBytes || !state.channelId) return;
+  const channelId = state.channelId;
   for (const file of fileList) {
     if (state.pending.length >= 10) { alert('You can attach up to 10 files at a time.'); break; }
-    if (file.size > state.maxUploadBytes) {
+    const shrinkable = SHRINKABLE_TYPES.test(file.type);
+    // Photos are checked after shrinking, since most get well under the limit.
+    if (file.size > state.maxUploadBytes && !shrinkable) {
       alert(`"${file.name}" is too big. Files can be at most ${formatSize(state.maxUploadBytes)}.`);
       continue;
     }
     const p = { file, previewUrl: IMAGE_TYPES.test(file.type) ? URL.createObjectURL(file) : null, progress: 0, error: null };
-    p.done = uploadFile(state.channelId, p);
+    p.done = (shrinkable ? shrinkPhoto(file) : Promise.resolve(file)).then((f) => {
+      p.file = f;
+      if (!state.pending.includes(p)) throw new Error('Upload cancelled');
+      if (f.size > state.maxUploadBytes) {
+        p.error = `Too big (at most ${formatSize(state.maxUploadBytes)})`;
+        renderPending();
+        throw new Error(`"${f.name}" is too big. Files can be at most ${formatSize(state.maxUploadBytes)}.`);
+      }
+      return uploadFile(channelId, p);
+    });
     p.done.catch(() => {}); // failures show on the chip
     state.pending.push(p);
   }
   renderPending();
   input.focus();
+}
+
+// Photos bigger than this on their long side are scaled down before upload. GIFs are left alone (they may move).
+const MAX_PHOTO_SIDE = 2560;
+const SHRINKABLE_TYPES = /^image\/(png|jpeg|webp)$/;
+
+// Phone photos are often 4-12 MB; scaled to 2560 px they look the same in chat at a fraction of the size.
+// This also drops the photo's hidden details, like where it was taken. Keeps the original if that is smaller.
+async function shrinkPhoto(file) {
+  let img;
+  try { img = await createImageBitmap(file); } catch { return file; }
+  const scale = Math.min(1, MAX_PHOTO_SIDE / Math.max(img.width, img.height));
+  if (scale === 1 && file.size < 1024 * 1024) return file;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+  img.close();
+  const encode = (type, quality) => new Promise((resolve) => canvas.toBlob(resolve, type, quality));
+  let blob = await encode('image/webp', 0.85);
+  // Browsers that can't make WebP: JPEG for photos, PNG for anything that might be see-through.
+  if (blob?.type !== 'image/webp') blob = file.type === 'image/jpeg' ? await encode('image/jpeg', 0.85) : await encode('image/png');
+  if (!blob || blob.size >= file.size) return file;
+  const ext = { 'image/webp': 'webp', 'image/jpeg': 'jpg', 'image/png': 'png' }[blob.type];
+  const name = (file.name || 'pasted-image').replace(/\.[^.]*$/, '') + '.' + ext;
+  return new File([blob], name, { type: blob.type });
 }
 
 function uploadFile(channelId, p) {
