@@ -811,7 +811,7 @@ function renderMessages({ stick = false } = {}) {
     const start = document.createElement('div');
     start.className = 'history-start';
     start.innerHTML = isDm(server)
-      ? `<h2>This is the beginning of your conversation with ${escapeHtml(partner(server).username)}</h2><div class="muted">Only the two of you can see it.</div>`
+      ? `<h2>This is the beginning of your conversation with ${escapeHtml(partner(server).username)}</h2>`
       : `<h2>This is the beginning of ${escapeHtml(ch.name)}</h2><div class="muted">Pull up a stump and say hello.</div>`;
     frag.append(start);
   }
@@ -975,9 +975,81 @@ async function sendComposer() {
   input.focus();
 }
 
+// @mention suggestions: typing @ lists matching people in this burrow; Tab or Enter fills in the
+// highlighted one, arrows move, Esc closes, and tapping a name works on phones.
+const mentionBox = $('#mention-box');
+let mention = null; // { start, matches, index } while the list is open
+
+function updateMentions() {
+  const s = state.servers.get(state.serverId);
+  const before = input.value.slice(0, input.selectionStart);
+  const hit = input.selectionStart === input.selectionEnd && /(^|\s)@([\w.-]*)$/.exec(before);
+  if (!s || !hit) return closeMentions();
+  const q = hit[2].toLowerCase();
+  const matches = s.members
+    .filter((m) => m.id !== state.me.id && m.username.toLowerCase().includes(q))
+    .sort((a, b) => b.username.toLowerCase().startsWith(q) - a.username.toLowerCase().startsWith(q)
+      || !!b.online - !!a.online || a.username.localeCompare(b.username))
+    .slice(0, 8);
+  if (!matches.length) return closeMentions();
+  mention = { start: before.length - hit[2].length - 1, matches, index: 0 };
+  renderMentions();
+}
+
+function renderMentions() {
+  mentionBox.replaceChildren(...mention.matches.map((m, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mention-option' + (i === mention.index ? ' active' : '');
+    const av = document.createElement('span');
+    av.className = 'avatar xs';
+    setAvatar(av, m.username, avatarOf(m.id, m.avatar));
+    const name = document.createElement('span');
+    name.textContent = m.username;
+    b.append(av, name);
+    b.onpointerdown = (e) => e.preventDefault(); // keep the keyboard up
+    b.onclick = () => { mention.index = i; completeMention(); };
+    return b;
+  }));
+  mentionBox.classList.remove('hidden');
+}
+
+function completeMention() {
+  const m = mention.matches[mention.index];
+  const after = input.value.slice(input.selectionStart).replace(/^[\w.-]*\s?/, '');
+  const text = `${input.value.slice(0, mention.start)}@${m.username} `;
+  input.value = text + after;
+  input.setSelectionRange(text.length, text.length);
+  closeMentions();
+  autosize();
+  input.focus();
+}
+
+function closeMentions() {
+  mention = null;
+  mentionBox.classList.add('hidden');
+}
+
+// Returns true when the key was for the suggestion list.
+function mentionKey(e) {
+  if (!mention || e.isComposing) return false;
+  const n = mention.matches.length;
+  if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) completeMention();
+  else if (e.key === 'ArrowDown') { mention.index = (mention.index + 1) % n; renderMentions(); }
+  else if (e.key === 'ArrowUp') { mention.index = (mention.index + n - 1) % n; renderMentions(); }
+  else if (e.key === 'Escape') closeMentions();
+  else return false;
+  e.preventDefault();
+  return true;
+}
+
+input.addEventListener('click', updateMentions);
+input.addEventListener('blur', closeMentions);
+
 $('#composer').addEventListener('submit', (e) => { e.preventDefault(); sendComposer(); });
 
 input.addEventListener('keydown', (e) => {
+  if (mentionKey(e)) return;
   if (e.key === 'Escape' && state.replyTo) {
     setReply(null);
   } else if (e.key === 'Enter' && !e.shiftKey) {
@@ -992,6 +1064,7 @@ input.addEventListener('keydown', (e) => {
 
 input.addEventListener('input', () => {
   autosize();
+  updateMentions();
   if (Date.now() - lastTypingSent > 3000 && input.value && state.ws?.readyState === WebSocket.OPEN) {
     lastTypingSent = Date.now();
     state.ws.send(JSON.stringify({ type: 'typing', channelId: state.channelId }));
