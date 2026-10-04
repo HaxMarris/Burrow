@@ -1213,6 +1213,7 @@ $('#account-btn').onclick = () => {
       <input type="file" id="avatar-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
     </div>
     <div class="error" id="avatar-error"></div>` : ''}
+    ${themeSettings()}
     ${voiceSettings()}
     ${soundSettings()}
     <h3>Change password</h3>
@@ -1225,6 +1226,7 @@ $('#account-btn').onclick = () => {
       <div class="error" id="pw-status"></div>
       <div class="modal-row"><button type="button" class="btn secondary" data-close>Close</button><button type="submit" class="btn">Change password</button></div>
     </form>`);
+  wireThemeSettings();
   wireVoiceSettings();
   wireSoundSettings();
   if (state.maxUploadBytes) {
@@ -1574,6 +1576,8 @@ async function joinVoice(channelId) {
         if (track.kind !== 'audio') return renderStage();
         $('#voice-audio').append(track.attach());
         participant.setVolume(volumeFor(Number(participant.identity)));
+        participant.setVolume(streamVolumeFor(Number(participant.identity)), LK.Track.Source.ScreenShareAudio);
+        renderStage(); // a shared screen with sound gets a volume control
       })
       .on(LK.RoomEvent.TrackUnsubscribed, (track) => {
         if (track.kind !== 'audio') return renderStage();
@@ -1743,6 +1747,7 @@ function openStage() {
   if (!state.voice?.room) return;
   state.stageOpen = true;
   $('#stage').classList.remove('hidden');
+  $('#app').classList.add('watching');
   renderStage();
 }
 
@@ -1751,6 +1756,7 @@ function closeStage() {
   state.stageOpen = false;
   focusKey = null;
   $('#stage').classList.add('hidden');
+  $('#app').classList.remove('watching');
   renderStage();
 }
 
@@ -1789,7 +1795,7 @@ function renderStage() {
       const me = p === room.localParticipant;
       const name = nameOf(id, p.name || '?');
       const screen = showing(p, LK.Track.Source.ScreenShare);
-      if (screen) wanted.push({ key: `${id}:screen`, id, track: screen.track ?? null, label: me ? 'Your screen' : `${name}'s screen`, icon: SCREEN_ICON, kind: 'screen' });
+      if (screen) wanted.push({ key: `${id}:screen`, id, track: screen.track ?? null, label: me ? 'Your screen' : `${name}'s screen`, icon: SCREEN_ICON, kind: 'screen', audio: !me && !!p.getTrackPublication(LK.Track.Source.ScreenShareAudio) });
       const camera = showing(p, LK.Track.Source.Camera);
       wanted.push({ key: `${id}:camera`, id, track: camera?.track ?? null, label: me ? `${name} (you)` : name, kind: 'camera', mirror: me, name });
     }
@@ -1798,7 +1804,7 @@ function renderStage() {
 
   for (const [key, t] of tiles) {
     if (wanted.some((w) => w.key === key)) continue;
-    if (t.track && t.video) t.track.detach(t.video);
+    if (t.track && t.media) t.track.detach(t.media);
     tiles.delete(key);
   }
   for (const w of wanted) {
@@ -1807,29 +1813,34 @@ function renderStage() {
       const el = document.createElement('div');
       el.onclick = () => { focusKey = focusKey === w.key ? null : w.key; renderStage(); };
       el.ondblclick = () => (document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen?.());
-      t = { el, track: undefined, video: null };
+      const label = document.createElement('div');
+      label.className = 'vtile-name';
+      el.append(label);
+      t = { el, label, track: undefined, media: null, audio: null };
       tiles.set(w.key, t);
     }
     if (t.track !== w.track) {
-      if (t.track && t.video) t.track.detach(t.video);
-      t.el.replaceChildren();
-      t.video = null;
+      if (t.track && t.media) t.track.detach(t.media);
+      t.media?.remove();
       if (w.track) {
-        t.video = w.track.attach();
-        t.video.muted = true; // sound comes through the voice mix
-        t.el.append(t.video);
+        t.media = w.track.attach();
+        t.media.muted = true; // sound comes through the voice mix
+        // Size the enlarged tile to the video, so there are no black bars around it.
+        const fit = () => { if (t.media.videoWidth) t.el.style.setProperty('--ar', t.media.videoWidth / t.media.videoHeight); };
+        t.media.addEventListener('resize', fit);
+        t.media.addEventListener('loadedmetadata', fit);
       } else {
-        const av = document.createElement('span');
-        av.className = 'avatar lg';
-        setAvatar(av, w.name ?? '?', avatarOf(w.id));
-        t.el.append(av);
+        t.media = document.createElement('span');
+        t.media.className = 'avatar lg';
+        setAvatar(t.media, w.name ?? '?', avatarOf(w.id));
+        t.el.style.removeProperty('--ar');
       }
-      const label = document.createElement('div');
-      label.className = 'vtile-name';
-      t.el.append(label);
+      t.el.prepend(t.media);
       t.track = w.track;
     }
-    t.el.lastChild.innerHTML = `${w.icon ?? ''}<span>${escapeHtml(w.label)}</span>${state.mutedInVoice.has(w.id) && w.kind === 'camera' ? MUTED_ICON : ''}`;
+    if (w.audio && !t.audio) t.audio = streamAudioControl(w.id, t.el);
+    if (!w.audio && t.audio) { t.audio.remove(); t.audio = null; }
+    t.label.innerHTML = `${w.icon ?? ''}<span>${escapeHtml(w.label)}</span>${state.mutedInVoice.has(w.id) && w.kind === 'camera' ? MUTED_ICON : ''}`;
     t.el.className = 'vtile ' + w.kind
       + (w.mirror && w.track ? ' mirror' : '')
       + (w.kind === 'camera' && state.speaking.has(w.id) ? ' speaking' : '')
@@ -1840,6 +1851,51 @@ function renderStage() {
   const focused = order.find((el) => el.classList.contains('focus'));
   $('#stage-grid').replaceChildren(...(focused ? [focused, ...order.filter((el) => el !== focused)] : order));
   $('#stage-grid').classList.toggle('focused', !!focused);
+  $('#stage-grid').classList.toggle('solo', !!focused && order.length === 1);
+}
+
+// How loud someone's shared screen is, for you only: 0% (muted) to 200%. Kept on this device.
+const streamVolumes = (() => { try { return JSON.parse(store.get('streamVolumes')) ?? {}; } catch { return {}; } })();
+const streamVolumeFor = (userId) => streamVolumes[userId] ?? 1;
+
+function setStreamVolume(userId, value) {
+  if (value === 1) delete streamVolumes[userId];
+  else streamVolumes[userId] = value;
+  store.set('streamVolumes', JSON.stringify(streamVolumes));
+  const p = state.voice?.room?.remoteParticipants.get(String(userId));
+  p?.setVolume(value, window.LivekitClient.Track.Source.ScreenShareAudio);
+}
+
+const SPEAKER_ON = '<svg viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4V9Zm12.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4Zm-2.5-8.8v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6Z"/></svg>';
+const SPEAKER_OFF = '<svg viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4V9Zm12.6 3 2.7-2.7-1.4-1.4-2.7 2.7-2.7-2.7-1.4 1.4 2.7 2.7-2.7 2.7 1.4 1.4 2.7-2.7 2.7 2.7 1.4-1.4-2.7-2.7Z"/></svg>';
+
+/** The mute button and slider on a shared screen that has sound. */
+function streamAudioControl(userId, tile) {
+  const box = document.createElement('div');
+  box.className = 'stream-audio';
+  box.innerHTML = '<button type="button"></button><input type="range" min="0" max="200" step="5" aria-label="Stream volume" /><span></span>';
+  const [button, slider, readout] = box.children;
+  let before = 1; // what unmuting goes back to
+  const show = () => {
+    const v = streamVolumeFor(userId);
+    slider.value = Math.round(v * 100);
+    readout.textContent = `${Math.round(v * 100)}%`;
+    button.innerHTML = v === 0 ? SPEAKER_OFF : SPEAKER_ON;
+    button.title = v === 0 ? 'Unmute the stream' : 'Mute the stream';
+    box.classList.toggle('muted', v === 0);
+  };
+  box.onclick = (e) => e.stopPropagation(); // don't enlarge or shrink the tile
+  box.ondblclick = (e) => e.stopPropagation();
+  button.onclick = () => {
+    const v = streamVolumeFor(userId);
+    if (v > 0) before = v;
+    setStreamVolume(userId, v > 0 ? 0 : before || 1);
+    show();
+  };
+  slider.oninput = () => { setStreamVolume(userId, Number(slider.value) / 100); show(); };
+  show();
+  tile.append(box);
+  return box;
 }
 
 // The desktop app can't show the browser's screen picker, so it asks us to show one.
@@ -2151,6 +2207,77 @@ function wireVoiceSettings() {
   const save = () => store.set('voicePrefs', JSON.stringify(voicePrefs));
   $('#voice-quality').onchange = (e) => { voicePrefs.quality = e.target.value; save(); };
   $('#voice-ns').onchange = (e) => { voicePrefs.noiseSuppression = e.target.checked; save(); };
+}
+
+// Your own theme color, on a color wheel: the angle is the hue, the distance from the middle is
+// how strong it is. theme.js turns it into the actual colors for light and dark.
+const THEME_PRESETS = [
+  { name: 'Forest', color: null },
+  { name: 'Fjord', color: { h: 205, s: 70 } },
+  { name: 'Heather', color: { h: 280, s: 55 } },
+  { name: 'Cloudberry', color: { h: 32, s: 85 } },
+  { name: 'Lingonberry', color: { h: 355, s: 75 } },
+  { name: 'Slate', color: { h: 215, s: 10 } },
+];
+const savedThemeColor = () => { try { return JSON.parse(store.get('themeColor')); } catch { return null; } };
+const FOREST_GREEN = { h: 147, s: 45 }; // where the dot sits for Burrow's own colors
+
+function themeSettings() {
+  const chip = (p, i) => {
+    const c = p.color ?? FOREST_GREEN;
+    return `<button type="button" class="swatch" data-preset="${i}" title="${p.name}" style="background: hsl(${c.h} ${c.s}% 42%)"></button>`;
+  };
+  return `<h3>Theme color</h3>
+    <div class="theme-picker">
+      <div class="wheel" id="theme-wheel" tabindex="0" role="slider" aria-label="Theme color"><span class="wheel-dot" id="theme-dot"></span></div>
+      <div class="theme-side">
+        <div class="color-row">${THEME_PRESETS.map(chip).join('')}</div>
+        <span class="small muted">Drag around the wheel to pick a color; nearer the middle is softer. It works with both light and dark, and only changes Burrow for you.</span>
+        <div><button type="button" class="btn secondary" id="theme-reset">Back to forest green</button></div>
+      </div>
+    </div>`;
+}
+
+function wireThemeSettings() {
+  const wheel = $('#theme-wheel');
+  let color = savedThemeColor();
+  const show = () => {
+    const c = color ?? FOREST_GREEN;
+    const r = (c.s / 100) * 50, a = (c.h * Math.PI) / 180;
+    $('#theme-dot').style.left = `${50 + Math.sin(a) * r}%`;
+    $('#theme-dot').style.top = `${50 - Math.cos(a) * r}%`;
+    $('#theme-dot').style.background = `hsl(${c.h} ${c.s}% 50%)`;
+    wheel.setAttribute('aria-valuetext', color ? `hue ${Math.round(c.h)}, strength ${Math.round(c.s)}%` : 'forest green');
+  };
+  const use = (c, save) => {
+    color = c;
+    window.applyThemeColor(c);
+    if (save) store.set('themeColor', c ? JSON.stringify(c) : null);
+    show();
+  };
+  const pick = (e) => {
+    const box = wheel.getBoundingClientRect();
+    const dx = e.clientX - (box.left + box.width / 2), dy = e.clientY - (box.top + box.height / 2);
+    const h = ((Math.atan2(dx, -dy) * 180) / Math.PI + 360) % 360;
+    const s = Math.min(1, Math.hypot(dx, dy) / (box.width / 2)) * 100;
+    use({ h: Math.round(h), s: Math.round(s) }, false);
+  };
+  wheel.onpointerdown = (e) => { wheel.setPointerCapture(e.pointerId); pick(e); };
+  wheel.onpointermove = (e) => { if (wheel.hasPointerCapture(e.pointerId)) pick(e); };
+  wheel.onpointerup = () => use(color, true);
+  wheel.onkeydown = (e) => {
+    const c = { ...(color ?? FOREST_GREEN) };
+    if (e.key === 'ArrowLeft') c.h = (c.h + 355) % 360;
+    else if (e.key === 'ArrowRight') c.h = (c.h + 5) % 360;
+    else if (e.key === 'ArrowUp') c.s = Math.min(100, c.s + 5);
+    else if (e.key === 'ArrowDown') c.s = Math.max(0, c.s - 5);
+    else return;
+    e.preventDefault();
+    use(c, true);
+  };
+  $('#modal-card').querySelectorAll('[data-preset]').forEach((b) => (b.onclick = () => use(THEME_PRESETS[b.dataset.preset].color, true)));
+  $('#theme-reset').onclick = () => use(null, true);
+  show();
 }
 
 function soundSettings() {
