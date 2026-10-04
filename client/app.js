@@ -1604,6 +1604,7 @@ function leaveVoice(quiet) {
   state.mutedInVoice.clear();
   voice.room?.disconnect();
   clearTimeout(voice.crypto?.retry);
+  clearTimeout(voice.crypto?.grace);
   clearTimeout(voice.crypto?.rotateTimer);
   voice.crypto?.worker.terminate();
   closeVolume();
@@ -1697,51 +1698,57 @@ async function pairKey(vc, theirPub) {
 }
 
 function sendCrypto(voice, message, to) {
-  const data = new TextEncoder().encode(JSON.stringify(message));
+  // Say who it's from: a newcomer's first message can arrive before LiveKit has told the others about them.
+  const data = new TextEncoder().encode(JSON.stringify({ ...message, from: voice.room.localParticipant.identity }));
   voice.room.localParticipant.publishData(data, { reliable: true, topic: E2EE_TOPIC, ...(to ? { destinationIdentities: [to] } : {}) }).catch(() => {});
 }
 
-/** The person who hands out room keys: whoever joined first. */
-function keyKeeper(room) {
-  const joined = (p) => p.joinedAt?.getTime() ?? Infinity;
-  return [room.localParticipant, ...room.remoteParticipants.values()]
-    .sort((a, b) => joined(a) - joined(b) || Number(a.identity) - Number(b.identity))[0];
+/**
+ * The person who hands out room keys: whoever joined first, out of the people taking part in the
+ * key exchange. Someone on an app from before encryption never answers, so they can't be keeper.
+ */
+function isKeyKeeper(voice) {
+  const room = voice.room;
+  const joined = (identity) => (identity === room.localParticipant.identity ? room.localParticipant : room.remoteParticipants.get(identity))?.joinedAt?.getTime() ?? Infinity;
+  const keeper = [room.localParticipant.identity, ...voice.crypto.pubs.keys()]
+    .sort((a, b) => joined(a) - joined(b) || Number(a) - Number(b))[0];
+  return keeper === room.localParticipant.identity;
 }
 
 function startKeyExchange(voice) {
   const vc = voice.crypto;
   if (!voice.room.remoteParticipants.size) return keysChanged(voice);
   sendCrypto(voice, { t: 'hello', pub: vc.pub });
-  // If no key arrives (say the keeper left at the same moment), ask again.
+  // If nobody hands us a key (everyone here is on an old app, or the keeper just left), we
+  // become the keeper. Until then keep asking, in case a message went missing.
+  vc.grace = setTimeout(() => { if (vc.index < 0) keysChanged(voice); }, 1500);
   const retry = () => {
     if (state.voice !== voice || vc.index >= 0) return;
     sendCrypto(voice, { t: 'hello', pub: vc.pub });
-    vc.retry = setTimeout(retry, 4000);
+    vc.retry = setTimeout(retry, 1500);
   };
-  vc.retry = setTimeout(retry, 4000);
+  vc.retry = setTimeout(retry, 1500);
 }
 
 /** Someone came or went: if we're the key keeper, make a new room key and hand it out. */
 function keysChanged(voice) {
   const vc = voice.crypto;
   renderVoiceBar();
-  if (!voice.room || keyKeeper(voice.room) !== voice.room.localParticipant) return;
+  if (!voice.room || !isKeyKeeper(voice)) return;
   clearTimeout(vc.rotateTimer);
   // A short wait gathers people joining at the same time into one new key.
   vc.rotateTimer = setTimeout(async () => {
     if (state.voice !== voice) return;
     const raw = crypto.getRandomValues(new Uint8Array(32));
     const index = (vc.index + 1) % KEYRING_SIZE;
-    for (const p of voice.room.remoteParticipants.values()) {
-      const pub = vc.pubs.get(p.identity);
-      if (!pub) continue;
+    for (const [identity, pub] of vc.pubs) {
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const sealed = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(`${index}:${p.identity}`) },
+        { name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(`${index}:${identity}`) },
         await pairKey(vc, pub),
         raw,
       );
-      sendCrypto(voice, { t: 'key', index, iv: toB64(iv), key: toB64(sealed), pub: vc.pub }, p.identity);
+      sendCrypto(voice, { t: 'key', index, iv: toB64(iv), key: toB64(sealed), pub: vc.pub }, identity);
     }
     await vc.keys.use(raw.buffer, index);
     vc.index = index;
@@ -1751,10 +1758,11 @@ function keysChanged(voice) {
 
 async function onCryptoMessage(voice, payload, participant, topic) {
   const vc = voice.crypto;
-  if (topic !== E2EE_TOPIC || !participant || state.voice !== voice) return;
+  if (topic !== E2EE_TOPIC || state.voice !== voice) return;
   let msg;
   try { msg = JSON.parse(new TextDecoder().decode(payload)); } catch { return; }
-  const from = participant.identity;
+  const from = participant?.identity ?? msg.from;
+  if (typeof from !== 'string' || from === voice.room.localParticipant.identity) return;
   if ((msg.t === 'hello' || msg.t === 'pub') && typeof msg.pub === 'string') {
     vc.pubs.set(from, msg.pub);
     if (msg.t === 'hello') sendCrypto(voice, { t: 'pub', pub: vc.pub }, from);
@@ -1770,6 +1778,7 @@ async function onCryptoMessage(voice, payload, participant, topic) {
       await vc.keys.use(raw, Number(msg.index) % KEYRING_SIZE);
       vc.index = Number(msg.index) % KEYRING_SIZE;
       clearTimeout(vc.retry);
+      clearTimeout(vc.grace);
       renderVoiceBar();
     } catch (err) {
       console.warn("Couldn't open a voice key from", from, err);
