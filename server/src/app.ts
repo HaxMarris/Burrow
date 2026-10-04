@@ -1096,7 +1096,7 @@ export function createApp(opts: AppOptions): Server {
       // The web app may only run its own scripts, and can't be framed by other sites.
       res.setHeader('content-security-policy', APP_CSP);
       res.setHeader('x-frame-options', 'DENY');
-      res.setHeader('permissions-policy', 'camera=(), geolocation=(), microphone=(self)');
+      res.setHeader('permissions-policy', 'camera=(self), display-capture=(self), geolocation=(), microphone=(self)');
       return serveStatic(res, url.pathname);
     }
 

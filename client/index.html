@@ -78,19 +78,32 @@
       </div>
 
       <div id="voice-bar" class="voice-bar hidden">
-        <div class="voice-meta">
-          <span id="voice-status" class="conn">Connecting…</span>
-          <span id="voice-room-name" class="voice-room-label"></span>
+        <div class="voice-top">
+          <div class="voice-meta">
+            <span id="voice-status" class="conn">Connecting…</span>
+            <span id="voice-room-name" class="voice-room-label"></span>
+          </div>
+          <button class="icon-btn voice-lock hidden" id="voice-lock" title="End-to-end encrypted: show the safety code">
+            <svg viewBox="0 0 24 24"><path d="M7 10V7a5 5 0 0 1 10 0v3h1a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h1Zm2 0h6V7a3 3 0 0 0-6 0v3Z"/></svg>
+          </button>
         </div>
-        <button class="icon-btn voice-lock hidden" id="voice-lock" title="End-to-end encrypted: show the safety code">
-          <svg viewBox="0 0 24 24"><path d="M7 10V7a5 5 0 0 1 10 0v3h1a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h1Zm2 0h6V7a3 3 0 0 0-6 0v3Z"/></svg>
-        </button>
-        <button class="icon-btn" id="voice-mute" title="Mute">
-          <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1a7 7 0 0 0 6-6.9h-2Z"/></svg>
-        </button>
-        <button class="icon-btn hang-up" id="voice-leave" title="Leave voice">
-          <svg viewBox="0 0 24 24"><path d="M12 9c-2.4 0-4.6.5-6.6 1.4-.8.4-1.3 1.2-1.3 2v2.3c0 .7.7 1.2 1.4 1l3-.8c.6-.2 1-.7 1-1.3v-1.8c1.6-.4 3.3-.4 5 0v1.8c0 .6.4 1.1 1 1.3l3 .8c.7.2 1.4-.3 1.4-1v-2.3c0-.8-.5-1.6-1.3-2C16.6 9.5 14.4 9 12 9Z"/></svg>
-        </button>
+        <div class="voice-controls">
+          <button class="icon-btn" id="voice-mute" title="Mute">
+            <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1a7 7 0 0 0 6-6.9h-2Z"/></svg>
+          </button>
+          <button class="icon-btn" id="voice-camera" title="Turn on camera">
+            <svg viewBox="0 0 24 24"><path d="M4 6h11a2 2 0 0 1 2 2v1.5l4-2.5v10l-4-2.5V16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z"/></svg>
+          </button>
+          <button class="icon-btn" id="voice-screen" title="Share your screen">
+            <svg viewBox="0 0 24 24"><path d="M3 4h18a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-7v2h3v2H7v-2h3v-2H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Zm1 2v9h16V6H4Zm8 1 4 4h-3v3h-2v-3H8l4-4Z"/></svg>
+          </button>
+          <button class="icon-btn" id="voice-watch" title="Show video">
+            <svg viewBox="0 0 24 24"><path d="M3 4h8v7H3V4Zm10 0h8v7h-8V4ZM3 13h8v7H3v-7Zm10 0h8v7h-8v-7Z"/></svg>
+          </button>
+          <button class="icon-btn hang-up" id="voice-leave" title="Leave voice">
+            <svg viewBox="0 0 24 24"><path d="M12 9c-2.4 0-4.6.5-6.6 1.4-.8.4-1.3 1.2-1.3 2v2.3c0 .7.7 1.2 1.4 1l3-.8c.6-.2 1-.7 1-1.3v-1.8c1.6-.4 3.3-.4 5 0v1.8c0 .6.4 1.1 1 1.3l3 .8c.7.2 1.4-.3 1.4-1v-2.3c0-.8-.5-1.6-1.3-2C16.6 9.5 14.4 9 12 9Z"/></svg>
+          </button>
+        </div>
       </div>
       <div id="voice-audio" hidden></div>
 
@@ -140,6 +153,16 @@
           </button>
         </form>
       </div>
+      <section id="stage" class="stage hidden">
+        <header class="stage-head">
+          <div>
+            <h1 id="stage-title"></h1>
+            <div class="muted small">Click a video to make it bigger. Double-click for full screen.</div>
+          </div>
+          <button class="btn secondary" id="stage-close">Back to chat</button>
+        </header>
+        <div id="stage-grid" class="stage-grid"></div>
+      </section>
       <div id="empty-state" class="empty-state hidden">
         <div class="empty-illustration"><span class="logo-mark big"></span></div>
         <h2>Nothing here yet</h2>

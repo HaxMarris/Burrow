@@ -27,6 +27,7 @@
     "productName": "Burrow",
     "files": [
       "main.js",
+      "preload.js",
       "updater.js",
       "app/**/*"
     ],
@@ -37,7 +38,8 @@
       "target": "dmg",
       "category": "public.app-category.social-networking",
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "Burrow uses your microphone when you join a voice room."
+        "NSMicrophoneUsageDescription": "Burrow uses your microphone when you join a voice room.",
+        "NSCameraUsageDescription": "Burrow uses your camera when you turn it on in a voice room."
       }
     },
     "linux": {

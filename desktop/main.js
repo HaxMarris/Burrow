@@ -1,6 +1,6 @@
 // Desktop wrapper: loads the bundled chat client, which asks the user for the
 // server address on first launch and remembers it.
-const { app, BrowserWindow, shell, Menu } = require('electron');
+const { app, BrowserWindow, shell, Menu, desktopCapturer, ipcMain } = require('electron');
 const path = require('node:path');
 const { startUpdateChecks } = require('./updater');
 
@@ -17,7 +17,37 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: path.join(__dirname, 'preload.js'),
     },
+  });
+
+  // Screen sharing: list screens and windows, let the page show a picker, then hand over the choice.
+  win.webContents.session.setDisplayMediaRequestHandler(async (request, callback) => {
+    // Electron throws when told "nothing chosen", though the page does get its "cancelled".
+    const cancel = () => { try { callback({}); } catch {} };
+    const thumbnailSize = { width: 320, height: 180 };
+    let sources;
+    try {
+      // Windows are listed separately, and given up on if listing them stalls (it can on some Linux desktops).
+      const [screens, windows] = await Promise.all([
+        desktopCapturer.getSources({ types: ['screen'], thumbnailSize }),
+        Promise.race([
+          desktopCapturer.getSources({ types: ['window'], thumbnailSize }),
+          new Promise((resolve) => setTimeout(() => resolve([]), 3000)),
+        ]).catch(() => []),
+      ]);
+      sources = [...screens, ...windows];
+    } catch {
+      return cancel(); // no permission to see the screen (macOS: System Settings > Privacy > Screen Recording)
+    }
+    ipcMain.emit('picked-screen', {}, null); // an earlier picker still open counts as cancelled
+    ipcMain.once('picked-screen', (_e, id) => {
+      const source = sources.find((s) => s.id === id);
+      if (!source) return cancel();
+      // Sharing the computer's sound only works on Windows.
+      callback({ video: source, ...(request.audioRequested && process.platform === 'win32' ? { audio: 'loopback' } : {}) });
+    });
+    win.webContents.send('pick-screen', sources.map((s) => ({ id: s.id, name: s.name, thumbnail: s.thumbnail.toDataURL() })));
   });
 
   // Links in messages open in the user's browser, never inside the app.

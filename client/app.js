@@ -35,6 +35,8 @@ const state = {
   voice: null,              // { channelId, room, muted } while in a voice room
   speaking: new Set(),      // user ids talking right now in our voice room
   mutedInVoice: new Set(),  // user ids muted in our voice room
+  sharing: new Map(),       // user id -> { camera, screen } in our voice room
+  stageOpen: false,         // showing video instead of the chat
   avatars: new Map(),       // user id -> profile picture path (or null), kept current by user_updated events
 };
 
@@ -398,8 +400,8 @@ function renderChannels() {
     li.className = 'voice-room' + (state.voice?.channelId === c.id ? ' joined' : '');
     li.innerHTML = `<div class="voice-room-name">${SPEAKER_ICON}<span class="room-name">${escapeHtml(c.name)}</span>${c.private ? LOCK_ICON : ''}</div>`;
     if (can(s, 'rooms')) li.firstChild.append(roomSettingsButton(c));
-    li.title = state.voice?.channelId === c.id ? "You're here" : 'Join voice';
-    li.onclick = () => joinVoice(c.id);
+    li.title = state.voice?.channelId === c.id ? 'Show video' : 'Join voice';
+    li.onclick = () => (state.voice?.channelId === c.id ? openStage() : joinVoice(c.id));
     const people = (c.voiceUsers ?? []).map((id) => {
       const name = s.members.find((m) => m.id === id)?.username ?? '?';
       const row = document.createElement('div');
@@ -411,6 +413,9 @@ function renderChannels() {
       label.textContent = name;
       row.append(av, label);
       if (state.mutedInVoice.has(id)) row.insertAdjacentHTML('beforeend', MUTED_ICON);
+      const sharing = state.voice?.channelId === c.id ? state.sharing.get(id) : null;
+      if (sharing?.camera) row.insertAdjacentHTML('beforeend', `<span class="cam-tag" title="Camera on">${CAMERA_ICON}</span>`);
+      if (sharing?.screen) row.insertAdjacentHTML('beforeend', '<span class="live-tag" title="Sharing their screen">LIVE</span>');
       if (id !== state.me.id) {
         const v = volumeFor(id);
         if (v !== 1) row.insertAdjacentHTML('beforeend', `<span class="volume-tag">${Math.round(v * 100)}%</span>`);
@@ -434,6 +439,7 @@ function renderChannels() {
 }
 
 async function selectChannel(id) {
+  closeStage();
   // Files upload into a specific room, so switching rooms drops any not yet sent.
   if (id !== state.channelId && state.pending.length) {
     state.pending.forEach((p) => { p.xhr?.abort(); if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
@@ -758,14 +764,23 @@ function renderTyping() {
 
 // ---------------------------------------------------------------- modals
 
+let onModalClose = null; // run once when the open modal goes away, however it's closed
 function modal(html) {
+  const closing = onModalClose;
+  onModalClose = null;
+  closing?.();
   $('#modal-card').className = 'modal-card';
   $('#modal-card').innerHTML = html;
   $('#modal').classList.remove('hidden');
   $('#modal-card').querySelectorAll('[data-close]').forEach((b) => (b.onclick = closeModal));
   $('#modal-card').querySelector('input')?.focus();
 }
-function closeModal() { $('#modal').classList.add('hidden'); }
+function closeModal() {
+  $('#modal').classList.add('hidden');
+  const closing = onModalClose;
+  onModalClose = null;
+  closing?.();
+}
 $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
@@ -1549,26 +1564,38 @@ async function joinVoice(channelId) {
       publishDefaults: { audioPreset: { maxBitrate: quality.bitrate }, dtx: true, red: true },
       // Mixing through Web Audio lets people be turned up past 100%.
       webAudioMix: true,
+      // Only download video someone is looking at, at the size it's shown.
+      adaptiveStream: true,
+      dynacast: true,
     });
     voice.room = room;
     room
       .on(LK.RoomEvent.TrackSubscribed, (track, pub, participant) => {
-        if (track.kind !== 'audio') return;
+        if (track.kind !== 'audio') return renderStage();
         $('#voice-audio').append(track.attach());
         participant.setVolume(volumeFor(Number(participant.identity)));
       })
-      .on(LK.RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach((el) => el.remove()))
+      .on(LK.RoomEvent.TrackUnsubscribed, (track) => {
+        if (track.kind !== 'audio') return renderStage();
+        track.detach().forEach((el) => el.remove());
+      })
+      .on(LK.RoomEvent.TrackPublished, renderStage)
+      .on(LK.RoomEvent.TrackUnpublished, renderStage)
+      .on(LK.RoomEvent.LocalTrackPublished, renderStage)
+      .on(LK.RoomEvent.LocalTrackUnpublished, () => { renderStage(); renderVoiceBar(); })
+      .on(LK.RoomEvent.ParticipantConnected, renderStage)
       .on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
         state.speaking = new Set(speakers.map((p) => Number(p.identity)));
         renderChannels();
+        renderStage();
       })
-      .on(LK.RoomEvent.TrackMuted, (pub, p) => setMuted(p, true))
-      .on(LK.RoomEvent.TrackUnmuted, (pub, p) => setMuted(p, false))
+      .on(LK.RoomEvent.TrackMuted, (pub, p) => (pub.kind === 'audio' && pub.source === LK.Track.Source.Microphone ? setMuted(p, true) : renderStage()))
+      .on(LK.RoomEvent.TrackUnmuted, (pub, p) => (pub.kind === 'audio' && pub.source === LK.Track.Source.Microphone ? setMuted(p, false) : renderStage()))
       .on(LK.RoomEvent.Reconnecting, () => renderVoiceBar('Reconnecting…'))
       .on(LK.RoomEvent.Reconnected, () => renderVoiceBar())
       .on(LK.RoomEvent.Disconnected, () => { if (state.voice === voice) leaveVoice(); })
       .on(LK.RoomEvent.DataReceived, (payload, participant, kind, topic) => onCryptoMessage(voice, payload, participant, topic))
-      .on(LK.RoomEvent.ParticipantDisconnected, (p) => { vc.pubs.delete(p.identity); keysChanged(voice); })
+      .on(LK.RoomEvent.ParticipantDisconnected, (p) => { vc.pubs.delete(p.identity); keysChanged(voice); renderStage(); })
       .on(LK.RoomEvent.EncryptionError, (err) => console.warn('Voice encryption:', err?.message ?? err));
     await room.connect(url || state.serverUrl.replace(/^http/, 'ws'), token);
     await room.setE2EEEnabled(true);
@@ -1602,12 +1629,14 @@ function leaveVoice(quiet) {
   if (quiet !== true) playSound('leave');
   state.speaking.clear();
   state.mutedInVoice.clear();
+  state.sharing.clear();
   voice.room?.disconnect();
   clearTimeout(voice.crypto?.retry);
   clearTimeout(voice.crypto?.grace);
   clearTimeout(voice.crypto?.rotateTimer);
   voice.crypto?.worker.terminate();
   closeVolume();
+  closeStage();
   $('#voice-audio').replaceChildren();
   if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: 'voice_leave' }));
   renderVoiceBar();
@@ -1637,11 +1666,204 @@ function renderVoiceBar(status) {
   $('#voice-room-name').textContent = ch?.name ?? '';
   $('#voice-mute').classList.toggle('on', voice.muted);
   $('#voice-mute').title = voice.muted ? 'Unmute' : 'Mute';
+  const lp = voice.room?.localParticipant;
+  const camera = !!lp?.isCameraEnabled, screen = !!lp?.isScreenShareEnabled;
+  $('#voice-camera').classList.toggle('on', camera);
+  $('#voice-camera').title = camera ? 'Turn off camera' : 'Turn on camera';
+  $('#voice-screen').classList.toggle('on', screen);
+  $('#voice-screen').title = screen ? 'Stop sharing your screen' : 'Share your screen';
+  for (const id of ['#voice-camera', '#voice-screen', '#voice-watch']) $(id).disabled = !voice.room || !!status;
 }
 
 $('#voice-mute').onclick = toggleMute;
 $('#voice-lock').onclick = (e) => { e.stopPropagation(); openSafetyCode(e.currentTarget); };
 $('#voice-leave').onclick = () => leaveVoice();
+$('#voice-camera').onclick = toggleCamera;
+$('#voice-screen').onclick = toggleScreen;
+$('#voice-watch').onclick = () => (state.stageOpen ? closeStage() : openStage());
+$('#stage-close').onclick = () => closeStage();
+
+// ---------------------------------------------------------------- camera and screen sharing
+//
+// Video goes through the same voice room, so it's end-to-end encrypted too. It shows on the
+// "stage", which covers the chat while it's open. Only video on the stage is downloaded.
+
+const CAMERA_ICON = '<svg viewBox="0 0 24 24"><path d="M4 6h11a2 2 0 0 1 2 2v1.5l4-2.5v10l-4-2.5V16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z"/></svg>';
+const SCREEN_ICON = '<svg viewBox="0 0 24 24"><path d="M3 4h18a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-7v2h3v2H7v-2h3v-2H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Zm1 2v9h16V6H4Z"/></svg>';
+const tiles = new Map(); // "identity:camera" or "identity:screen" -> { el, track, video }
+let focusKey = null;     // the tile shown big, if any
+
+function nameOf(userId, fallback = '?') {
+  for (const s of state.servers.values()) {
+    const m = s.members.find((m) => m.id === userId);
+    if (m) return m.username;
+  }
+  return fallback;
+}
+
+function mediaError(err, what) {
+  if (err?.name === 'NotAllowedError') return `Burrow needs permission to use your ${what}. Allow it in your system settings and try again.`;
+  if (err?.name === 'NotFoundError') return `No ${what} found.`;
+  if (err?.name === 'NotReadableError') return `Your ${what} is busy. Close other apps using it and try again.`;
+  return `Couldn't start your ${what}: ${err?.message || err}`;
+}
+
+async function toggleCamera() {
+  const lp = state.voice?.room?.localParticipant;
+  if (!lp) return;
+  try {
+    await lp.setCameraEnabled(!lp.isCameraEnabled, { resolution: window.LivekitClient.VideoPresets.h720.resolution });
+    if (lp.isCameraEnabled) openStage(); // so you can see yourself
+  } catch (err) {
+    alert(mediaError(err, 'camera'));
+  }
+  renderVoiceBar();
+  renderStage();
+}
+
+async function toggleScreen() {
+  const lp = state.voice?.room?.localParticipant;
+  if (!lp) return;
+  try {
+    await lp.setScreenShareEnabled(
+      !lp.isScreenShareEnabled,
+      { audio: true, systemAudio: 'include', selfBrowserSurface: 'exclude', resolution: { width: 1920, height: 1080, frameRate: 30 } },
+      { screenShareEncoding: window.LivekitClient.ScreenSharePresets.h1080fps30.encoding },
+    );
+  } catch (err) {
+    // Closing the picker without choosing anything is not an error.
+    const cancelled = err?.name === 'NotAllowedError' && !/system/i.test(err.message ?? '');
+    if (!cancelled && err?.name !== 'AbortError') alert(mediaError(err, 'screen'));
+  }
+  renderVoiceBar();
+  renderStage();
+}
+
+function openStage() {
+  if (!state.voice?.room) return;
+  state.stageOpen = true;
+  $('#stage').classList.remove('hidden');
+  renderStage();
+}
+
+function closeStage() {
+  if (!state.stageOpen) return;
+  state.stageOpen = false;
+  focusKey = null;
+  $('#stage').classList.add('hidden');
+  renderStage();
+}
+
+function renderStage() {
+  const room = state.voice?.room;
+  const LK = window.LivekitClient;
+  if (!LK) return;
+  const people = room ? [room.localParticipant, ...room.remoteParticipants.values()] : [];
+  const showing = (p, source) => {
+    const pub = p.getTrackPublication(source);
+    return pub && !pub.isMuted ? pub : null;
+  };
+
+  // Who's on camera or sharing, for the sidebar.
+  const sharing = new Map();
+  for (const p of people) {
+    const camera = !!showing(p, LK.Track.Source.Camera), screen = !!showing(p, LK.Track.Source.ScreenShare);
+    if (camera || screen) sharing.set(Number(p.identity), { camera, screen });
+  }
+  const others = [...sharing.keys()].some((id) => id !== state.me?.id);
+  $('#voice-watch').classList.toggle('has-video', others && !state.stageOpen);
+  $('#voice-watch').classList.toggle('on', state.stageOpen);
+  $('#voice-watch').title = state.stageOpen ? 'Back to chat' : 'Show video';
+  if (JSON.stringify([...sharing]) !== JSON.stringify([...state.sharing])) {
+    state.sharing = sharing;
+    renderChannels();
+  }
+
+  // Off stage, let go of every video so none of it is downloaded.
+  const wanted = [];
+  if (state.stageOpen && room) {
+    const ch = [...state.servers.values()].flatMap((s) => s.channels).find((c) => c.id === state.voice.channelId);
+    $('#stage-title').textContent = ch?.name ?? 'Voice';
+    for (const p of people) {
+      const id = Number(p.identity);
+      const me = p === room.localParticipant;
+      const name = nameOf(id, p.name || '?');
+      const screen = showing(p, LK.Track.Source.ScreenShare);
+      if (screen) wanted.push({ key: `${id}:screen`, id, track: screen.track ?? null, label: me ? 'Your screen' : `${name}'s screen`, icon: SCREEN_ICON, kind: 'screen' });
+      const camera = showing(p, LK.Track.Source.Camera);
+      wanted.push({ key: `${id}:camera`, id, track: camera?.track ?? null, label: me ? `${name} (you)` : name, kind: 'camera', mirror: me, name });
+    }
+  }
+  if (focusKey && !wanted.some((w) => w.key === focusKey)) focusKey = null;
+
+  for (const [key, t] of tiles) {
+    if (wanted.some((w) => w.key === key)) continue;
+    if (t.track && t.video) t.track.detach(t.video);
+    tiles.delete(key);
+  }
+  for (const w of wanted) {
+    let t = tiles.get(w.key);
+    if (!t) {
+      const el = document.createElement('div');
+      el.onclick = () => { focusKey = focusKey === w.key ? null : w.key; renderStage(); };
+      el.ondblclick = () => (document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen?.());
+      t = { el, track: undefined, video: null };
+      tiles.set(w.key, t);
+    }
+    if (t.track !== w.track) {
+      if (t.track && t.video) t.track.detach(t.video);
+      t.el.replaceChildren();
+      t.video = null;
+      if (w.track) {
+        t.video = w.track.attach();
+        t.video.muted = true; // sound comes through the voice mix
+        t.el.append(t.video);
+      } else {
+        const av = document.createElement('span');
+        av.className = 'avatar lg';
+        setAvatar(av, w.name ?? '?', avatarOf(w.id));
+        t.el.append(av);
+      }
+      const label = document.createElement('div');
+      label.className = 'vtile-name';
+      t.el.append(label);
+      t.track = w.track;
+    }
+    t.el.lastChild.innerHTML = `${w.icon ?? ''}<span>${escapeHtml(w.label)}</span>${state.mutedInVoice.has(w.id) && w.kind === 'camera' ? MUTED_ICON : ''}`;
+    t.el.className = 'vtile ' + w.kind
+      + (w.mirror && w.track ? ' mirror' : '')
+      + (w.kind === 'camera' && state.speaking.has(w.id) ? ' speaking' : '')
+      + (focusKey === w.key ? ' focus' : '');
+    t.el.title = focusKey === w.key ? 'Click to shrink, double-click for full screen' : 'Click to make bigger, double-click for full screen';
+  }
+  const order = wanted.map((w) => tiles.get(w.key).el);
+  const focused = order.find((el) => el.classList.contains('focus'));
+  $('#stage-grid').replaceChildren(...(focused ? [focused, ...order.filter((el) => el !== focused)] : order));
+  $('#stage-grid').classList.toggle('focused', !!focused);
+}
+
+// The desktop app can't show the browser's screen picker, so it asks us to show one.
+window.burrowDesktop?.onPickScreen((sources) => {
+  let picked = false;
+  modal(`<h2>Share your screen</h2>
+    <p class="muted small">Pick a whole screen or one window.</p>
+    <div class="screen-picker"></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Cancel</button></div>`);
+  const grid = $('#modal-card .screen-picker');
+  for (const src of sources) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    const img = document.createElement('img');
+    img.src = src.thumbnail;
+    img.alt = '';
+    const label = document.createElement('span');
+    label.textContent = src.name;
+    b.append(img, label);
+    b.onclick = () => { picked = true; window.burrowDesktop.pickedScreen(src.id); closeModal(); };
+    grid.append(b);
+  }
+  onModalClose = () => { if (!picked) window.burrowDesktop.pickedScreen(null); };
+});
 
 // ---------------------------------------------------------------- end-to-end encrypted voice
 //

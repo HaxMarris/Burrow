@@ -316,7 +316,12 @@ label.check input { width: auto; }
 .avatar.xs { width: 22px; height: 22px; border-radius: 8px; font-size: 11px; transition: box-shadow .12s; }
 .voice-person.speaking .avatar { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--online); }
 .muted-icon { width: 14px; height: 14px; fill: var(--berry); flex: none; }
-.voice-bar { display: flex; align-items: center; gap: 4px; background: var(--surface); border-radius: var(--radius); padding: 8px 8px 8px 12px; box-shadow: var(--shadow); }
+.voice-bar { display: flex; flex-direction: column; gap: 4px; background: var(--surface); border-radius: var(--radius); padding: 8px 8px 6px 12px; box-shadow: var(--shadow); }
+.voice-top { display: flex; align-items: center; gap: 4px; }
+.voice-controls { display: flex; justify-content: space-between; margin-left: -6px; }
+.voice-controls .icon-btn.on { color: var(--accent-ink); background: var(--accent); }
+#voice-watch.has-video { color: var(--accent); position: relative; }
+#voice-watch.has-video::after { content: ""; position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 50%; background: var(--berry); }
 .voice-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .voice-room-label { font-size: 13px; font-weight: 700; color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #voice-mute.on { color: var(--berry); background: rgba(178, 67, 61, .12); }
@@ -398,3 +403,30 @@ a.btn { text-decoration: none; display: inline-block; }
 .safety-pop { width: 260px; }
 .safety-pop p { margin: 0; }
 .safety-code { font-size: 22px; font-weight: 800; letter-spacing: .08em; text-align: center; padding: 6px 0; font-variant-numeric: tabular-nums; color: var(--accent); }
+
+/* ---------- video: camera and screen sharing ---------- */
+.stage { position: absolute; inset: 0; z-index: 4; background: var(--bg); display: flex; flex-direction: column; min-height: 0; }
+.stage-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 28px 12px; }
+.stage-head h1 { margin: 0; font-size: 24px; }
+.stage-grid { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 20px 20px; display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); align-content: start; }
+.stage-grid.focused { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+.vtile { position: relative; aspect-ratio: 16 / 9; background: var(--sidebar); border-radius: var(--radius); overflow: hidden; cursor: pointer; display: grid; place-items: center; box-shadow: var(--shadow); }
+.vtile.focus { grid-column: 1 / -1; aspect-ratio: auto; height: min(68vh, calc(100vh - 260px)); cursor: zoom-out; }
+.vtile video { width: 100%; height: 100%; object-fit: contain; background: #0b100d; }
+.vtile.camera video { object-fit: cover; }
+.vtile.focus.camera video { object-fit: contain; }
+.vtile.mirror video { transform: scaleX(-1); }
+.vtile .avatar.lg { width: 72px; height: 72px; font-size: 28px; }
+.stage-grid.focused .vtile:not(.focus) .avatar.lg { width: 40px; height: 40px; font-size: 16px; margin-bottom: 18px; }
+.vtile.speaking { box-shadow: 0 0 0 3px var(--online), var(--shadow); }
+.vtile-name { position: absolute; left: 8px; bottom: 8px; display: flex; align-items: center; gap: 6px; max-width: calc(100% - 16px); padding: 3px 9px; border-radius: 999px; background: rgba(12, 18, 14, .72); color: #f2f5ef; font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vtile-name svg { width: 14px; height: 14px; fill: currentColor; flex: none; }
+.vtile:fullscreen { border-radius: 0; }
+.live-tag { font-size: 10px; font-weight: 800; letter-spacing: .04em; color: #fff; background: var(--berry); border-radius: 4px; padding: 1px 5px; }
+.cam-tag { display: inline-flex; color: var(--muted); }
+.cam-tag svg { width: 14px; height: 14px; fill: currentColor; }
+.screen-picker { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; max-height: 55vh; overflow-y: auto; margin: 12px 0; }
+.screen-picker button { background: var(--surface-2); border: 2px solid transparent; border-radius: 12px; padding: 8px; color: var(--text); display: flex; flex-direction: column; gap: 6px; text-align: left; font-weight: 600; font-size: 13px; }
+.screen-picker button:hover { border-color: var(--accent); }
+.screen-picker img { width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #0b100d; border-radius: 8px; }
+.screen-picker span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
