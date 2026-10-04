@@ -167,6 +167,8 @@ async function enterApp() {
   $('#me-name').textContent = state.me.username;
   state.avatars.set(state.me.id, state.me.avatar ?? null);
   setAvatar($('#me-avatar'), state.me.username, state.me.avatar);
+  setAvatar($('#tab-avatar'), state.me.username, state.me.avatar);
+  showView('rooms');
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
   const config = await api('/api/config').catch(() => ({}));
   state.voiceEnabled = !!config.voice;
@@ -198,8 +200,7 @@ function connect() {
   ws.onopen = () => {
     const wasRetry = state.wsRetry > 0;
     state.wsRetry = 0;
-    $('#conn-status').classList.add('ok');
-    $('#conn-status').textContent = 'Connected';
+    setConnected(true, 'Connected');
     // The server forgets who's in voice when we drop off, so tell it again.
     if (state.voice) ws.send(JSON.stringify({ type: 'voice_join', channelId: state.voice.channelId }));
     // Catch up on anything missed while disconnected.
@@ -213,8 +214,7 @@ function connect() {
       $('#auth-error').textContent = 'Your password was changed, so please log in again.';
       return;
     }
-    $('#conn-status').classList.remove('ok');
-    $('#conn-status').textContent = 'Reconnecting…';
+    setConnected(false, 'Reconnecting…');
     if (state.ws !== ws || !state.token) return;
     const delay = Math.min(30000, 1000 * 2 ** state.wsRetry++);
     setTimeout(connect, delay);
@@ -327,41 +327,205 @@ function notify(m) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   const title = isDm(server) ? `${m.author} (direct message)` : `${m.author} in ${channel?.name ?? 'Burrow'}`;
   const n = new Notification(title, { body: m.content.slice(0, 200) || 'Sent a file', silent: !mentioned });
-  n.onclick = () => { window.focus(); if (server) selectServer(server.id).then(() => selectChannel(m.channelId)); };
+  n.onclick = () => { window.focus(); if (server) selectServer(server.id).then(() => { selectChannel(m.channelId); showView('chat'); }); };
 }
 
 // ---------------------------------------------------------------- servers & channels
 
+// The top bar: a named pill per burrow, with the ones that don't fit in a "more" list.
+// Phones get one button with the current burrow's name instead, which opens the full list.
 function renderServers() {
-  const dmTile = document.createElement('button');
-  dmTile.className = 'tile dm-tile' + (state.inDms ? ' active' : '');
-  if (!state.inDms && state.dmOrder.some((id) => state.servers.get(id).channels.some((c) => state.unread.has(c.id))))
-    dmTile.classList.add('unread');
-  dmTile.title = 'Direct messages';
-  dmTile.innerHTML = CHAT_ICON;
-  dmTile.onclick = openDms;
-  const tiles = state.serverOrder.map((id) => {
-    const s = state.servers.get(id);
+  const s = state.servers.get(state.serverId);
+  const hasUnread = (srv) => srv.channels.some((c) => state.unread.has(c.id));
+  const dmUnread = state.dmOrder.some((id) => hasUnread(state.servers.get(id)));
+
+  const dmPill = document.createElement('button');
+  dmPill.className = 'pill dm-pill' + (state.inDms ? ' on' : '') + (!state.inDms && dmUnread ? ' unread' : '');
+  dmPill.innerHTML = `<span class="tile dm-tile">${CHAT_ICON}</span><span class="pill-name">Messages</span>`;
+  dmPill.title = 'Direct messages';
+  dmPill.onclick = openDms;
+  if (state.inDms) dmPill.setAttribute('aria-current', 'true');
+
+  const pills = state.serverOrder.map((id) => {
+    const srv = state.servers.get(id);
     const b = document.createElement('button');
-    b.className = 'tile' + (id === state.serverId && !state.inDms ? ' active' : '');
-    if (id !== state.serverId && s.channels.some((c) => state.unread.has(c.id))) b.classList.add('unread');
-    b.title = s.name;
-    b.textContent = initials(s.name);
-    b.style.background = colorFor(s.name);
+    const on = id === state.serverId && !state.inDms;
+    b.className = 'pill' + (on ? ' on' : '') + (!on && hasUnread(srv) ? ' unread' : '');
+    b.dataset.id = id;
+    b.title = srv.name;
+    b.append(burrowTile(srv));
+    const name = document.createElement('span');
+    name.className = 'pill-name';
+    name.textContent = srv.name;
+    b.append(name);
+    if (on) b.setAttribute('aria-current', 'true');
     b.onclick = () => selectServer(id);
     return b;
   });
+
+  const more = document.createElement('button');
+  more.className = 'pill more';
+  more.id = 'burrow-more';
+  more.hidden = true;
+  more.setAttribute('aria-haspopup', 'dialog');
+  more.onclick = (e) => { e.stopPropagation(); toggleSwitcher(more, overflowIds); };
+
   const add = document.createElement('button');
-  add.className = 'tile add';
+  add.className = 'add-burrow';
   add.title = 'Create or join a burrow';
+  add.setAttribute('aria-label', 'Create or join a burrow');
   add.textContent = '+';
   add.onclick = openAddServer;
-  $('#server-list').replaceChildren(dmTile, ...tiles, add);
+
+  $('#burrow-nav').replaceChildren(dmPill, ...pills, more, add);
+  fitPills();
+
+  // The phone's burrow button.
+  const tile = $('#switch-tile');
+  if (state.inDms || !s) {
+    tile.className = 'tile dm-tile';
+    tile.innerHTML = CHAT_ICON;
+    tile.style.background = '';
+  } else {
+    tile.replaceWith(burrowTile(s, 'switch-tile'));
+  }
+  $('#switch-name').textContent = state.inDms ? 'Messages' : s?.name ?? 'Burrows';
+  const elsewhere = state.serverOrder.some((id) => id !== state.serverId && hasUnread(state.servers.get(id)));
+  $('#burrow-switch').classList.toggle('unread', elsewhere || (!state.inDms && dmUnread));
+
+  $('#tab-burrows').classList.toggle('on', !state.inDms);
+  $('#tab-messages').classList.toggle('on', state.inDms);
+  $('#tab-messages').classList.toggle('unread', !state.inDms && dmUnread);
+
+  if ($('#switcher').dataset.open === 'all') renderSwitcher();
   $('#empty-state').classList.toggle('hidden', state.serverOrder.length > 0 || state.inDms);
 }
 
+function burrowTile(s, id) {
+  const t = document.createElement('span');
+  t.className = 'tile';
+  if (id) t.id = id;
+  t.textContent = initials(s.name);
+  t.style.background = colorFor(s.name);
+  return t;
+}
+
+// Hide the pills that don't fit, keeping the current burrow, and count them on the "more" button.
+let overflowIds = [];
+function fitPills() {
+  const nav = $('#burrow-nav');
+  const more = $('#burrow-more');
+  overflowIds = [];
+  if (!more || !nav.offsetParent) return; // not shown on phones
+  const pills = [...nav.querySelectorAll('.pill[data-id]')];
+  pills.forEach((p) => (p.hidden = false));
+  more.hidden = true;
+  if (nav.scrollWidth <= nav.clientWidth) return;
+  more.hidden = false;
+  more.innerHTML = `${CHEVRON_ICON}${pills.length} more`;
+  const gap = parseFloat(getComputedStyle(nav).columnGap) || 0;
+  const fixed = [...nav.children].filter((el) => !el.dataset.id && !el.hidden).reduce((w, el) => w + el.offsetWidth + gap, 0);
+  let room = nav.clientWidth - fixed;
+  const active = pills.find((p) => p.classList.contains('on'));
+  if (active) room -= active.offsetWidth + gap;
+  let full = false;
+  for (const p of pills) {
+    if (p === active) continue;
+    const w = p.offsetWidth + gap;
+    if (!full && w <= room) room -= w;
+    else { full = true; p.hidden = true; }
+  }
+  overflowIds = pills.filter((p) => p.hidden).map((p) => Number(p.dataset.id));
+  more.innerHTML = `${CHEVRON_ICON}${overflowIds.length} more`;
+  more.classList.toggle('unread', overflowIds.some((id) => state.servers.get(id).channels.some((c) => state.unread.has(c.id))));
+}
+new ResizeObserver(() => fitPills()).observe($('#burrow-nav'));
+
+// What's going on in a burrow, for the switcher.
+function burrowStatus(s) {
+  const fire = s.channels.reduce((n, c) => n + (c.kind === 'voice' ? c.voiceUsers?.length ?? 0 : 0), 0);
+  if (fire) return { text: `${fire} by the fire`, cls: 'ember' };
+  if (s.channels.some((c) => state.unread.has(c.id))) return { text: 'New messages', cls: 'news' };
+  return { text: s.channels.some((c) => c.kind === 'voice') ? "Fire's out" : 'All caught up', cls: '' };
+}
+
+// The burrow list: under the "more" button on a computer, or a sheet from the top on a phone.
+function toggleSwitcher(anchor, ids) {
+  const sw = $('#switcher');
+  if (!sw.classList.contains('hidden')) return closeSwitcher();
+  sw.dataset.open = ids ? 'some' : 'all';
+  sw.ids = ids;
+  sw.anchor = anchor;
+  renderSwitcher();
+  sw.classList.remove('hidden');
+  anchor.setAttribute('aria-expanded', 'true');
+  $('#app').classList.add('switching');
+  placeSwitcher();
+  sw.querySelector('button')?.focus();
+}
+
+function placeSwitcher() {
+  const sw = $('#switcher');
+  if (sw.classList.contains('hidden')) return;
+  if (isPhone()) { sw.style.left = sw.style.top = ''; return; }
+  const r = sw.anchor.getBoundingClientRect();
+  sw.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - sw.offsetWidth - 8))}px`;
+  sw.style.top = `${r.bottom + 8}px`;
+}
+
+function renderSwitcher() {
+  const sw = $('#switcher');
+  const ids = sw.dataset.open === 'all' ? state.serverOrder : sw.ids.filter((id) => state.servers.has(id));
+  const rows = ids.map((id) => {
+    const s = state.servers.get(id);
+    const b = document.createElement('button');
+    const on = id === state.serverId && !state.inDms;
+    b.className = 'switch-row' + (on ? ' on' : '');
+    const tile = burrowTile(s);
+    if (!on && s.channels.some((c) => state.unread.has(c.id))) tile.classList.add('unread');
+    const status = burrowStatus(s);
+    const text = document.createElement('span');
+    text.className = 'switch-text';
+    text.innerHTML = `<b></b><span class="switch-status ${status.cls}"></span>`;
+    text.firstChild.textContent = s.name;
+    text.lastChild.textContent = status.text;
+    b.append(tile, text);
+    if (on) b.insertAdjacentHTML('beforeend', CHECK_ICON);
+    b.onclick = () => { closeSwitcher(); selectServer(id); };
+    return b;
+  });
+  const foot = document.createElement('div');
+  foot.className = 'switch-foot';
+  foot.innerHTML = '<button class="btn" data-act="new">New burrow</button><button class="btn secondary" data-act="join">Use an invite</button>';
+  foot.querySelectorAll('button').forEach((b) => (b.onclick = () => { closeSwitcher(); openAddServer(b.dataset.act); }));
+  // Phones have no room for the burrow's heading, so its settings live here.
+  if (sw.dataset.open === 'all' && !state.inDms && state.servers.has(state.serverId)) {
+    const settings = document.createElement('button');
+    settings.className = 'btn secondary settings';
+    settings.textContent = `${state.servers.get(state.serverId).name} settings and invite`;
+    settings.onclick = () => { closeSwitcher(); $('#server-menu-btn').click(); };
+    foot.prepend(settings);
+  }
+  sw.replaceChildren(...rows, foot);
+}
+
+function closeSwitcher() {
+  const sw = $('#switcher');
+  if (sw.classList.contains('hidden')) return;
+  sw.classList.add('hidden');
+  sw.anchor?.setAttribute('aria-expanded', 'false');
+  delete sw.dataset.open;
+  $('#app').classList.remove('switching');
+}
+$('#burrow-switch').onclick = (e) => { e.stopPropagation(); toggleSwitcher($('#burrow-switch')); };
+$('#switcher').onclick = (e) => e.stopPropagation();
+document.addEventListener('click', closeSwitcher);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSwitcher(); });
+window.addEventListener('resize', placeSwitcher);
+
 async function selectServer(id, initial = false) {
   const s = state.servers.get(id);
+  if (!initial) showView('rooms');
   if (s) state.inDms = isDm(s);
   state.serverId = id;
   store.set('lastServer', id);
@@ -394,18 +558,27 @@ function renderChannels() {
     if (c.private) li.insertAdjacentHTML('beforeend', LOCK_ICON);
     if (c.id === state.channelId) li.className = 'active';
     else if (state.unread.has(c.id)) li.className = 'unread';
-    li.onclick = () => selectChannel(c.id);
+    li.prepend(roomIcon());
+    li.onclick = () => { selectChannel(c.id); showView('chat'); };
     if (can(s, 'rooms')) li.append(roomSettingsButton(c));
     return li;
   });
-  const voiceRooms = channels.filter((c) => c.kind === 'voice').map((c) => {
+  // The first voice room is the burrow's Campfire, shown as a card above the rooms. Any others are "other fires".
+  const voiceRooms = channels.filter((c) => c.kind === 'voice').map((c, i) => {
     const li = document.createElement('li');
-    li.className = 'voice-room' + (state.voice?.channelId === c.id ? ' joined' : '');
-    li.innerHTML = `<div class="voice-room-name">${SPEAKER_ICON}<span class="room-name">${escapeHtml(c.name)}</span>${c.private ? LOCK_ICON : ''}</div>`;
+    const joined = state.voice?.channelId === c.id;
+    const ids = c.voiceUsers ?? [];
+    li.className = (i === 0 ? 'fire-card' : 'voice-room') + (joined ? ' joined' : '');
+    const streamer = ids.find((id) => state.voice?.channelId === c.id && state.sharing.get(id)?.screen);
+    const sub = !ids.length ? 'Nobody here yet'
+      : `${ids.length} gathered` + (streamer ? ` · ${nameOf(streamer)} is sharing` : '');
+    li.innerHTML = i === 0
+      ? `<div class="voice-room-name"><span class="fire-badge">${FIRE_ICON}</span><span class="fire-text"><span class="room-name">${escapeHtml(c.name)}</span><span class="fire-sub">${escapeHtml(sub)}</span></span>${c.private ? LOCK_ICON : ''}</div>`
+      : `<div class="voice-room-name">${FIRE_ICON.replace('<svg', '<svg class="voice-icon"')}<span class="room-name">${escapeHtml(c.name)}</span>${c.private ? LOCK_ICON : ''}</div>`;
     if (can(s, 'rooms')) li.firstChild.append(roomSettingsButton(c));
-    li.title = state.voice?.channelId === c.id ? 'Show video' : 'Join voice';
-    li.onclick = () => (state.voice?.channelId === c.id ? openStage() : joinVoice(c.id));
-    const people = (c.voiceUsers ?? []).map((id) => {
+    li.title = joined ? 'Show video' : 'Join voice';
+    li.onclick = () => (joined ? openStage() : joinVoice(c.id));
+    const people = ids.map((id) => {
       const name = s.members.find((m) => m.id === id)?.username ?? '?';
       const row = document.createElement('div');
       row.className = 'voice-person' + (state.speaking.has(id) ? ' speaking' : '');
@@ -416,7 +589,7 @@ function renderChannels() {
       label.textContent = name;
       row.append(av, label);
       if (state.mutedInVoice.has(id)) row.insertAdjacentHTML('beforeend', MUTED_ICON);
-      const sharing = state.voice?.channelId === c.id ? state.sharing.get(id) : null;
+      const sharing = joined ? state.sharing.get(id) : null;
       if (sharing?.camera) row.insertAdjacentHTML('beforeend', `<span class="cam-tag" title="Camera on">${CAMERA_ICON}</span>`);
       if (sharing?.screen) row.insertAdjacentHTML('beforeend', '<span class="live-tag" title="Sharing their screen">LIVE</span>');
       if (id !== state.me.id) {
@@ -434,11 +607,19 @@ function renderChannels() {
       list.append(...people);
       li.append(list);
     }
+    if (i === 0) {
+      const action = document.createElement('div');
+      action.className = 'fire-action';
+      action.textContent = joined ? "You're here" : state.voiceEnabled ? 'Join' : '';
+      li.append(action);
+    }
     return li;
   });
   $('#channel-list').replaceChildren(...textRooms);
-  $('#voice-list').replaceChildren(...voiceRooms);
-  $('#voice-section').classList.toggle('hidden', !voiceRooms.length && !(state.voiceEnabled && can(s, 'rooms')));
+  $('#fire-main').replaceChildren(...voiceRooms.slice(0, 1));
+  $('#voice-list').replaceChildren(...voiceRooms.slice(1));
+  $('#voice-section').classList.toggle('hidden', voiceRooms.length < 2);
+  renderVoicePlaces();
 }
 
 async function selectChannel(id) {
@@ -497,10 +678,10 @@ function renderMembers() {
         const color = roleColor(s, m.id);
         if (color) name.style.color = color;
         li.append(av, name);
-        if (!isDm(s) && m.id !== state.me.id) {
+        if (m.id !== state.me.id) {
           li.classList.add('can-dm');
-          li.title = `Send ${m.username} a message`;
-          li.onclick = () => openDm(m.id);
+          li.title = `${m.username}: message, volume and more`;
+          li.onclick = () => openPerson(s, m);
         }
         const top = rolesOf(s, m)[0];
         if (isHost(s, m.id) || top) {
@@ -659,6 +840,14 @@ function confirmDelete(m) {
   };
 }
 
+// Phones can't hover, so tapping a message shows its buttons.
+messagesEl.addEventListener('click', (e) => {
+  if (!isPhone() || e.target.closest('button, a, textarea, .att-image')) return;
+  const line = e.target.closest('.line');
+  messagesEl.querySelectorAll('.line.touched').forEach((l) => l !== line && l.classList.remove('touched'));
+  line?.classList.toggle('touched');
+});
+
 messagesEl.addEventListener('scroll', async () => {
   if (messagesEl.scrollTop > 100 || state.reachedStart || state.loadingOlder || !state.messages.length) return;
   state.loadingOlder = true;
@@ -768,11 +957,11 @@ function renderTyping() {
 // ---------------------------------------------------------------- modals
 
 let onModalClose = null; // run once when the open modal goes away, however it's closed
-function modal(html) {
+function modal(html, kind = '') {
   const closing = onModalClose;
   onModalClose = null;
   closing?.();
-  $('#modal-card').className = 'modal-card';
+  $('#modal-card').className = 'modal-card' + (kind ? ' ' + kind : '');
   $('#modal-card').innerHTML = html;
   $('#modal').classList.remove('hidden');
   $('#modal-card').querySelectorAll('[data-close]').forEach((b) => (b.onclick = closeModal));
@@ -787,7 +976,7 @@ function closeModal() {
 $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
-function openAddServer() {
+function openAddServer(focus) {
   modal(`<h2>Find a burrow</h2>
     <p class="muted">A burrow is a shared space for a group of friends, with its own rooms.</p>
     <form id="create-form">
@@ -800,6 +989,7 @@ function openAddServer() {
       <button type="submit" class="btn secondary">Join</button>
     </form>
     <div class="error" id="modal-error"></div>`);
+  if (focus === 'join') $('#invite-code').focus();
   $('#create-form').onsubmit = async (e) => {
     e.preventDefault();
     try { addServer(await api('/api/servers', { method: 'POST', body: { name: $('#new-server-name').value } })); }
@@ -820,7 +1010,7 @@ function addServer(s) {
   selectServer(s.id);
 }
 
-$('#empty-add').onclick = openAddServer;
+$('#empty-add').onclick = () => openAddServer();
 
 $('#server-menu-btn').onclick = () => {
   const s = state.servers.get(state.serverId);
@@ -1111,6 +1301,15 @@ function openRoleEditor(serverId, roleId) {
 
 // ---------------------------------------------------------------- direct messages
 
+const FIRE_ICON = '<svg viewBox="0 0 24 24"><path d="M12 2c.5 3 2.4 5 4.2 6.8A7.5 7.5 0 0 1 12 22a7.5 7.5 0 0 1-4.6-13.4c.2 1.6 1 2.9 2.3 3.6C9.6 8.5 10.4 5 12 2Z"/></svg>';
+const CHEVRON_ICON = '<svg viewBox="0 0 24 24" class="chev"><path d="m6 9 6 6 6-6"/></svg>';
+const CHECK_ICON = '<svg viewBox="0 0 24 24" class="check" aria-label="Current"><path d="M9.5 16.2 5.3 12l-1.4 1.4 5.6 5.6 11-11-1.4-1.4z"/></svg>';
+const ROOM_ICON = '<svg viewBox="0 0 24 24" class="room-icon" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+function roomIcon() {
+  const t = document.createElement('template');
+  t.innerHTML = ROOM_ICON;
+  return t.content.firstChild;
+}
 const CHAT_ICON = '<svg viewBox="0 0 24 24"><path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9l-5 4V5a1 1 0 0 1 1-1Z" fill="currentColor"/></svg>';
 
 const isDm = (s) => s?.kind === 'dm';
@@ -1141,6 +1340,7 @@ async function openDm(userId) {
     closeModal();
     store.set('lastDm', id);
     selectServer(id);
+    showView('chat');
   } catch (err) { alertError(err); }
 }
 
@@ -1156,7 +1356,7 @@ function renderDmList() {
     const name = document.createElement('span');
     name.textContent = p.username;
     li.append(av, name);
-    li.onclick = () => { store.set('lastDm', id); selectServer(id); };
+    li.onclick = () => { store.set('lastDm', id); selectServer(id); showView('chat'); };
     return li;
   });
   if (!items.length) {
@@ -1203,7 +1403,7 @@ function openNewDm() {
 
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 
-$('#account-btn').onclick = () => {
+function openAccount() {
   modal(`<h2>Your account</h2>
     ${state.maxUploadBytes ? `<div class="account-picture">
       <span class="avatar xl" id="account-avatar"></span>
@@ -1264,7 +1464,7 @@ $('#account-btn').onclick = () => {
       status('Password changed.', true);
     } catch (err) { status(err.message); }
   };
-};
+}
 
 // Crops to the middle square and shrinks to 256 px, so pictures load fast everywhere.
 // Small GIFs go up untouched to keep their animation.
@@ -1669,6 +1869,7 @@ function toggleMute() {
 function renderVoiceBar(status) {
   const voice = state.voice;
   $('#voice-bar').classList.toggle('hidden', !voice);
+  renderVoicePlaces();
   if (!voice) return;
   const ch = [...state.servers.values()].flatMap((s) => s.channels).find((c) => c.id === voice.channelId);
   const sealed = voice.crypto?.index >= 0;
@@ -1755,6 +1956,7 @@ function openStage() {
   state.stageOpen = true;
   $('#stage').classList.remove('hidden');
   $('#app').classList.add('watching');
+  renderVoicePlaces();
   renderStage();
 }
 
@@ -1764,6 +1966,7 @@ function closeStage() {
   focusKey = null;
   $('#stage').classList.add('hidden');
   $('#app').classList.remove('watching');
+  renderVoicePlaces();
   renderStage();
 }
 
@@ -2361,6 +2564,7 @@ function applyUser(u) {
   if (u.id === state.me?.id) {
     state.me.avatar = u.avatar;
     setAvatar($('#me-avatar'), state.me.username, u.avatar);
+    setAvatar($('#tab-avatar'), state.me.username, u.avatar);
     const preview = $('#account-avatar');
     if (preview) setAvatar(preview, state.me.username, u.avatar);
     $('#avatar-remove')?.classList.toggle('hidden', !u.avatar);
@@ -2386,11 +2590,16 @@ function alertError(err) { alert(err.message || String(err)); }
 function currentTheme() {
   return document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
 }
+function renderThemeToggle() {
+  $('#theme-toggle').textContent = currentTheme() === 'dark' ? 'Switch to light' : 'Switch to dark';
+}
 $('#theme-toggle').onclick = () => {
   const next = currentTheme() === 'dark' ? 'light' : 'dark';
   document.documentElement.dataset.theme = next;
   store.set('theme', next);
+  renderThemeToggle();
 };
+renderThemeToggle();
 
 const memberPane = $('#member-pane');
 if (store.get('membersHidden') === '1') memberPane.classList.add('collapsed');
@@ -2399,6 +2608,136 @@ $('#members-toggle').onclick = () => {
   const hidden = memberPane.classList.toggle('collapsed');
   store.set('membersHidden', hidden ? '1' : null);
 };
+$('#members-close').onclick = () => memberPane.classList.remove('open');
+
+// ---------------------------------------------------------------- the shell: top bar, phone screens, your menu
+//
+// On a computer everything is on screen at once. A phone shows one screen at a time:
+// "rooms" (the burrow's rooms and fires, with the tab bar) or "chat" (one room).
+
+const isPhone = () => matchMedia('(max-width: 760px)').matches;
+
+function showView(view) {
+  $('#app').dataset.view = view;
+  if (view === 'rooms') memberPane.classList.remove('open');
+}
+$('#chat-back').onclick = () => showView('rooms');
+$('#tab-burrows').onclick = () => {
+  if (state.inDms) selectServer(Number(store.get('lastServer')) || state.serverOrder[0] || null);
+  showView('rooms');
+};
+$('#tab-messages').onclick = () => { if (!state.inDms) openDms(); showView('rooms'); };
+
+function toggleMeMenu(anchor) {
+  const menu = $('#me-menu');
+  if (!menu.classList.contains('hidden')) return closeMeMenu();
+  menu.anchor = anchor;
+  menu.classList.remove('hidden');
+  anchor.setAttribute('aria-expanded', 'true');
+  if (!isPhone()) {
+    const r = anchor.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, r.right - menu.offsetWidth)}px`;
+    menu.style.top = `${r.bottom + 8}px`;
+  } else menu.style.left = menu.style.top = '';
+  menu.querySelector('button').focus();
+}
+function closeMeMenu() {
+  const menu = $('#me-menu');
+  if (menu.classList.contains('hidden')) return;
+  menu.classList.add('hidden');
+  menu.anchor?.setAttribute('aria-expanded', 'false');
+}
+$('#me-btn').onclick = (e) => { e.stopPropagation(); toggleMeMenu($('#me-btn')); };
+$('#tab-you').onclick = (e) => { e.stopPropagation(); toggleMeMenu($('#tab-you')); };
+$('#me-menu').onclick = (e) => { if (e.target.closest('button')) closeMeMenu(); else e.stopPropagation(); };
+$('#account-btn').onclick = () => openAccount();
+document.addEventListener('click', closeMeMenu);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMeMenu(); });
+
+function setConnected(ok, text) {
+  $('#conn-status').classList.toggle('ok', ok);
+  $('#conn-status').textContent = text;
+  $('#me-btn').classList.toggle('offline', !ok);
+}
+
+// Where you can get back to the voice room from: the chip in the top bar, and the pill above a phone's chat.
+function renderVoicePlaces() {
+  const voice = state.voice;
+  const ch = voice && [...state.servers.values()].flatMap((s) => s.channels).find((c) => c.id === voice.channelId);
+  $('#campfire-chip').classList.toggle('hidden', !ch);
+  $('#voice-pill').classList.toggle('hidden', !ch || state.stageOpen);
+  if (!ch) return;
+  const here = ch.voiceUsers?.length || 1;
+  $('#campfire-chip-label').textContent = `${ch.name} · `;
+  $('#campfire-chip-count').textContent = here;
+  $('#campfire-chip').title = `You're in ${ch.name}. Open it.`;
+  const live = [...state.sharing].find(([id, sh]) => id !== state.me.id && sh.screen);
+  $('#voice-pill-label').textContent = `In ${ch.name}` + (live ? ` · ${nameOf(live[0])} is live` : ` · ${here} here`);
+}
+function goToVoice() {
+  if (!state.voice) return;
+  const s = [...state.servers.values()].find((x) => x.channels.some((c) => c.id === state.voice.channelId));
+  if (s && s.id !== state.serverId) selectServer(s.id);
+  showView('chat');
+  openStage();
+}
+$('#campfire-chip').onclick = goToVoice;
+$('#voice-pill').onclick = goToVoice;
+
+// Someone in a burrow: message them, change how loud they are for you, and manage them.
+function openPerson(s, m) {
+  const inVoice = state.voice && s.channels.some((c) => c.id === state.voice.channelId && c.voiceUsers?.includes(m.id));
+  const sharing = inVoice ? state.sharing.get(m.id) : null;
+  const top = rolesOf(s, m)[0];
+  const status = sharing?.screen ? 'Sharing their screen' : inVoice ? 'By the fire with you' : m.online ? 'Around' : 'Out in the woods';
+  modal(`<div class="person">
+      <span class="avatar xl" id="person-avatar"></span>
+      <div class="person-meta">
+        <h2></h2>
+        <span class="person-status${sharing?.screen ? ' live' : ''}">${escapeHtml(status)}</span>
+        ${isHost(s, m.id) ? '<span class="owner-badge">host</span>' : top ? `<span class="owner-badge role" style="--role:${escapeHtml(top.color)}">${escapeHtml(top.name)}</span>` : ''}
+      </div>
+    </div>
+    ${sharing?.screen || sharing?.camera ? `<button class="btn" id="person-watch">${sharing.screen ? 'Watch stream' : 'See camera'}</button>` : ''}
+    ${inVoice ? `<div class="person-sliders">
+      ${sharing?.screen ? `<label>Stream volume <span id="pv-stream-val"></span>
+        <input type="range" id="pv-stream" min="0" max="200" step="5" value="${Math.round(streamVolumeFor(m.id) * 100)}" /></label>` : ''}
+      <label>Voice volume <span id="pv-voice-val"></span>
+        <input type="range" id="pv-voice" min="0" max="200" step="5" value="${Math.round(volumeFor(m.id) * 100)}" /></label>
+      <span class="small muted">Only changes it for you.</span>
+    </div>` : ''}
+    <div class="person-actions">
+      ${!isDm(s) ? '<button class="action" id="person-dm">Send a message</button>' : ''}
+      ${!isDm(s) ? '<button class="action" id="person-mention">Mention</button>' : ''}
+      ${canActOn(s, m) ? `<button class="action" id="person-manage">Manage ${escapeHtml(m.username)}</button>` : ''}
+    </div>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`, 'sheet');
+  $('#modal-card .person h2').textContent = m.username;
+  const color = roleColor(s, m.id);
+  if (color) $('#modal-card .person h2').style.color = color;
+  setAvatar($('#person-avatar'), m.username, avatarOf(m.id, m.avatar));
+  const pct = (v) => (v === 0 ? 'Muted' : `${Math.round(v * 100)}%`);
+  const sliders = [['#pv-stream', streamVolumeFor, setStreamVolume], ['#pv-voice', volumeFor, setVolume]];
+  for (const [sel, get, set] of sliders) {
+    const r = $(sel);
+    if (!r) continue;
+    const show = () => ($(sel + '-val').textContent = pct(get(m.id)));
+    r.oninput = () => { set(m.id, Number(r.value) / 100); show(); renderStage(); };
+    r.onchange = () => renderChannels();
+    show();
+  }
+  $('#person-watch')?.addEventListener('click', () => { closeModal(); goToVoice(); });
+  $('#person-dm')?.addEventListener('click', () => openDm(m.id));
+  $('#person-mention')?.addEventListener('click', () => {
+    closeModal();
+    memberPane.classList.remove('open');
+    input.value = `${input.value}${input.value && !input.value.endsWith(' ') ? ' ' : ''}@${m.username} `;
+    autosize();
+    showView('chat');
+    input.focus();
+  });
+  $('#person-manage')?.addEventListener('click', () => openMemberMenu(s, m));
+}
 
 // ---------------------------------------------------------------- start
 

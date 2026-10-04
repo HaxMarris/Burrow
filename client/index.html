@@ -50,29 +50,40 @@
   </div>
 
   <!-- Main app -->
-  <div id="app" class="app hidden">
+  <div id="app" class="app hidden" data-view="rooms">
+    <header class="topbar">
+      <div class="brand"><span class="logo-mark"></span><span class="brand-name">Burrow</span></div>
+      <nav class="burrow-nav" id="burrow-nav" aria-label="Your burrows"></nav>
+      <button class="burrow-switch" id="burrow-switch" aria-haspopup="dialog" aria-expanded="false">
+        <span class="tile" id="switch-tile"></span>
+        <span class="switch-name" id="switch-name"></span>
+        <svg viewBox="0 0 24 24" class="chev"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <button class="campfire-chip hidden" id="campfire-chip">
+        <svg viewBox="0 0 24 24"><path d="M12 2c.5 3 2.4 5 4.2 6.8A7.5 7.5 0 0 1 12 22a7.5 7.5 0 0 1-4.6-13.4c.2 1.6 1 2.9 2.3 3.6C9.6 8.5 10.4 5 12 2Z"/></svg>
+        <span id="campfire-chip-label"></span><span id="campfire-chip-count"></span>
+      </button>
+      <button class="me-btn" id="me-btn" aria-haspopup="menu" aria-expanded="false" title="You">
+        <span class="avatar" id="me-avatar"></span>
+      </button>
+    </header>
+
     <aside class="sidebar">
-      <div class="brand"><span class="logo-mark"></span>Burrow</div>
-
-      <div class="burrows">
-        <div class="eyebrow">Your burrows</div>
-        <div id="server-list" class="burrow-tiles"></div>
+      <div class="side-head">
+        <h2 id="server-name">No burrow yet</h2>
+        <button class="icon-btn" id="server-menu-btn" title="Burrow settings and invite">
+          <svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm8.9 3-1.6-.4a7.4 7.4 0 0 0-.7-1.7l.9-1.4-1.9-1.9-1.4.9a7.4 7.4 0 0 0-1.7-.7L13 3.1h-2l-.4 1.7a7.4 7.4 0 0 0-1.7.7l-1.4-.9-1.9 1.9.9 1.4a7.4 7.4 0 0 0-.7 1.7l-1.7.4v2l1.7.4c.2.6.4 1.2.7 1.7l-.9 1.4 1.9 1.9 1.4-.9c.5.3 1.1.5 1.7.7l.4 1.7h2l.4-1.7c.6-.2 1.2-.4 1.7-.7l1.4.9 1.9-1.9-.9-1.4c.3-.5.5-1.1.7-1.7l1.6-.4v-2Z"/></svg>
+        </button>
       </div>
-
-      <div class="server-card">
-        <div class="server-card-head">
-          <h2 id="server-name">No burrow yet</h2>
-          <button class="icon-btn" id="server-menu-btn" title="Burrow settings and invite">
-            <svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm8.9 3-1.6-.4a7.4 7.4 0 0 0-.7-1.7l.9-1.4-1.9-1.9-1.4.9a7.4 7.4 0 0 0-1.7-.7L13 3.1h-2l-.4 1.7a7.4 7.4 0 0 0-1.7.7l-1.4-.9-1.9 1.9.9 1.4a7.4 7.4 0 0 0-.7 1.7l-1.7.4v2l1.7.4c.2.6.4 1.2.7 1.7l-.9 1.4 1.9 1.9 1.4-.9c.5.3 1.1.5 1.7.7l.4 1.7h2l.4-1.7c.6-.2 1.2-.4 1.7-.7l1.4.9 1.9-1.9-.9-1.4c.3-.5.5-1.1.7-1.7l1.6-.4v-2Z"/></svg>
-          </button>
-        </div>
+      <div class="side-scroll">
+        <ul id="fire-main"></ul>
         <div class="section-title">
           <span id="rooms-title">Rooms</span>
           <button class="icon-btn small-btn hidden" id="add-channel" title="New room">+</button>
         </div>
         <ul id="channel-list"></ul>
         <div id="voice-section" class="hidden">
-          <div class="section-title"><span>Voice</span></div>
+          <div class="section-title"><span>Other fires</span></div>
           <ul id="voice-list"></ul>
         </div>
       </div>
@@ -106,34 +117,22 @@
         </div>
       </div>
       <div id="voice-audio" hidden></div>
-
-      <footer class="user-card">
-        <button class="me-btn" id="account-btn" title="Your account: picture, sounds and password">
-          <span class="avatar" id="me-avatar"></span>
-          <span class="user-meta">
-            <span id="me-name" class="me-name"></span>
-            <span id="conn-status" class="conn">Connecting…</span>
-          </span>
-        </button>
-        <button class="icon-btn" id="theme-toggle" title="Switch light / dark">
-          <svg viewBox="0 0 24 24"><path d="M21 14.5A8.5 8.5 0 0 1 9.5 3 8.5 8.5 0 1 0 21 14.5Z"/></svg>
-        </button>
-        <button class="icon-btn" id="logout" title="Log out">
-          <svg viewBox="0 0 24 24"><path d="M10 4H5v16h5M15 8l4 4-4 4M19 12H9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-      </footer>
     </aside>
 
     <main class="chat">
       <header class="chat-header">
-        <div>
+        <button class="icon-btn back-btn" id="chat-back" title="Back to rooms" aria-label="Back to rooms">
+          <svg viewBox="0 0 24 24"><path d="M15.4 5.4 14 4l-8 8 8 8 1.4-1.4L8.8 12l6.6-6.6Z"/></svg>
+        </button>
+        <div class="chat-title">
           <h1 id="channel-name"></h1>
           <div id="channel-sub" class="muted small"></div>
         </div>
-        <button class="icon-btn" id="members-toggle" title="Show who's here">
+        <button class="icon-btn" id="members-toggle" title="Show who's here" aria-label="Show who's here">
           <svg viewBox="0 0 24 24"><path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-6 9c0-3.3 2.7-6 6-6s6 2.7 6 6H3Zm13.5-9a3 3 0 1 0 0-6M17 14c2.5.4 4 2.6 4 6h-3"/></svg>
         </button>
       </header>
+      <button class="voice-pill hidden" id="voice-pill"><span class="dot"></span><span id="voice-pill-label"></span><b>Open</b></button>
       <div id="messages" class="messages"></div>
       <div class="composer-wrap">
         <div id="typing" class="typing"></div>
@@ -169,9 +168,39 @@
     </main>
 
     <aside class="member-pane" id="member-pane">
+      <header class="member-head">
+        <h2>Who's here</h2>
+        <button class="icon-btn" id="members-close" title="Close" aria-label="Close">×</button>
+      </header>
       <div id="member-list"></div>
     </aside>
+
+    <nav class="tabbar" aria-label="Main">
+      <button class="tab" id="tab-burrows">
+        <svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3v-10.5Z"/></svg>Burrows
+      </button>
+      <button class="tab" id="tab-messages">
+        <svg viewBox="0 0 24 24"><path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9l-5 4V5a1 1 0 0 1 1-1Z"/></svg>Messages
+      </button>
+      <button class="tab" id="tab-you">
+        <span class="avatar" id="tab-avatar"></span>You
+      </button>
+    </nav>
   </div>
+
+  <!-- Your menu: account, light/dark, log out -->
+  <div id="me-menu" class="me-menu hidden" role="menu">
+    <div class="me-head">
+      <span id="me-name" class="me-name"></span>
+      <span id="conn-status" class="conn">Connecting…</span>
+    </div>
+    <button role="menuitem" id="account-btn">Your account</button>
+    <button role="menuitem" id="theme-toggle">Switch to dark</button>
+    <button role="menuitem" id="logout" class="danger-item">Log out</button>
+  </div>
+
+  <!-- Burrow switcher: the phone's burrow list, and the desktop's "more" list -->
+  <div id="switcher" class="switcher hidden" role="dialog" aria-label="Switch burrow"></div>
 
   <!-- Modal -->
   <div id="modal" class="modal hidden">
