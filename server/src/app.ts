@@ -506,6 +506,40 @@ export function createApp(opts: AppOptions): Server {
 
   route('DELETE', '/api/me/avatar', ({ user }) => setAvatarFile(user, null));
 
+  // ---- favorite burrows: the ones shown in your top bar --------------------
+
+  const MAX_FAVORITES = 5;
+  const favoritesOf = (userId: number) =>
+    (
+      db
+        .prepare('SELECT server_id AS id FROM members WHERE user_id = ? AND favorite IS NOT NULL ORDER BY favorite')
+        .all(userId) as { id: number }[]
+    ).map((r) => r.id);
+
+  route('GET', '/api/me/favorites', ({ user }) => ({ serverIds: favoritesOf(user.id) }));
+
+  /** Replaces your favorites with these burrows, in this order. */
+  route('POST', '/api/me/favorites', ({ user, body }) => {
+    if (!Array.isArray(body.serverIds)) throw new HttpError(400, 'serverIds must be a list');
+    const ids = [...new Set(body.serverIds.map(Number))];
+    if (ids.length > MAX_FAVORITES) throw new HttpError(400, `You can favorite up to ${MAX_FAVORITES} burrows`);
+    const isBurrow = db.prepare("SELECT 1 FROM members m JOIN servers s ON s.id = m.server_id WHERE m.user_id = ? AND m.server_id = ? AND s.kind = 'burrow'");
+    for (const id of ids) if (!isBurrow.get(user.id, id)) throw new HttpError(404, 'Burrow not found');
+    db.exec('BEGIN');
+    try {
+      db.prepare('UPDATE members SET favorite = NULL WHERE user_id = ?').run(user.id);
+      const set = db.prepare('UPDATE members SET favorite = ? WHERE user_id = ? AND server_id = ?');
+      ids.forEach((id, i) => set.run(i + 1, user.id, id));
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+    const serverIds = favoritesOf(user.id);
+    sendTo([user.id], { type: 'favorites', serverIds }); // your other devices
+    return { serverIds };
+  });
+
   route('GET', '/api/servers', ({ user }) => {
     const ids = db
       .prepare(
