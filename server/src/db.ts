@@ -90,6 +90,8 @@ export function openDb(file: string): Db {
   // Private rooms and bans came at the same time.
   const memberCols = db.prepare('PRAGMA table_info(members)').all() as { name: string }[];
   if (!memberCols.some((c) => c.name === 'role')) db.exec("ALTER TABLE members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'");
+  // Your favorite burrows (up to 5) are shown in the top bar, in this order: 1 first. NULL = not a favorite.
+  if (!memberCols.some((c) => c.name === 'favorite')) db.exec('ALTER TABLE members ADD COLUMN favorite INTEGER');
   if (!channelCols.some((c) => c.name === 'private')) db.exec('ALTER TABLE channels ADD COLUMN private INTEGER NOT NULL DEFAULT 0');
   db.exec(`
     CREATE TABLE IF NOT EXISTS channel_access (

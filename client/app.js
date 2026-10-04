@@ -16,6 +16,7 @@ const state = {
   me: null,
   servers: new Map(),       // id -> { id, name, kind, ownerId, inviteCode, channels, members }; DMs are kind 'dm'
   serverOrder: [],          // burrow ids, in the order they're shown
+  favorites: [],            // up to 5 burrow ids kept in the top bar, in order
   dmOrder: [],              // direct message conversation ids, most recent first
   inDms: false,             // showing direct messages instead of a burrow
   serverId: Number(store.get('lastServer')) || null,
@@ -179,7 +180,11 @@ async function enterApp() {
 }
 
 async function loadServers() {
-  const [list, dms] = await Promise.all([api('/api/servers'), api('/api/dms')]);
+  const [list, dms, favs] = await Promise.all([
+    api('/api/servers'), api('/api/dms'),
+    api('/api/me/favorites').catch(() => ({ serverIds: [] })), // servers from before favorites
+  ]);
+  state.favorites = favs.serverIds;
   [...list, ...dms].forEach(rememberAvatars);
   state.servers = new Map([...list, ...dms].map((s) => [s.id, s]));
   state.serverOrder = list.map((s) => s.id);
@@ -290,6 +295,7 @@ function handleEvent(ev) {
     case 'server_deleted':
       // Deleted, or we were removed from it.
       state.servers.delete(ev.serverId);
+      state.favorites = state.favorites.filter((id) => id !== ev.serverId);
       state.serverOrder = state.serverOrder.filter((id) => id !== ev.serverId);
       leaveVoiceIfGone();
       if (state.serverId === ev.serverId) selectServer(state.serverOrder[0] ?? null);
@@ -305,6 +311,10 @@ function handleEvent(ev) {
       break;
     case 'user_updated':
       applyUser(ev.user);
+      break;
+    case 'favorites':
+      state.favorites = ev.serverIds;
+      renderServers();
       break;
     case 'voice_state':
       if (state.voice?.channelId === ev.channelId) voiceSounds(ev.channelId, ev.userIds);
@@ -346,7 +356,12 @@ function renderServers() {
   dmPill.onclick = openDms;
   if (state.inDms) dmPill.setAttribute('aria-current', 'true');
 
-  const pills = state.serverOrder.map((id) => {
+  // With favorites, the bar holds those (plus the burrow you're in), and the rest go under "more".
+  const favs = favoriteIds();
+  const inBar = favs.length ? [...favs] : [...state.serverOrder];
+  if (favs.length && !state.inDms && state.serverOrder.includes(state.serverId) && !favs.includes(state.serverId)) inBar.push(state.serverId);
+  notInBar = state.serverOrder.filter((id) => !inBar.includes(id));
+  const pills = inBar.map((id) => {
     const srv = state.servers.get(id);
     const b = document.createElement('button');
     const on = id === state.serverId && !state.inDms;
@@ -359,6 +374,7 @@ function renderServers() {
     name.textContent = srv.name;
     b.append(name);
     if (on) b.setAttribute('aria-current', 'true');
+    if (favs.includes(id)) b.classList.add('fav');
     b.onclick = () => selectServer(id);
     return b;
   });
@@ -368,7 +384,7 @@ function renderServers() {
   more.id = 'burrow-more';
   more.hidden = true;
   more.setAttribute('aria-haspopup', 'dialog');
-  more.onclick = (e) => { e.stopPropagation(); toggleSwitcher(more, overflowIds); };
+  more.onclick = (e) => { e.stopPropagation(); toggleSwitcher(more, 'more'); };
 
   const add = document.createElement('button');
   add.className = 'add-burrow';
@@ -397,7 +413,7 @@ function renderServers() {
   $('#tab-messages').classList.toggle('on', state.inDms);
   $('#tab-messages').classList.toggle('unread', !state.inDms && dmUnread);
 
-  if ($('#switcher').dataset.open === 'all') renderSwitcher();
+  if ($('#switcher').dataset.open) renderSwitcher();
   $('#empty-state').classList.toggle('hidden', state.serverOrder.length > 0 || state.inDms);
 }
 
@@ -412,6 +428,7 @@ function burrowTile(s, id) {
 
 // Hide the pills that don't fit, keeping the current burrow, and count them on the "more" button.
 let overflowIds = [];
+let notInBar = []; // burrows left out of the bar because they aren't favorites
 function fitPills() {
   const nav = $('#burrow-nav');
   const more = $('#burrow-more');
@@ -419,10 +436,12 @@ function fitPills() {
   if (!more || !nav.offsetParent) return; // not shown on phones
   const pills = [...nav.querySelectorAll('.pill[data-id]')];
   pills.forEach((p) => (p.hidden = false));
-  more.hidden = true;
+  more.hidden = !notInBar.length;
+  more.innerHTML = `${CHEVRON_ICON}${notInBar.length} more`;
+  markMoreUnread();
   if (nav.scrollWidth <= nav.clientWidth) return;
   more.hidden = false;
-  more.innerHTML = `${CHEVRON_ICON}${pills.length} more`;
+  more.innerHTML = `${CHEVRON_ICON}${pills.length + notInBar.length} more`;
   const gap = parseFloat(getComputedStyle(nav).columnGap) || 0;
   const fixed = [...nav.children].filter((el) => !el.dataset.id && !el.hidden).reduce((w, el) => w + el.offsetWidth + gap, 0);
   let room = nav.clientWidth - fixed;
@@ -436,8 +455,33 @@ function fitPills() {
     else { full = true; p.hidden = true; }
   }
   overflowIds = pills.filter((p) => p.hidden).map((p) => Number(p.dataset.id));
-  more.innerHTML = `${CHEVRON_ICON}${overflowIds.length} more`;
-  more.classList.toggle('unread', overflowIds.some((id) => state.servers.get(id).channels.some((c) => state.unread.has(c.id))));
+  more.innerHTML = `${CHEVRON_ICON}${overflowIds.length + notInBar.length} more`;
+  markMoreUnread();
+}
+function markMoreUnread() {
+  const hidden = [...overflowIds, ...notInBar];
+  $('#burrow-more').classList.toggle('unread', hidden.some((id) => state.servers.get(id)?.channels.some((c) => state.unread.has(c.id))));
+}
+
+// ---- favorites: up to 5 burrows kept in the top bar, saved on the server so every device shows the same ones
+
+const MAX_FAVORITES = 5;
+const favoriteIds = () => state.favorites.filter((id) => state.serverOrder.includes(id));
+
+async function toggleFavorite(id) {
+  const before = state.favorites;
+  const favs = favoriteIds();
+  const next = favs.includes(id) ? favs.filter((x) => x !== id) : [...favs, id];
+  if (next.length > MAX_FAVORITES) return;
+  state.favorites = next;
+  renderServers();
+  try {
+    state.favorites = (await api('/api/me/favorites', { method: 'POST', body: { serverIds: next } })).serverIds;
+  } catch (err) {
+    state.favorites = before;
+    alertError(err);
+  }
+  renderServers();
 }
 new ResizeObserver(() => fitPills()).observe($('#burrow-nav'));
 
@@ -450,11 +494,10 @@ function burrowStatus(s) {
 }
 
 // The burrow list: under the "more" button on a computer, or a sheet from the top on a phone.
-function toggleSwitcher(anchor, ids) {
+function toggleSwitcher(anchor, from = 'all') {
   const sw = $('#switcher');
   if (!sw.classList.contains('hidden')) return closeSwitcher();
-  sw.dataset.open = ids ? 'some' : 'all';
-  sw.ids = ids;
+  sw.dataset.open = from;
   sw.anchor = anchor;
   renderSwitcher();
   sw.classList.remove('hidden');
@@ -475,12 +518,16 @@ function placeSwitcher() {
 
 function renderSwitcher() {
   const sw = $('#switcher');
-  const ids = sw.dataset.open === 'all' ? state.serverOrder : sw.ids.filter((id) => state.servers.has(id));
-  const rows = ids.map((id) => {
+  const favs = favoriteIds();
+  const full = favs.length >= MAX_FAVORITES;
+  const row = (id) => {
     const s = state.servers.get(id);
-    const b = document.createElement('button');
     const on = id === state.serverId && !state.inDms;
-    b.className = 'switch-row' + (on ? ' on' : '');
+    const fav = favs.includes(id);
+    const el = document.createElement('div');
+    el.className = 'switch-row' + (on ? ' on' : '');
+    const b = document.createElement('button');
+    b.className = 'switch-main';
     const tile = burrowTile(s);
     if (!on && s.channels.some((c) => state.unread.has(c.id))) tile.classList.add('unread');
     const status = burrowStatus(s);
@@ -492,8 +539,34 @@ function renderSwitcher() {
     b.append(tile, text);
     if (on) b.insertAdjacentHTML('beforeend', CHECK_ICON);
     b.onclick = () => { closeSwitcher(); selectServer(id); };
-    return b;
-  });
+    const star = document.createElement('button');
+    star.className = 'star' + (fav ? ' on' : '');
+    star.innerHTML = STAR_ICON;
+    star.setAttribute('aria-pressed', String(fav));
+    star.disabled = !fav && full;
+    star.title = fav ? `Take ${s.name} out of your favorites`
+      : full ? `You can have up to ${MAX_FAVORITES} favorites. Unstar one first.` : `Keep ${s.name} in your top bar`;
+    star.setAttribute('aria-label', star.title);
+    star.onclick = () => toggleFavorite(id);
+    el.append(b, star);
+    return el;
+  };
+  const heading = (text) => {
+    const h = document.createElement('div');
+    h.className = 'switch-head';
+    h.textContent = text;
+    return h;
+  };
+  const others = state.serverOrder.filter((id) => !favs.includes(id));
+  const rows = [];
+  if (favs.length) rows.push(heading(`Favorites · ${favs.length} of ${MAX_FAVORITES}`), ...favs.map(row));
+  else {
+    const hint = document.createElement('p');
+    hint.className = 'switch-hint';
+    hint.textContent = `Star up to ${MAX_FAVORITES} burrows to keep them in your top bar.`;
+    rows.push(hint);
+  }
+  if (others.length) rows.push(heading(favs.length ? 'Other burrows' : 'Your burrows'), ...others.map(row));
   const foot = document.createElement('div');
   foot.className = 'switch-foot';
   foot.innerHTML = '<button class="btn" data-act="new">New burrow</button><button class="btn secondary" data-act="join">Use an invite</button>';
@@ -1303,6 +1376,7 @@ function openRoleEditor(serverId, roleId) {
 
 const FIRE_ICON = '<svg viewBox="0 0 24 24"><path d="M12 2c.5 3 2.4 5 4.2 6.8A7.5 7.5 0 0 1 12 22a7.5 7.5 0 0 1-4.6-13.4c.2 1.6 1 2.9 2.3 3.6C9.6 8.5 10.4 5 12 2Z"/></svg>';
 const CHEVRON_ICON = '<svg viewBox="0 0 24 24" class="chev"><path d="m6 9 6 6 6-6"/></svg>';
+const STAR_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3 6.4 20.2l1.1-6.2L3 9.6l6.2-.9z"/></svg>';
 const CHECK_ICON = '<svg viewBox="0 0 24 24" class="check" aria-label="Current"><path d="M9.5 16.2 5.3 12l-1.4 1.4 5.6 5.6 11-11-1.4-1.4z"/></svg>';
 const ROOM_ICON = '<svg viewBox="0 0 24 24" class="room-icon" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
 function roomIcon() {
