@@ -1,7 +1,15 @@
+# Keep each service's logs to 30 MB on disk; Docker otherwise keeps them forever.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   burrow:
     build: .
     restart: unless-stopped
+    logging: *logging
     ports:
       # Only Caddy (on this machine) talks to Burrow directly. Set BURROW_BIND=0.0.0.0 in .env
       # to reach it on port 3000 from other machines without a reverse proxy.
@@ -26,6 +34,7 @@ services:
     image: livekit/livekit-server:v1.13.7
     restart: unless-stopped
     profiles: ["voice"]
+    logging: *logging
     network_mode: host
     environment:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-}: ${LIVEKIT_API_SECRET:-}"

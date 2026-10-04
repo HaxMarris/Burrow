@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import { readFile, writeFile, mkdir, unlink, stat } from 'node:fs/promises';
+import { writeFile, mkdir, unlink, stat } from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { extname, join, normalize } from 'node:path';
@@ -7,6 +7,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { addModeratorRole, type Db } from './db.ts';
 import { hashPassword, verifyPassword, newToken, newInviteCode } from './auth.ts';
 import { closeRoom, removeFromRoom, voiceToken, type VoiceOptions } from './voice.ts';
+import { staticFiles } from './static.ts';
 
 export interface AppOptions {
   db: Db;
@@ -1116,20 +1117,14 @@ export function createApp(opts: AppOptions): Server {
     res.end(JSON.stringify(data));
   };
 
-  const serveStatic = async (res: ServerResponse, pathname: string) => {
+  const sendFile = staticFiles();
+  const serveStatic = async (req: IncomingMessage, res: ServerResponse, pathname: string) => {
     const rel = normalize(pathname === '/' ? '/index.html' : pathname).replace(/^(\.\.[/\\])+/, '');
     const file = join(opts.publicDir, rel);
     if (!file.startsWith(opts.publicDir)) return send(res, 404, { error: 'Not found' });
-    try {
-      const data = await readFile(file);
-      res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream' });
-      res.end(data);
-    } catch {
-      // Single-page app: unknown non-API paths get the shell.
-      const html = await readFile(join(opts.publicDir, 'index.html'));
-      res.writeHead(200, { 'content-type': MIME['.html'] });
-      res.end(html);
-    }
+    if (await sendFile(req, res, file, MIME[extname(file)] ?? 'application/octet-stream')) return;
+    // Single-page app: unknown non-API paths get the shell.
+    if (!(await sendFile(req, res, join(opts.publicDir, 'index.html'), MIME['.html']))) send(res, 404, { error: 'Not found' });
   };
 
   const server = createServer(async (req, res) => {
@@ -1149,7 +1144,7 @@ export function createApp(opts: AppOptions): Server {
       res.setHeader('content-security-policy', APP_CSP);
       res.setHeader('x-frame-options', 'DENY');
       res.setHeader('permissions-policy', 'camera=(self), display-capture=(self), geolocation=(), microphone=(self)');
-      return serveStatic(res, url.pathname);
+      return serveStatic(req, res, url.pathname);
     }
 
     try {
