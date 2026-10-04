@@ -11,7 +11,7 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Accounts with username and password, protected by an optional registration code so strangers can't sign up
 - Burrows (shared spaces) you create, with an invite code to share, and rooms that the host (or anyone whose role allows it) can add
 - Custom roles with their own name, color and permissions, private rooms, and removing or banning people
-- Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) end-to-end encrypted, with mute, who's-talking rings, and a volume slider for each person
+- Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) end-to-end encrypted, with mute, who's-talking rings, a volume slider for each person, and camera and screen sharing
 - Image and file sharing: attach, paste or drag in up to 10 files per message, with inline image and video previews
 - Emoji reactions and replies (a reply to you counts as a mention)
 - Direct messages with anyone you share a burrow with
@@ -23,7 +23,6 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Desktop app for Windows, macOS and Linux (Electron), plus the same UI in any browser
 - Scandinavian-forest look with light and dark themes
 
-**Not yet:** video and screen sharing. See [Roadmap](#roadmap).
 
 ## Layout
 
@@ -108,9 +107,10 @@ The `@livekit` lines are only needed for voice rooms (below); they're harmless w
 Voice runs on [LiveKit](https://livekit.io), a media server that Docker Compose starts next to Burrow.
 Voice only is light enough for a Raspberry Pi 4 or 5. The limit is usually your home upload
 speed: LiveKit sends each speaker to every listener at about 40 kbps, so a room of 10 needs up to
-about 4 Mbps of upload.
+about 4 Mbps of upload. Video is much heavier: each camera is up to about 1.7 Mbps and each shared
+screen up to about 5 Mbps, per person watching. Video is only sent to people who have it open.
 
-Voice is end-to-end encrypted: audio is scrambled on each person's device and only the others in the
+Voice and video are end-to-end encrypted: audio and video are scrambled on each person's device and only the others in the
 room can unscramble it, so LiveKit (and anyone who got into the server) only ever handles noise. A new
 key is made whenever someone joins or leaves. Click the lock in the voice bar to see the room's safety
 code; everyone in the room should see the same one. Everyone needs an up-to-date app for this.
@@ -122,8 +122,16 @@ code; everyone in the room should see the same one. Everyone needs an up-to-date
 4. On your router, forward **TCP 7881** and **UDP 7882** to the server, alongside 80 and 443.
 
 The host then adds a room with **+** next to *Rooms* and picks *Voice room*. Click a voice room to
-join; the bar above your name has mute and leave. Click someone in a voice room to turn them up or down
-(0% to 200%, only for you).
+join; the bar above your name has mute, camera, screen sharing, the video view and leave. Click someone
+in a voice room to turn them up or down (0% to 200%, only for you).
+
+Turning on your camera or sharing your screen shows everyone's video in place of the chat. Others see
+a camera icon or a red **LIVE** tag next to your name, and open the video with the grid button in the
+voice bar (or by clicking the voice room). Click a video to make it bigger, double-click for full
+screen, and **Back to chat** to return. In the desktop app you pick a screen or window from Burrow's
+own list; sharing your computer's sound along with it works on Windows, and in Chrome or Edge when
+sharing a browser tab. On a Mac, the first share asks for *Screen Recording* permission in System
+Settings, and Burrow may need a restart after you allow it.
 
 ### Security
 
@@ -210,11 +218,9 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, and notification sounds.
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, and camera and screen sharing.
 
-Rough order of what would make it feel more like Discord:
-
-1. Video and screen sharing in voice rooms
+Ideas for later: text message encryption, picking the screen share quality (smooth for games or sharp for text).
 
 ## Alternatives
 

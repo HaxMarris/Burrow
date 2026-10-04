@@ -9,7 +9,7 @@ export interface VoiceOptions {
 
 const b64url = (v: unknown) => Buffer.from(typeof v === 'string' ? v : JSON.stringify(v)).toString('base64url');
 
-/** A LiveKit access token (HS256 JWT) that lets one user join one voice room. */
+/** A LiveKit access token (HS256 JWT) that lets one user join one voice room, with their mic, camera and screen. */
 export function voiceToken(opts: VoiceOptions, user: { id: number; username: string }, room: string, ttlSeconds = 6 * 3600) {
   const now = Math.floor(Date.now() / 1000);
   const header = b64url({ alg: 'HS256', typ: 'JWT' });
@@ -19,7 +19,7 @@ export function voiceToken(opts: VoiceOptions, user: { id: number; username: str
     name: user.username,
     nbf: now - 10,
     exp: now + ttlSeconds,
-    video: { room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, canPublishSources: ['microphone'] },
+    video: { room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, canPublishSources: ['microphone', 'camera', 'screen_share', 'screen_share_audio'] },
   });
   const sig = createHmac('sha256', opts.apiSecret).update(`${header}.${payload}`).digest('base64url');
   return `${header}.${payload}.${sig}`;
