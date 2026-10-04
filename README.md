@@ -128,7 +128,8 @@ in a voice room to turn them up or down (0% to 200%, only for you).
 Turning on your camera or sharing your screen shows everyone's video in place of the chat. Others see
 a camera icon or a red **LIVE** tag next to your name, and open the video with the grid button in the
 voice bar (or by clicking the voice room). Click a video to make it bigger, double-click for full
-screen, and **Back to chat** to return. In the desktop app you pick a screen or window from Burrow's
+screen, and **Back to chat** to return. The member list hides while you watch. A shared screen with
+sound has its own mute button and volume slider (0% to 200%, only for you) when you hover over it. In the desktop app you pick a screen or window from Burrow's
 own list; sharing your computer's sound along with it works on Windows, and in Chrome or Edge when
 sharing a browser tab. On a Mac, the first share asks for *Screen Recording* permission in System
 Settings, and Burrow may need a restart after you allow it.
@@ -203,6 +204,7 @@ Burrow has its own names for things: a **burrow** is a shared space for one grou
 - The speech-bubble tile above your burrows holds your direct messages. Start one with its **+**, or click someone in a burrow's member list.
 - Click your name in the bottom corner to set a profile picture or change your password.
 - The moon button in your profile card switches between the light "birch" theme and the dark "pine night" theme. By default it follows your system setting.
+- Your account also has a **theme color** wheel: pick any color (nearer the middle is softer) or one of the presets, and Burrow's backgrounds and accents follow it in both light and dark. *Back to forest green* undoes it.
 
 ## Development
 
