@@ -277,6 +277,9 @@ function handleEvent(ev) {
       if (isNew) state.serverOrder.push(ev.server.id);
       renderServers();
       leaveVoiceIfGone();
+      // Someone in our voice room was removed from the burrow: new key, without them.
+      if (state.voice?.crypto && ev.server.channels.some((c) => c.id === state.voice.channelId)
+        && [...state.voice.crypto.pubs.keys()].some((id) => !ev.server.members.some((m) => String(m.id) === id))) keysChanged(state.voice);
       if (ev.server.id === state.serverId) {
         // The room we're in was deleted or made private without us.
         if (!state.inDms && !ev.server.channels.some((c) => c.id === state.channelId)) selectServer(ev.server.id);
@@ -844,6 +847,7 @@ $('#server-menu-btn').onclick = () => {
       closeModal();
       state.servers.delete(s.id);
       state.serverOrder = state.serverOrder.filter((id) => id !== s.id);
+      leaveVoiceIfGone();
       selectServer(state.serverOrder[0] ?? null);
     } catch (err) { alertError(err); }
   };
@@ -1574,9 +1578,13 @@ async function joinVoice(channelId) {
     room
       .on(LK.RoomEvent.TrackSubscribed, (track, pub, participant) => {
         if (track.kind !== 'audio') return renderStage();
-        $('#voice-audio').append(track.attach());
-        participant.setVolume(volumeFor(Number(participant.identity)));
-        participant.setVolume(streamVolumeFor(Number(participant.identity)), LK.Track.Source.ScreenShareAudio);
+        const id = Number(participant.identity);
+        const volume = pub.source === LK.Track.Source.ScreenShareAudio ? streamVolumeFor(id) : volumeFor(id);
+        if (volume === 0) pub.setSubscribed(false); // muted by you
+        else {
+          $('#voice-audio').append(track.attach());
+          participant.setVolume(volume, pub.source);
+        }
         renderStage(); // a shared screen with sound gets a volume control
       })
       .on(LK.RoomEvent.TrackUnsubscribed, (track) => {
@@ -1680,7 +1688,6 @@ function renderVoiceBar(status) {
 }
 
 $('#voice-mute').onclick = toggleMute;
-$('#voice-lock').onclick = (e) => { e.stopPropagation(); openSafetyCode(e.currentTarget); };
 $('#voice-leave').onclick = () => leaveVoice();
 $('#voice-camera').onclick = toggleCamera;
 $('#voice-screen').onclick = toggleScreen;
@@ -1855,15 +1862,27 @@ function renderStage() {
 }
 
 // How loud someone's shared screen is, for you only: 0% (muted) to 200%. Kept on this device.
+// Streams start muted until you turn them up; whatever you pick for someone is remembered.
 const streamVolumes = (() => { try { return JSON.parse(store.get('streamVolumes')) ?? {}; } catch { return {}; } })();
-const streamVolumeFor = (userId) => streamVolumes[userId] ?? 1;
+const streamVolumeFor = (userId) => streamVolumes[userId] ?? 0;
 
 function setStreamVolume(userId, value) {
-  if (value === 1) delete streamVolumes[userId];
+  if (value === 0) delete streamVolumes[userId];
   else streamVolumes[userId] = value;
   store.set('streamVolumes', JSON.stringify(streamVolumes));
   const p = state.voice?.room?.remoteParticipants.get(String(userId));
-  p?.setVolume(value, window.LivekitClient.Track.Source.ScreenShareAudio);
+  if (p) applyVolume(p, window.LivekitClient.Track.Source.ScreenShareAudio, value);
+}
+
+/**
+ * Sets how loud one of someone's sounds is. LiveKit forgets a volume of 0 whenever it rebuilds its
+ * audio, so silence means not receiving that sound at all, which also saves the download.
+ */
+function applyVolume(participant, source, value) {
+  const pub = participant.getTrackPublication(source);
+  if (value === 0) return pub?.setSubscribed(false);
+  if (pub && !pub.isSubscribed) pub.setSubscribed(true); // the volume is set again when it arrives
+  participant.setVolume(value, source);
 }
 
 const SPEAKER_ON = '<svg viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4V9Zm12.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4Zm-2.5-8.8v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6Z"/></svg>';
@@ -1932,8 +1951,8 @@ window.burrowDesktop?.onPickScreen((sources) => {
 // someone joins or leaves, so newcomers can't decode what came before and leavers can't decode
 // what comes after. The server passes these messages along but can't open them.
 //
-// A server that wanted to listen in would have to swap in public keys of its own. That changes
-// the room's safety code, which everyone can compare (click the lock in the voice bar).
+// The key keeper only hands keys to people still in the burrow, so someone who's removed can't
+// decode anything new even if they stay connected to the voice server.
 
 const E2EE_TOPIC = 'burrow-e2ee';
 const KEYRING_SIZE = 16; // LiveKit keeps this many room keys, so audio sealed with the last one still plays
@@ -2008,6 +2027,8 @@ function startKeyExchange(voice) {
   vc.retry = setTimeout(retry, 1500);
 }
 
+const voiceServer = () => [...state.servers.values()].find((s) => s.channels.some((c) => c.id === state.voice?.channelId));
+
 /** Someone came or went: if we're the key keeper, make a new room key and hand it out. */
 function keysChanged(voice) {
   const vc = voice.crypto;
@@ -2019,7 +2040,9 @@ function keysChanged(voice) {
     if (state.voice !== voice) return;
     const raw = crypto.getRandomValues(new Uint8Array(32));
     const index = (vc.index + 1) % KEYRING_SIZE;
+    const members = new Set(voiceServer()?.members.map((m) => String(m.id)) ?? []);
     for (const [identity, pub] of vc.pubs) {
+      if (!members.has(identity)) continue; // removed from the burrow: no more keys, even if still connected
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const sealed = await crypto.subtle.encrypt(
         { name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(`${index}:${identity}`) },
@@ -2064,34 +2087,6 @@ async function onCryptoMessage(voice, payload, participant, topic) {
   }
 }
 
-/** A short code from everyone's public keys. If anyone's differs, someone is in the middle. */
-async function safetyCode(voice) {
-  const vc = voice.crypto;
-  const entries = [[voice.room.localParticipant.identity, vc.pub], ...vc.pubs].sort((a, b) => Number(a[0]) - Number(b[0]));
-  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(entries.map((e) => e.join(':')).join('|'))));
-  const groups = [0, 2, 4].map((i) => String(((hash[i] << 8) | hash[i + 1]) % 10000).padStart(4, '0'));
-  return { code: groups.join(' '), people: entries.length };
-}
-
-async function openSafetyCode(anchor) {
-  const voice = state.voice;
-  if (!voice?.crypto) return;
-  closeVolume();
-  const { code, people } = await safetyCode(voice);
-  const pop = document.createElement('div');
-  pop.className = 'volume-pop safety-pop';
-  pop.id = 'volume-pop';
-  pop.innerHTML = `<div class="volume-head"><b>End-to-end encrypted</b></div>
-    <p class="small">Only the ${people === 1 ? 'person' : `${people} people`} in this room can hear it. Not even the server can.</p>
-    <div class="safety-code">${code}</div>
-    <p class="small muted">Everyone here should see the same code. If someone's is different, the server may be listening in.</p>`;
-  pop.onclick = (e) => e.stopPropagation();
-  document.body.append(pop);
-  const r = anchor.getBoundingClientRect();
-  pop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 8))}px`;
-  pop.style.top = `${Math.max(8, r.top - pop.offsetHeight - 8)}px`;
-}
-
 // ---------------------------------------------------------------- volume and sounds
 //
 // Each person's voice volume is your own setting, kept on this device: 0% to 200%.
@@ -2103,7 +2098,8 @@ function setVolume(userId, value) {
   if (value === 1) delete volumes[userId];
   else volumes[userId] = value;
   store.set('volumes', JSON.stringify(volumes));
-  state.voice?.room?.remoteParticipants.forEach((p) => { if (Number(p.identity) === userId) p.setVolume(value); });
+  const p = state.voice?.room?.remoteParticipants.get(String(userId));
+  if (p) applyVolume(p, window.LivekitClient.Track.Source.Microphone, value);
 }
 
 function openVolume(anchor, userId, name) {

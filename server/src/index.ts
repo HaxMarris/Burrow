@@ -25,6 +25,7 @@ const app = createApp({
           apiKey: process.env.LIVEKIT_API_KEY,
           apiSecret: process.env.LIVEKIT_API_SECRET,
           url: process.env.LIVEKIT_URL || undefined,
+          apiUrl: process.env.LIVEKIT_API_URL || 'http://localhost:7880',
         }
       : undefined,
 });

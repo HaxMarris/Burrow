@@ -6,7 +6,7 @@ import { extname, join, normalize } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { addModeratorRole, type Db } from './db.ts';
 import { hashPassword, verifyPassword, newToken, newInviteCode } from './auth.ts';
-import { voiceToken, type VoiceOptions } from './voice.ts';
+import { closeRoom, removeFromRoom, voiceToken, type VoiceOptions } from './voice.ts';
 
 export interface AppOptions {
   db: Db;
@@ -356,6 +356,24 @@ export function createApp(opts: AppOptions): Server {
     }
   };
 
+  // LiveKit only checks who may join when they join, so people who lose access are disconnected
+  // there too. (The key keeper also stops handing them voice keys; see the app.)
+  const tellLiveKit = (what: string, call: (voice: VoiceOptions) => Promise<void>) => {
+    if (opts.voice) call(opts.voice).catch((err) => console.warn(`Couldn't ${what}: ${err.message}`));
+  };
+  /** Takes someone out of a voice room: off the room's list, and disconnected from LiveKit. */
+  const kickFromVoice = (userId: number, channelId = inVoice.get(userId)) => {
+    if (channelId === undefined) return;
+    if (inVoice.get(userId) === channelId) setVoice(userId, null);
+    tellLiveKit(`take user ${userId} out of room-${channelId}`, (v) => removeFromRoom(v, `room-${channelId}`, String(userId)));
+  };
+  const closeVoiceRoom = (channelId: number) => {
+    for (const [u, c] of inVoice) if (c === channelId) setVoice(u, null);
+    tellLiveKit(`close room-${channelId}`, (v) => closeRoom(v, `room-${channelId}`));
+  };
+  const voiceRoomIds = (serverId: number) =>
+    (db.prepare("SELECT id FROM channels WHERE server_id = ? AND kind = 'voice'").all(serverId) as { id: number }[]).map((r) => r.id);
+
   const usersSharingServerWith = (userId: number) =>
     (
       db
@@ -574,7 +592,7 @@ export function createApp(opts: AppOptions): Server {
     if (!owner || !isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
     if (owner.owner_id === user.id) {
       broadcastToServer(serverId, { type: 'server_deleted', serverId });
-      for (const [u, c] of inVoice) if (channelById(c)?.serverId === serverId) inVoice.delete(u);
+      for (const id of voiceRoomIds(serverId)) closeVoiceRoom(id);
       removeFiles(
         db
           .prepare('SELECT a.id FROM attachments a JOIN channels c ON c.id = a.channel_id WHERE c.server_id = ?')
@@ -589,8 +607,8 @@ export function createApp(opts: AppOptions): Server {
 
   /** Takes someone out of a burrow: out of its voice rooms, its private rooms and its member list. */
   const removeMember = (serverId: number, userId: number) => {
-    const voiceChannel = inVoice.get(userId);
-    if (voiceChannel !== undefined && channelById(voiceChannel)?.serverId === serverId) setVoice(userId, null);
+    // Every voice room in the burrow, not just the one we think they're in: the app may not have said.
+    for (const id of voiceRoomIds(serverId)) kickFromVoice(userId, id);
     db.prepare('DELETE FROM channel_access WHERE user_id = ? AND channel_id IN (SELECT id FROM channels WHERE server_id = ?)').run(userId, serverId);
     db.prepare('DELETE FROM members WHERE server_id = ? AND user_id = ?').run(serverId, userId);
     sendServerUpdate(serverId);
@@ -626,7 +644,7 @@ export function createApp(opts: AppOptions): Server {
   const accessChanged = (serverId: number) => {
     for (const [u, c] of inVoice) {
       const channel = channelById(c);
-      if (channel?.serverId === serverId && !canSee(channel, u)) setVoice(u, null);
+      if (channel?.serverId === serverId && !canSee(channel, u)) kickFromVoice(u);
     }
     sendServerUpdate(serverId);
   };
@@ -795,7 +813,7 @@ export function createApp(opts: AppOptions): Server {
     allowed(channel.serverId, user, 'rooms');
     const textRooms = db.prepare("SELECT COUNT(*) AS n FROM channels WHERE server_id = ? AND kind = 'text'").get(channel.serverId) as { n: number };
     if (channel.kind === 'text' && textRooms.n <= 1) throw new HttpError(400, 'A burrow needs at least one text room');
-    for (const [u, c] of inVoice) if (c === channel.id) setVoice(u, null);
+    if (channel.kind === 'voice') closeVoiceRoom(channel.id);
     removeFiles(db.prepare('SELECT id FROM attachments WHERE channel_id = ?').all(channel.id) as Json[]);
     db.prepare('DELETE FROM channels WHERE id = ?').run(channel.id);
     sendServerUpdate(channel.serverId);
