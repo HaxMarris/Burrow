@@ -13,6 +13,10 @@ services:
       # Voice rooms (see README).
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
+      # Burrow talks to LiveKit directly to take removed people out of voice rooms.
+      LIVEKIT_API_URL: ${LIVEKIT_API_URL:-http://host.docker.internal:7880}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - burrow-data:/data
 

@@ -80,6 +80,7 @@ Data goes to `server/data/chat.db`.
 | `UPLOAD_DIR`        | `uploads/` next to the database | Where shared files are stored (`/data/uploads` in Docker).  |
 | `MAX_UPLOAD_MB`     | `25`                   | Largest file someone can share.                                     |
 | `LIVEKIT_URL`       | same address as Burrow | Where apps reach LiveKit, if not routed through Burrow's address.   |
+| `LIVEKIT_API_URL`   | `http://localhost:7880` | Where Burrow reaches LiveKit to disconnect removed people (Docker Compose points it at the host). |
 
 ### Letting friends reach it
 
@@ -112,8 +113,11 @@ screen up to about 5 Mbps, per person watching. Video is only sent to people who
 
 Voice and video are end-to-end encrypted: audio and video are scrambled on each person's device and only the others in the
 room can unscramble it, so LiveKit (and anyone who got into the server) only ever handles noise. A new
-key is made whenever someone joins or leaves. Click the lock in the voice bar to see the room's safety
-code; everyone in the room should see the same one. Everyone needs an up-to-date app for this.
+key is made whenever someone joins or leaves, and only people still in the burrow get it. The lock in
+the voice bar shows the room is encrypted. Everyone needs an up-to-date app for this.
+
+Removing someone from a burrow, or leaving it, disconnects them from its voice rooms straight away.
+Burrow asks LiveKit to do this directly (`LIVEKIT_API_URL`; Docker Compose sets it up).
 
 1. Copy `.env.example` to `.env` in the same folder as `docker-compose.yml`, and replace the secret
    with the output of `openssl rand -base64 32`.
@@ -129,7 +133,8 @@ Turning on your camera or sharing your screen shows everyone's video in place of
 a camera icon or a red **LIVE** tag next to your name, and open the video with the grid button in the
 voice bar (or by clicking the voice room). Click a video to make it bigger, double-click for full
 screen, and **Back to chat** to return. The member list hides while you watch. A shared screen with
-sound has its own mute button and volume slider (0% to 200%, only for you) when you hover over it. In the desktop app you pick a screen or window from Burrow's
+sound starts muted; hover over it for its mute button and volume slider (0% to 200%, only for you).
+Burrow remembers what you pick for each person. In the desktop app you pick a screen or window from Burrow's
 own list; sharing your computer's sound along with it works on Windows, and in Chrome or Edge when
 sharing a browser tab. On a Mac, the first share asks for *Screen Recording* permission in System
 Settings, and Burrow may need a restart after you allow it.
