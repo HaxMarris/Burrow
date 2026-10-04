@@ -274,7 +274,10 @@ ul { list-style: none; margin: 0; padding: 0; }
 .history-start { padding: 28px 8px 8px; }
 .history-start h2 { margin: 0 0 4px; font-size: 26px; }
 
-.composer-wrap { padding: 0 28px 18px; }
+.composer-wrap { padding: 0 28px 18px; position: relative; }
+.mention-box { position: absolute; left: 28px; right: 28px; bottom: calc(100% - 22px); z-index: 15; display: flex; flex-direction: column; gap: 2px; padding: 6px; max-height: 300px; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
+.mention-option { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 0; border-radius: 10px; background: none; color: var(--text); text-align: left; font: inherit; }
+.mention-option.active, .mention-option:hover { background: var(--hover); }
 .typing { height: 22px; padding: 0 6px; font-size: 13px; color: var(--muted); font-style: italic; }
 .composer { display: flex; align-items: flex-end; gap: 8px; background: var(--surface); border: 1.5px solid var(--line); border-radius: 20px; padding: 6px 6px 6px 16px; box-shadow: var(--shadow); transition: border-color .15s; }
 .composer:focus-within { border-color: var(--moss); }
@@ -421,6 +424,8 @@ label.check input { width: auto; }
   .group .avatar.lg { width: 36px; height: 36px; font-size: 14px; }
   .line .content { font-size: 16px; }
   .composer-wrap { padding: 0 10px calc(10px + env(safe-area-inset-bottom)); }
+  .mention-box { left: 10px; right: 10px; }
+  .mention-option { padding: 10px; }
   .composer textarea { font-size: 16px; } /* 16px stops phones zooming in on focus */
   .send { width: 42px; height: 42px; }
   .line:hover .actions { display: none; }
