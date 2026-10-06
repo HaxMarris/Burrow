@@ -8,6 +8,7 @@ import { addModeratorRole, type Db } from './db.ts';
 import { hashPassword, verifyPassword, newToken, newInviteCode } from './auth.ts';
 import { closeRoom, removeFromRoom, voiceToken, type VoiceOptions } from './voice.ts';
 import { staticFiles } from './static.ts';
+import { gifSearch, download, type GifOptions } from './gifs.ts';
 
 export interface AppOptions {
   db: Db;
@@ -20,10 +21,12 @@ export interface AppOptions {
   uploadDir?: string;
   /** Largest upload in bytes (default 25 MB). */
   maxUploadBytes?: number;
+  /** KLIPY settings; the GIF picker is turned off without them (or without uploads). */
+  gifs?: GifOptions;
 }
 
 type User = { id: number; username: string; avatar: string | null };
-const PERMS = ['rooms', 'messages', 'remove', 'ban', 'roles'] as const;
+const PERMS = ['rooms', 'messages', 'remove', 'ban', 'roles', 'burrow'] as const;
 type Perm = (typeof PERMS)[number];
 type Standing = { host: boolean; rank: number; perms: Set<Perm>; roleIds: number[] };
 const parsePerms = (text: string) => text.split(',').filter((p): p is Perm => (PERMS as readonly string[]).includes(p));
@@ -76,7 +79,7 @@ function clientIp(req: IncomingMessage) {
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 // A user's picture link, from their users.avatar file name (or null).
 const avatarUrl = (col: string) => `CASE WHEN ${col} IS NULL THEN NULL ELSE '/api/avatars/' || ${col} END`;
-// Profile pictures are recognised by their first bytes, not by what the client says they are.
+// Profile and burrow pictures are recognised by their first bytes, not by what the client says they are.
 const AVATAR_TYPES: { ext: string; type: string; magic: (b: Buffer) => boolean }[] = [
   { ext: 'png', type: 'image/png', magic: (b) => b.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) },
   { ext: 'jpg', type: 'image/jpeg', magic: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
@@ -260,7 +263,11 @@ export function createApp(opts: AppOptions): Server {
   /** A burrow as one person sees it: private rooms they can't enter are left out. */
   const serverSummary = (serverId: number, viewerId: number) => {
     const server = db
-      .prepare('SELECT id, name, kind, owner_id AS ownerId, invite_code AS inviteCode FROM servers WHERE id = ?')
+      .prepare(
+        `SELECT id, name, kind, owner_id AS ownerId, invite_code AS inviteCode,
+                CASE WHEN icon IS NULL THEN NULL ELSE '/api/burrow-pictures/' || icon END AS icon
+         FROM servers WHERE id = ?`,
+      )
       .get(serverId) as Json;
     if (server.kind === 'dm') delete server.inviteCode;
     const manager = can(serverId, viewerId, 'rooms');
@@ -432,7 +439,12 @@ export function createApp(opts: AppOptions): Server {
   route(
     'GET',
     '/api/config',
-    () => ({ registrationCodeRequired: !!opts.registrationCode, voice: !!opts.voice, maxUploadBytes: opts.uploadDir ? maxUpload : 0 }),
+    () => ({
+      registrationCodeRequired: !!opts.registrationCode,
+      voice: !!opts.voice,
+      maxUploadBytes: opts.uploadDir ? maxUpload : 0,
+      gifs: !!gifs,
+    }),
     false,
   );
 
@@ -633,6 +645,7 @@ export function createApp(opts: AppOptions): Server {
           .prepare('SELECT a.id FROM attachments a JOIN channels c ON c.id = a.channel_id WHERE c.server_id = ?')
           .all(serverId) as Json[],
       );
+      removeBurrowPicture(serverId);
       db.prepare('DELETE FROM servers WHERE id = ?').run(serverId);
     } else {
       removeMember(serverId, user.id);
@@ -1018,9 +1031,11 @@ export function createApp(opts: AppOptions): Server {
     createReadStream(filePath(id)).pipe(res);
   };
 
-  // ---- profile pictures ---------------------------------------------------
+  // ---- profile and burrow pictures ----------------------------------------
 
-  const avatarPath = (file: string) => join(opts.uploadDir!, 'avatars', file);
+  // Profile pictures live in uploads/avatars, burrow pictures in uploads/burrow-pictures.
+  const picturePath = (folder: string, file: string) => join(opts.uploadDir!, folder, file);
+  const avatarPath = (file: string) => picturePath('avatars', file);
 
   /** Swaps in a new picture file (or none), removes the old one and tells everyone who can see this user. */
   const setAvatarFile = (user: User, file: string | null) => {
@@ -1032,12 +1047,17 @@ export function createApp(opts: AppOptions): Server {
     return updated;
   };
 
-  // The picture is the raw request body. The app shrinks it to a small square before sending.
-  const handleAvatarUpload = async (req: IncomingMessage, res: ServerResponse) => {
+  /** The logged-in uploader of a picture, which is the raw request body. */
+  const pictureUploader = (req: IncomingMessage) => {
     const user = userByToken(req.headers.authorization?.replace(/^Bearer /, ''));
     if (!user) throw new HttpError(401, 'Not logged in');
     if (!opts.uploadDir) throw new HttpError(503, 'Uploads are not set up on this server');
-    const tooBig = new HttpError(413, `Profile pictures can be at most ${MAX_AVATAR_BYTES / 1048576} MB`);
+    return user;
+  };
+
+  /** Reads a picture from the request body and saves it in `folder`, returning its new file name. */
+  const savePicture = async (req: IncomingMessage, folder: string, what: string) => {
+    const tooBig = new HttpError(413, `${what} can be at most ${MAX_AVATAR_BYTES / 1048576} MB`);
     if (Number(req.headers['content-length']) > MAX_AVATAR_BYTES) throw tooBig;
     const chunks: Buffer[] = [];
     let size = 0;
@@ -1054,17 +1074,56 @@ export function createApp(opts: AppOptions): Server {
     });
     const data = Buffer.concat(chunks);
     const kind = AVATAR_TYPES.find((t) => t.magic(data));
-    if (!kind) throw new HttpError(400, 'Profile pictures must be PNG, JPEG, GIF or WebP images');
+    if (!kind) throw new HttpError(400, `${what} must be PNG, JPEG, GIF or WebP images`);
     const file = `${randomBytes(16).toString('base64url')}.${kind.ext}`;
-    await mkdir(join(opts.uploadDir, 'avatars'), { recursive: true });
-    await writeFile(avatarPath(file), data);
-    send(res, 200, setAvatarFile(user, file));
+    await mkdir(join(opts.uploadDir!, folder), { recursive: true });
+    await writeFile(picturePath(folder, file), data);
+    return file;
   };
 
+  // The app shrinks the picture to a small square before sending.
+  const handleAvatarUpload = async (req: IncomingMessage, res: ServerResponse) => {
+    const user = pictureUploader(req);
+    send(res, 200, setAvatarFile(user, await savePicture(req, 'avatars', 'Profile pictures')));
+  };
+
+  /** Swaps in a burrow's new picture (or none) and shows it to everyone in the burrow. */
+  const setBurrowPicture = (serverId: number, file: string | null) => {
+    removeBurrowPicture(serverId);
+    db.prepare('UPDATE servers SET icon = ? WHERE id = ?').run(file, serverId);
+    sendServerUpdate(serverId);
+  };
+  const removeBurrowPicture = (serverId: number) => {
+    const old = db.prepare('SELECT icon FROM servers WHERE id = ?').get(serverId) as { icon: string | null } | undefined;
+    if (old?.icon && opts.uploadDir) unlink(picturePath('burrow-pictures', old.icon)).catch(() => {});
+  };
+
+  // The host, and roles allowed to edit the burrow, can change its picture.
+  const handleBurrowPictureUpload = async (req: IncomingMessage, res: ServerResponse, serverId: number) => {
+    const user = pictureUploader(req);
+    allowed(serverId, user, 'burrow');
+    const file = await savePicture(req, 'burrow-pictures', 'Burrow pictures');
+    // They may have lost the right (or the burrow may be gone) while it uploaded.
+    try {
+      allowed(serverId, user, 'burrow');
+    } catch (err) {
+      unlink(picturePath('burrow-pictures', file)).catch(() => {});
+      throw err;
+    }
+    setBurrowPicture(serverId, file);
+    send(res, 200, serverSummary(serverId, user.id));
+  };
+  route('DELETE', '/api/servers/:id/picture', ({ user, params }) => {
+    const serverId = Number(params[0]);
+    allowed(serverId, user, 'burrow');
+    setBurrowPicture(serverId, null);
+    return serverSummary(serverId, user.id);
+  });
+
   // Picture links are unguessable and never reused, so they can be cached forever.
-  const serveAvatar = async (req: IncomingMessage, res: ServerResponse, file: string) => {
+  const servePicture = async (req: IncomingMessage, res: ServerResponse, folder: string, file: string) => {
     const kind = AVATAR_TYPES.find((t) => file.endsWith('.' + t.ext))!;
-    const info = opts.uploadDir ? await stat(avatarPath(file)).catch(() => null) : null;
+    const info = opts.uploadDir ? await stat(picturePath(folder, file)).catch(() => null) : null;
     if (!info) throw new HttpError(404, 'Picture not found');
     res.writeHead(200, {
       'content-type': kind.type,
@@ -1074,8 +1133,84 @@ export function createApp(opts: AppOptions): Server {
       'cache-control': 'public, max-age=31536000, immutable',
     });
     if (req.method === 'HEAD') return res.end();
-    createReadStream(avatarPath(file)).pipe(res);
+    createReadStream(picturePath(folder, file)).pipe(res);
   };
+
+  // ---- GIFs ---------------------------------------------------------------
+  // Searching and previews go through Burrow (see gifs.ts). A GIF that's sent is saved like an
+  // uploaded file, so it keeps working even if KLIPY drops it.
+
+  const gifs = opts.gifs && opts.uploadDir ? gifSearch(opts.gifs) : null;
+  const gifsOn = () => {
+    if (!gifs) throw new HttpError(503, "GIFs aren't set up on this server");
+    return gifs;
+  };
+  const gifTries = (user: User) => {
+    const key = `gif:${user.id}`;
+    checkTries([key], 120); // searches a minute, per person; plenty for typing as you go
+    failedTry([key], 60_000);
+  };
+  const GIF_TYPES = AVATAR_TYPES.filter((t) => t.ext === 'gif' || t.ext === 'webp');
+
+  route('GET', '/api/gifs', async ({ user, url }) => {
+    gifTries(user);
+    const q = (url.searchParams.get('q') ?? '').trim().slice(0, 100);
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get('page')) || 1));
+    try {
+      return await (q ? gifsOn().search(q, page, user.id) : gifsOn().trending(page, user.id));
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      console.warn(`GIF search failed: ${err instanceof Error ? err.message : err}`);
+      throw new HttpError(502, "Couldn't reach the GIF search. Try again in a moment.");
+    }
+  });
+
+  // Previews load in <img> tags, which can't log in; the ids are random and only last a while.
+  const serveGifPreview = async (req: IncomingMessage, res: ServerResponse, id: string) => {
+    const gif = gifs?.get(id);
+    if (!gif) throw new HttpError(404, 'GIF not found');
+    let data: Buffer;
+    try {
+      data = await download(gif.preview, 5 * 1024 * 1024);
+    } catch {
+      throw new HttpError(502, "Couldn't load that GIF");
+    }
+    const kind = GIF_TYPES.find((t) => t.magic(data));
+    if (!kind) throw new HttpError(502, "Couldn't load that GIF");
+    res.writeHead(200, {
+      'content-type': kind.type,
+      'content-length': data.length,
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; sandbox",
+      'cache-control': 'private, max-age=86400',
+    });
+    res.end(req.method === 'HEAD' ? undefined : data);
+  };
+
+  /** Saves a GIF from a search into a room, ready to send like an uploaded file. */
+  route('POST', '/api/channels/:id/gifs', async ({ user, params, body }) => {
+    const channel = channelById(Number(params[0]));
+    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
+    const gif = gifsOn().get(String(body.id ?? ''));
+    if (!gif) throw new HttpError(404, 'That GIF is no longer available. Search again.');
+    let data: Buffer;
+    try {
+      data = await download(gif.full, maxUpload);
+    } catch (err) {
+      throw new HttpError(502, err instanceof Error && err.message.includes('too big') ? 'That GIF is too big to send' : "Couldn't fetch that GIF");
+    }
+    const kind = GIF_TYPES.find((t) => t.magic(data));
+    if (!kind) throw new HttpError(502, "Couldn't fetch that GIF");
+    const id = randomBytes(16).toString('base64url');
+    const name = `${gif.title.replace(/[^\p{L}\p{N} _-]/gu, '').trim().slice(0, 60) || 'gif'}.${kind.ext}`;
+    await mkdir(opts.uploadDir!, { recursive: true });
+    await writeFile(filePath(id), data);
+    db.prepare(
+      'INSERT INTO attachments (id, channel_id, uploader_id, name, type, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run(id, channel.id, user.id, name, kind.type, data.length, now());
+    return attachmentJson({ id, name, type: kind.type, size: data.length });
+  });
 
   // Uploads that never made it into a message are cleared out after a day.
   if (opts.uploadDir) {
@@ -1153,8 +1288,13 @@ export function createApp(opts: AppOptions): Server {
       const file = (req.method === 'GET' || req.method === 'HEAD') && url.pathname.match(/^\/api\/attachments\/([\w-]+)(\/|$)/);
       if (file) return await serveAttachment(req, res, file[1]);
       if (req.method === 'POST' && url.pathname === '/api/me/avatar') return await handleAvatarUpload(req, res);
-      const avatar = (req.method === 'GET' || req.method === 'HEAD') && url.pathname.match(/^\/api\/avatars\/([\w-]+\.(?:png|jpg|gif|webp))$/);
-      if (avatar) return await serveAvatar(req, res, avatar[1]);
+      const burrowUpload = req.method === 'POST' && url.pathname.match(/^\/api\/servers\/(\d+)\/picture$/);
+      if (burrowUpload) return await handleBurrowPictureUpload(req, res, Number(burrowUpload[1]));
+      const reading = req.method === 'GET' || req.method === 'HEAD';
+      const picture = reading && url.pathname.match(/^\/api\/(avatars|burrow-pictures)\/([\w-]+\.(?:png|jpg|gif|webp))$/);
+      if (picture) return await servePicture(req, res, picture[1], picture[2]);
+      const gifPreview = reading && url.pathname.match(/^\/api\/gifs\/preview\/([\w-]+)$/);
+      if (gifPreview) return await serveGifPreview(req, res, gifPreview[1]);
       for (const r of routes) {
         const m = r.method === req.method && url.pathname.match(r.pattern);
         if (!m) continue;

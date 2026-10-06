@@ -81,6 +81,8 @@ Data goes to `server/data/chat.db`.
 | `MAX_UPLOAD_MB`     | `25`                   | Largest file someone can share.                                     |
 | `LIVEKIT_URL`       | same address as Burrow | Where apps reach LiveKit, if not routed through Burrow's address.   |
 | `LIVEKIT_API_URL`   | `http://localhost:7880` | Where Burrow reaches LiveKit to disconnect removed people (Docker Compose points it at the host). |
+| `KLIPY_API_KEY`     | unset (GIFs off)       | Turns on the GIF picker. See *GIFs* below.                          |
+| `GIF_RATING`        | `pg-13`                | Which GIFs search shows: `g`, `pg`, `pg-13` or `r`.                 |
 
 ### Letting friends reach it
 
@@ -138,6 +140,16 @@ Burrow remembers what you pick for each person. In the desktop app you pick a sc
 own list; sharing your computer's sound along with it works on Windows, and in Chrome or Edge when
 sharing a browser tab. On a Mac, the first share asks for *Screen Recording* permission in System
 Settings, and Burrow may need a restart after you allow it.
+
+### GIFs
+
+The **GIF** button in the message box searches [KLIPY](https://klipy.com), a free GIF library (Google shut down Tenor's API in June 2026). It needs a free key:
+
+1. Sign up at [partner.klipy.com](https://partner.klipy.com).
+2. Open **API Keys**, choose **Add Platform** (call it Burrow), and copy the key it makes.
+3. Add `KLIPY_API_KEY=<the key>` to `.env` and run `docker compose up -d`.
+
+Searches and previews go through your Burrow server, so the key never reaches anyone's app and KLIPY doesn't see your friends' addresses (it gets an anonymous id per person instead). A GIF that's sent is saved on your server like any shared picture, so old messages keep working. If KLIPY ever limits your key, ask for production access in its Partner Panel.
 
 ### Security
 
@@ -201,13 +213,14 @@ Code-signing certificates fix that but cost money.
 Burrow has its own names for things: a **burrow** is a shared space for one group of friends (what Discord calls a server), and each burrow has **rooms** (channels).
 
 - Click **+** under *Your burrows* to dig a new burrow, or join one with an invite code.
-- The gear next to the burrow's name shows its invite code. The host (whoever created it) can delete the burrow there; everyone else can leave. People whose role lets them ban also see who's banned there, and can unban them. People who can manage roles open **Roles** there.
-- **Roles:** every burrow starts with a *Moderator* role. Under **Roles** you can make your own (like *Admins* or *Friends*), pick a color, choose what each one can do (manage rooms, delete messages, remove people, ban people, manage roles), and move them up or down. Names show in the color of their highest role. People can only change roles, and remove people, below their own highest role, and can't hand out permissions they don't have. A role with no permissions is just a colored label.
+- The gear next to the burrow's name shows its invite code. The host, and roles allowed to *edit the burrow*, can give it a picture there; it replaces the burrow's initials in everyone's top bar. The host (whoever created it) can delete the burrow there; everyone else can leave. People whose role lets them ban also see who's banned there, and can unban them. People who can manage roles open **Roles** there.
+- **Roles:** every burrow starts with a *Moderator* role. Under **Roles** you can make your own (like *Admins* or *Friends*), pick a color, choose what each one can do (manage rooms, delete messages, remove people, ban people, manage roles, edit the burrow), and move them up or down. Names show in the color of their highest role. People can only change roles, and remove people, below their own highest role, and can't hand out permissions they don't have. A role with no permissions is just a colored label.
 - People who can manage rooms add them with the **+** next to *Rooms*, and change or delete one with the gear that appears when you hover over it. A private room is only seen by people who manage rooms, plus the roles and people you tick.
 - Your account (your name, bottom left) has voice settings (how clearly others hear you: 48, 64 or 96 kbps, and noise suppression, which you can turn off for music) and sound settings: chimes for new messages and for people joining or leaving your voice room, and how loud they are.
 - Hover over someone in the member list and click **⋯** to give them roles, or to remove or ban them, depending on what your roles allow.
 - The speech-bubble tile above your burrows holds your direct messages. Start one with its **+**, or click someone in a burrow's member list.
 - Click your name in the bottom corner to set a profile picture or change your password.
+- The **GIF** button next to the message box opens trending GIFs; type to search, and tap one to send it.
 - The moon button in your profile card switches between the light "birch" theme and the dark "pine night" theme. By default it follows your system setting.
 - Your account also has a **theme color** wheel: pick any color (nearer the middle is softer) or one of the presets, and Burrow's backgrounds and accents follow it in both light and dark. *Back to forest green* undoes it.
 
@@ -225,7 +238,7 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, and camera and screen sharing.
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, and burrow pictures.
 
 Ideas for later: text message encryption, picking the screen share quality (smooth for games or sharp for text).
 

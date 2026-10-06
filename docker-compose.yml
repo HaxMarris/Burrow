@@ -23,6 +23,9 @@ services:
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
       # Burrow talks to LiveKit directly to take removed people out of voice rooms.
       LIVEKIT_API_URL: ${LIVEKIT_API_URL:-http://host.docker.internal:7880}
+      # GIF picker (see README).
+      KLIPY_API_KEY: ${KLIPY_API_KEY:-}
+      GIF_RATING: ${GIF_RATING:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

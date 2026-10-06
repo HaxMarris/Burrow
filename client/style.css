@@ -118,8 +118,8 @@ svg { display: block; }
 .icon-btn:hover { color: var(--text-strong); background: var(--hover); }
 .small-btn { font-size: 18px; line-height: 1; padding: 2px 8px; }
 label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 700; color: var(--muted); }
-label input, .modal-card input { background: var(--surface-2); border: 1.5px solid transparent; border-radius: 10px; padding: 10px 12px; font-size: 15px; font-weight: 400; outline: none; transition: border-color .15s; }
-label input:focus, .modal-card input:focus { border-color: var(--moss); }
+label input, .modal-card input, .gif-picker input { background: var(--surface-2); border: 1.5px solid transparent; border-radius: 10px; padding: 10px 12px; font-size: 15px; font-weight: 400; outline: none; transition: border-color .15s; }
+label input:focus, .modal-card input:focus, .gif-picker input:focus { border-color: var(--moss); }
 
 /* ---------- auth ---------- */
 .auth { height: 100%; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(360px, 1fr); }
@@ -503,6 +503,30 @@ label.check input { width: auto; }
 /* ---------- attachments ---------- */
 .composer:has(#attach-btn:not(.hidden)) { padding-left: 6px; }
 .composer .attach { align-self: flex-end; margin-bottom: 2px; }
+.composer:has(#gif-btn:not(.hidden)) { padding-left: 6px; }
+.composer .gif-btn { align-self: flex-end; margin: 0 0 3px -4px; height: 32px; width: auto; min-width: 38px; padding: 0 8px; border: 1.5px solid var(--line); line-height: 1; font-size: 12px; font-weight: 800; letter-spacing: .04em; }
+.composer .gif-btn[aria-expanded="true"] { background: var(--hover); color: var(--text-strong); border-color: var(--moss); }
+
+/* ---------- GIF picker ---------- */
+.gif-picker { position: absolute; right: 28px; bottom: calc(100% - 22px); z-index: 16; width: min(440px, calc(100% - 56px)); height: min(460px, 60vh); display: flex; flex-direction: column; gap: 8px; padding: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
+.gif-picker input { width: 100%; }
+.gif-grid { flex: 1; min-height: 0; overflow-y: auto; columns: 3 120px; column-gap: 6px; overscroll-behavior: contain; }
+.gif-tile { display: block; width: 100%; margin: 0 0 6px; padding: 0; border: 0; border-radius: 10px; overflow: hidden; background: var(--surface-2); break-inside: avoid; cursor: pointer; }
+.gif-tile img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.gif-tile:hover, .gif-tile:focus-visible { outline: 2.5px solid var(--moss); outline-offset: -2.5px; }
+.gif-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 18px; }
+.gif-credit { font-size: 11px; color: var(--muted); letter-spacing: .02em; white-space: nowrap; }
+@media (max-width: 760px) {
+  .gif-picker { left: 10px; right: 10px; width: auto; height: min(420px, 55vh); }
+  .gif-grid { columns: 2; }
+  .gif-picker input { font-size: 16px; } /* no zooming in on focus */
+}
+
+/* ---------- burrow pictures ---------- */
+.tile.has-picture { background: var(--surface-2) !important; }
+.tile img { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: inherit; }
+.tile.xl { width: 88px; height: 88px; border-radius: 26px; font-size: 30px; }
+.burrow-picture { margin: 4px 0 2px; }
 .pending-files { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .pending { position: relative; display: flex; align-items: center; gap: 8px; max-width: 260px; background: var(--surface); border: 1.5px solid var(--line); border-radius: 12px; padding: 6px 30px 6px 6px; overflow: hidden; box-shadow: var(--shadow); }
 .pending img, .pending .file-icon { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; flex: none; }
