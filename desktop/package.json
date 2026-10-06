@@ -18,6 +18,9 @@
   "dependencies": {
     "electron-updater": "^6.6.0"
   },
+  "optionalDependencies": {
+    "loopback-capture": "3.0.2"
+  },
   "devDependencies": {
     "electron": "^38.0.0",
     "electron-builder": "^26.0.0"
@@ -29,6 +32,7 @@
       "main.js",
       "preload.js",
       "updater.js",
+      "app-audio.js",
       "app/**/*"
     ],
     "win": {

@@ -2020,7 +2020,11 @@ async function joinVoice(channelId) {
       .on(LK.RoomEvent.TrackPublished, renderStage)
       .on(LK.RoomEvent.TrackUnpublished, renderStage)
       .on(LK.RoomEvent.LocalTrackPublished, renderStage)
-      .on(LK.RoomEvent.LocalTrackUnpublished, () => { renderStage(); renderVoiceBar(); })
+      .on(LK.RoomEvent.LocalTrackUnpublished, (pub) => {
+        if (pub.source === LK.Track.Source.ScreenShare) stopAppAudio(voice);
+        renderStage();
+        renderVoiceBar();
+      })
       .on(LK.RoomEvent.ParticipantConnected, renderStage)
       .on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
         state.speaking = new Set(speakers.map((p) => Number(p.identity)));
@@ -2068,6 +2072,7 @@ function leaveVoice(quiet) {
   state.speaking.clear();
   state.mutedInVoice.clear();
   state.sharing.clear();
+  stopAppAudio(voice);
   voice.room?.disconnect();
   clearTimeout(voice.crypto?.retry);
   clearTimeout(voice.crypto?.grace);
@@ -2128,6 +2133,8 @@ $('#stage-close').onclick = () => closeStage();
 
 const CAMERA_ICON = '<svg viewBox="0 0 24 24"><path d="M4 6h11a2 2 0 0 1 2 2v1.5l4-2.5v10l-4-2.5V16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z"/></svg>';
 const SCREEN_ICON = '<svg viewBox="0 0 24 24"><path d="M3 4h18a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-7v2h3v2H7v-2h3v-2H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Zm1 2v9h16V6H4Z"/></svg>';
+const FULLSCREEN_ICON = '<svg viewBox="0 0 24 24" class="enter"><path d="M4 4h6v2H6v4H4V4Zm10 0h6v6h-2V6h-4V4ZM4 14h2v4h4v2H4v-6Zm14 0h2v6h-6v-2h4v-4Z"/></svg>';
+const EXIT_FULLSCREEN_ICON = '<svg viewBox="0 0 24 24" class="exit"><path d="M8 4h2v6H4V8h4V4Zm6 0h2v4h4v2h-6V4ZM4 14h6v6H8v-4H4v-2Zm10 0h6v2h-4v4h-2v-6Z"/></svg>';
 const tiles = new Map(); // "identity:camera" or "identity:screen" -> { el, track, video }
 let focusKey = null;     // the tile shown big, if any
 
@@ -2159,23 +2166,122 @@ async function toggleCamera() {
   renderStage();
 }
 
+// How a screen share trades off when the connection or computer can't keep up. Both are 1080p.
+// Smooth keeps the frame rate up (games, video) and lets the picture soften; sharp keeps
+// text crisp and lets the frame rate drop. Picked in the desktop app's share picker.
+const SHARE_MODES = {
+  smooth: { encoding: { maxBitrate: 6_000_000, maxFramerate: 60, priority: 'high' }, hint: 'motion', degradation: 'maintain-framerate' },
+  sharp: { encoding: { maxBitrate: 5_000_000, maxFramerate: 30, priority: 'high' }, hint: 'detail', degradation: 'maintain-resolution' },
+};
+let shareMode = SHARE_MODES[store.get('shareMode')] ? store.get('shareMode') : 'smooth';
+
+/** Switches the screen being shared to the current mode. */
+async function applyShareMode(lp) {
+  const track = lp.getTrackPublication(window.LivekitClient.Track.Source.ScreenShare)?.track;
+  if (!track) return;
+  const mode = SHARE_MODES[shareMode];
+  track.mediaStreamTrack.contentHint = mode.hint;
+  await track.setDegradationPreference(mode.degradation);
+  const sender = track.sender;
+  if (!sender) return;
+  const params = sender.getParameters();
+  for (const enc of params.encodings ?? []) Object.assign(enc, { maxBitrate: mode.encoding.maxBitrate, maxFramerate: mode.encoding.maxFramerate });
+  await sender.setParameters(params);
+}
+
 async function toggleScreen() {
-  const lp = state.voice?.room?.localParticipant;
+  const voice = state.voice;
+  const lp = voice?.room?.localParticipant;
   if (!lp) return;
+  const starting = !lp.isScreenShareEnabled;
+  // The desktop app on Windows shares only the picked program's sound, and adds it itself.
+  const appAudio = window.burrowDesktop?.appAudio;
+  // Made right on the click, so it's allowed to play.
+  const audioContext = starting && appAudio ? new AudioContext({ sampleRate: 48000 }) : null;
   try {
+    if (!starting) stopAppAudio(voice);
+    const modeName = shareMode, mode = SHARE_MODES[modeName];
+    // Captured at up to 60 fps either way, so the mode can still change in the desktop picker.
     await lp.setScreenShareEnabled(
-      !lp.isScreenShareEnabled,
-      { audio: true, systemAudio: 'include', selfBrowserSurface: 'exclude', resolution: { width: 1920, height: 1080, frameRate: 30 } },
-      { screenShareEncoding: window.LivekitClient.ScreenSharePresets.h1080fps30.encoding },
+      starting,
+      { audio: !appAudio, systemAudio: 'include', selfBrowserSurface: 'exclude', contentHint: mode.hint, resolution: { width: 1920, height: 1080, frameRate: 60 } },
+      // One full-size copy only: a second, smaller one would cost the sharer frames.
+      { screenShareEncoding: mode.encoding, degradationPreference: mode.degradation, simulcast: false },
     );
+    if (starting && shareMode !== modeName) await applyShareMode(lp).catch((err) => console.warn('Share mode:', err));
+    if (starting && audioContext && lp.isScreenShareEnabled) {
+      await startAppAudio(voice, audioContext).catch((err) => {
+        console.warn('Program audio:', err);
+        if (voice.appAudio?.context === audioContext) stopAppAudio(voice);
+      });
+    }
   } catch (err) {
     // Closing the picker without choosing anything is not an error.
     const cancelled = err?.name === 'NotAllowedError' && !/system/i.test(err.message ?? '');
     if (!cancelled && err?.name !== 'AbortError') alert(mediaError(err, 'screen'));
+  } finally {
+    if (audioContext && voice.appAudio?.context !== audioContext) audioContext.close().catch(() => {});
   }
   renderVoiceBar();
   renderStage();
 }
+
+// The shared program's sound arrives from the desktop app in chunks, and plays into a
+// track of its own that goes out with the stream.
+let appAudioPort = null;
+window.burrowDesktop?.appAudio?.onChunk((chunk) => {
+  if (!appAudioPort) return;
+  const buffer = chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength ? chunk.buffer : chunk.slice().buffer;
+  appAudioPort.postMessage(buffer, [buffer]);
+});
+
+async function startAppAudio(voice, context) {
+  const LK = window.LivekitClient;
+  await context.audioWorklet.addModule('app-audio-worklet.js');
+  const node = new AudioWorkletNode(context, 'app-audio', { numberOfInputs: 0, outputChannelCount: [2] });
+  const out = context.createMediaStreamDestination();
+  out.channelCount = 2;
+  node.connect(out);
+  appAudioPort = node.port;
+  voice.appAudio = { context, track: out.stream.getAudioTracks()[0] };
+  const sharing = await window.burrowDesktop.appAudio.start();
+  const lp = voice.room?.localParticipant;
+  if (!sharing || voice.appAudio?.context !== context || state.voice !== voice || !lp?.isScreenShareEnabled) {
+    if (voice.appAudio?.context === context) stopAppAudio(voice);
+    return;
+  }
+  await lp.publishTrack(voice.appAudio.track, {
+    source: LK.Track.Source.ScreenShareAudio,
+    // Music quality in stereo; never cut out during quiet parts.
+    audioPreset: { maxBitrate: 128_000 }, forceStereo: true, dtx: false, red: false,
+  });
+}
+
+function stopAppAudio(voice) {
+  const a = voice?.appAudio;
+  if (!a) return;
+  voice.appAudio = null;
+  appAudioPort = null;
+  window.burrowDesktop?.appAudio?.stop();
+  const lp = voice.room?.localParticipant;
+  if (lp && [...lp.trackPublications.values()].some((pub) => pub.track?.mediaStreamTrack === a.track)) {
+    lp.unpublishTrack(a.track).catch(() => {});
+  }
+  a.track.stop();
+  a.context.close().catch(() => {});
+}
+
+/** Full screen for one tile. iPhones can only show a video itself full screen. */
+function toggleFullscreen(t) {
+  if (document.fullscreenElement) return document.exitFullscreen().catch(() => {});
+  if (t.el.requestFullscreen) return t.el.requestFullscreen().catch(() => {});
+  t.media?.webkitEnterFullscreen?.();
+}
+document.addEventListener('fullscreenchange', () => {
+  const el = document.fullscreenElement;
+  for (const t of tiles.values()) t.el.querySelector('.vtile-full').title = t.el === el ? 'Exit full screen (Esc)' : 'Full screen';
+  if (!el) renderStage(); // put the tiles back in order
+});
 
 function openStage() {
   if (!state.voice?.room) return;
@@ -2247,12 +2353,22 @@ function renderStage() {
     let t = tiles.get(w.key);
     if (!t) {
       const el = document.createElement('div');
-      el.onclick = () => { focusKey = focusKey === w.key ? null : w.key; renderStage(); };
-      el.ondblclick = () => (document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen?.());
+      el.onclick = () => {
+        if (document.fullscreenElement) return;
+        focusKey = focusKey === w.key ? null : w.key;
+        renderStage();
+      };
       const label = document.createElement('div');
       label.className = 'vtile-name';
-      el.append(label);
+      const full = document.createElement('button');
+      full.type = 'button';
+      full.className = 'vtile-full';
+      full.title = 'Full screen';
+      full.innerHTML = FULLSCREEN_ICON + EXIT_FULLSCREEN_ICON;
+      el.append(label, full);
       t = { el, label, track: undefined, media: null, audio: null };
+      full.onclick = (e) => { e.stopPropagation(); toggleFullscreen(t); };
+      el.ondblclick = () => toggleFullscreen(t);
       tiles.set(w.key, t);
     }
     if (t.track !== w.track) {
@@ -2281,12 +2397,22 @@ function renderStage() {
       + (w.mirror && w.track ? ' mirror' : '')
       + (w.kind === 'camera' && state.speaking.has(w.id) ? ' speaking' : '')
       + (focusKey === w.key ? ' focus' : '');
+    t.el.classList.toggle('no-video', !w.track);
     t.el.title = focusKey === w.key ? 'Click to shrink, double-click for full screen' : 'Click to make bigger, double-click for full screen';
   }
   const order = wanted.map((w) => tiles.get(w.key).el);
   const focused = order.find((el) => el.classList.contains('focus'));
-  $('#stage-grid').replaceChildren(...(focused ? [focused, ...order.filter((el) => el !== focused)] : order));
-  $('#stage-grid').classList.toggle('focused', !!focused);
+  const grid = $('#stage-grid');
+  const next = focused ? [focused, ...order.filter((el) => el !== focused)] : order;
+  // Moving a tile that's full screen would drop it out of full screen, so while one is,
+  // tiles only come and go; the order catches up afterwards.
+  if (document.fullscreenElement && grid.contains(document.fullscreenElement)) {
+    for (const el of [...grid.children]) if (!next.includes(el)) el.remove();
+    for (const el of next) if (el.parentNode !== grid) grid.append(el);
+  } else if (next.length !== grid.children.length || next.some((el, i) => grid.children[i] !== el)) {
+    grid.replaceChildren(...next);
+  }
+  grid.classList.toggle('focused', !!focused);
   $('#stage-grid').classList.toggle('solo', !!focused && order.length === 1);
 }
 
@@ -2350,9 +2476,15 @@ function streamAudioControl(userId, tile) {
 window.burrowDesktop?.onPickScreen((sources) => {
   let picked = false;
   modal(`<h2>Share your screen</h2>
-    <p class="muted small">Pick a whole screen or one window.</p>
+    <p class="muted small">Pick a whole screen or one window.${window.burrowDesktop.appAudio ? ' A window shares only its own sound.' : ''}</p>
+    <div class="kind-choice">
+      <label title="60 frames a second. Best for games and video."><input type="radio" name="share-mode" value="smooth" ${shareMode === 'smooth' ? 'checked' : ''} /> Smooth motion</label>
+      <label title="Keeps text crisp. Best for documents and code."><input type="radio" name="share-mode" value="sharp" ${shareMode === 'sharp' ? 'checked' : ''} /> Sharp text</label>
+    </div>
     <div class="screen-picker"></div>
     <div class="modal-row"><button class="btn secondary" data-close>Cancel</button></div>`);
+  // Remembered for next time too.
+  for (const r of document.querySelectorAll('#modal-card [name="share-mode"]')) r.onchange = () => { shareMode = r.value; store.set('shareMode', r.value); };
   const grid = $('#modal-card .screen-picker');
   for (const src of sources) {
     const b = document.createElement('button');

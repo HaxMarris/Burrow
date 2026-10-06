@@ -3,6 +3,10 @@
 const { app, BrowserWindow, shell, Menu, desktopCapturer, ipcMain } = require('electron');
 const path = require('node:path');
 const { startUpdateChecks } = require('./updater');
+const appAudio = require('./app-audio');
+
+// The page asks once, at start, whether it can share just one program's sound.
+ipcMain.on('app-audio-supported', (e) => { e.returnValue = appAudio.supported(); });
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -19,6 +23,20 @@ function createWindow() {
       sandbox: true,
       preload: path.join(__dirname, 'preload.js'),
     },
+  });
+
+  // What was last picked to share, so its sound can follow.
+  let pickedSource = null;
+  ipcMain.handle('app-audio-start', () => {
+    if (!pickedSource) return null;
+    return appAudio.start(pickedSource, (chunk) => { if (!win.isDestroyed()) win.webContents.send('app-audio-chunk', chunk); });
+  });
+  ipcMain.on('app-audio-stop', () => appAudio.stop());
+  win.webContents.on('did-start-navigation', (e) => { if (e.isMainFrame && !e.isSameDocument) appAudio.stop(); });
+  win.on('closed', () => {
+    appAudio.stop();
+    ipcMain.removeHandler('app-audio-start');
+    ipcMain.removeAllListeners('app-audio-stop');
   });
 
   // Screen sharing: list screens and windows, let the page show a picker, then hand over the choice.
@@ -44,8 +62,11 @@ function createWindow() {
     ipcMain.once('picked-screen', (_e, id) => {
       const source = sources.find((s) => s.id === id);
       if (!source) return cancel();
-      // Sharing the computer's sound only works on Windows.
-      callback({ video: source, ...(request.audioRequested && process.platform === 'win32' ? { audio: 'loopback' } : {}) });
+      pickedSource = source.id;
+      // Where the program's own sound can be shared, the page adds it itself. Otherwise Windows
+      // can share all of the computer's sound; other systems share none.
+      const loopback = request.audioRequested && process.platform === 'win32' && !appAudio.supported();
+      callback({ video: source, ...(loopback ? { audio: 'loopback' } : {}) });
     });
     win.webContents.send('pick-screen', sources.map((s) => ({ id: s.id, name: s.name, thumbnail: s.thumbnail.toDataURL() })));
   });
