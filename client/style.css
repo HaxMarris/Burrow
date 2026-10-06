@@ -632,7 +632,16 @@ a.btn { text-decoration: none; display: inline-block; }
 .vtile.speaking { box-shadow: 0 0 0 3px var(--online), var(--shadow); }
 .vtile-name { position: absolute; left: 8px; bottom: 8px; display: flex; align-items: center; gap: 6px; max-width: calc(100% - 16px); padding: 3px 9px; border-radius: 999px; background: rgba(12, 18, 14, .72); color: #f2f5ef; font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vtile-name svg { width: 14px; height: 14px; fill: currentColor; flex: none; }
-.vtile:fullscreen { border-radius: 0; background: #000; }
+.vtile:fullscreen { border-radius: 0; background: #000; box-shadow: none; cursor: default; }
+.vtile:fullscreen video { object-fit: contain; }
+.vtile-full { position: absolute; top: 8px; right: 8px; display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 50%; background: rgba(12, 18, 14, .72); color: #f2f5ef; opacity: 0; transition: opacity .15s; }
+.vtile-full:hover { background: rgba(12, 18, 14, .9); }
+.vtile-full svg { width: 18px; height: 18px; fill: currentColor; }
+.vtile-full .exit, .vtile:fullscreen .vtile-full .enter { display: none; }
+.vtile:fullscreen .vtile-full .exit { display: block; }
+.vtile:hover .vtile-full, .vtile-full:focus-visible { opacity: 1; }
+.vtile.no-video .vtile-full { display: none; }
+@media (hover: none) { .vtile-full { opacity: 1; } }
 .app.watching .member-pane { display: none; }
 .stream-audio { position: absolute; right: 8px; bottom: 8px; display: flex; align-items: center; gap: 6px; padding: 3px 10px 3px 4px; border-radius: 999px; background: rgba(12, 18, 14, .72); color: #f2f5ef; opacity: 0; transition: opacity .15s; }
 .vtile:hover .stream-audio, .stream-audio.muted, .stream-audio:focus-within { opacity: 1; }

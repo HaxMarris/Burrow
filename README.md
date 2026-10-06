@@ -111,7 +111,7 @@ Voice runs on [LiveKit](https://livekit.io), a media server that Docker Compose 
 Voice only is light enough for a Raspberry Pi 4 or 5. The limit is usually your home upload
 speed: LiveKit sends each speaker to every listener at about 40 kbps, so a room of 10 needs up to
 about 4 Mbps of upload. Video is much heavier: each camera is up to about 1.7 Mbps and each shared
-screen up to about 5 Mbps, per person watching. Video is only sent to people who have it open.
+screen up to about 6 Mbps (1080p at up to 60 fps), per person watching. Video is only sent to people who have it open.
 
 Voice and video are end-to-end encrypted: audio and video are scrambled on each person's device and only the others in the
 room can unscramble it, so LiveKit (and anyone who got into the server) only ever handles noise. A new
@@ -135,12 +135,16 @@ only for you).
 
 Turning on your camera or sharing your screen shows everyone's video in place of the chat. Others see
 a camera icon or a red **LIVE** tag next to your name, and open the video with the grid button in the
-voice bar (or by clicking the voice room). Click a video to make it bigger, double-click for full
-screen, and **Back to chat** to return. The member list hides while you watch. A shared screen with
+voice bar (or by clicking the voice room). Click a video to make it bigger, use the button in its
+corner (or double-click) for full screen, and **Back to chat** to return. The member list hides while you watch. A shared screen with
 sound starts muted; hover over it for its mute button and volume slider (0% to 200%, only for you).
 Burrow remembers what you pick for each person. In the desktop app you pick a screen or window from Burrow's
-own list; sharing your computer's sound along with it works on Windows, and in Chrome or Edge when
-sharing a browser tab. On a Mac, the first share asks for *Screen Recording* permission in System
+own list, and *Smooth motion* (60 fps, for games and video) or *Sharp text* (keeps text crisp, for
+documents and code); browsers share smooth motion. Sound: on Windows 10 (version 2004 or later) and 11,
+the desktop app shares only the sound of the window you picked, or everything except Burrow when you
+share a whole screen, so people don't hear themselves back. In Chrome or Edge, sharing a browser tab
+shares that tab's sound, and sharing a whole screen on Windows shares all of the computer's sound.
+Other cases share no sound. On a Mac, the first share asks for *Screen Recording* permission in System
 Settings, and Burrow may need a restart after you allow it.
 
 ### GIFs
@@ -242,7 +246,7 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, and burrow pictures.
 
-Ideas for later: text message encryption, picking the screen share quality (smooth for games or sharp for text).
+Ideas for later: text message encryption, sharing one program's sound on macOS.
 
 ## Alternatives
 
