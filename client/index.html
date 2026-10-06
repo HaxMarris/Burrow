@@ -163,12 +163,68 @@
           </button>
         </form>
       </div>
-      <section id="stage" class="stage hidden">
-        <header class="stage-head">
-          <h1 id="stage-title"></h1>
-          <button class="btn secondary" id="stage-close">Back to chat</button>
-        </header>
-        <div id="stage-grid" class="stage-grid"></div>
+      <!-- The Campfire: everyone in the voice room sitting around the fire, with its own chat.
+           "All video" swaps it for the video grid. -->
+      <section id="stage" class="stage hidden" data-show="fire">
+        <div class="fire-space">
+          <section class="fire-main" aria-label="Campfire">
+            <header class="stage-head">
+              <button class="icon-btn back-btn" id="fire-back" title="Back" aria-label="Back">
+                <svg viewBox="0 0 24 24"><path d="M15.4 5.4 14 4l-8 8 8 8 1.4-1.4L8.8 12l6.6-6.6Z"/></svg>
+              </button>
+              <div class="fire-title">
+                <h1 id="stage-title"></h1>
+                <span class="fire-sub"><span class="fire-lock hidden" id="fire-lock"><svg viewBox="0 0 24 24"><path d="M7 10V7a5 5 0 0 1 10 0v3h1a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h1Zm2 0h6V7a3 3 0 0 0-6 0v3Z"/></svg>Encrypted</span><span id="fire-count"></span></span>
+              </div>
+              <button class="btn secondary hidden" id="stage-video">All video</button>
+              <button class="icon-btn fire-chat-open" id="fire-chat-open" title="Show the fireside chat" aria-label="Show the fireside chat">
+                <svg viewBox="0 0 24 24"><path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9l-5 4V5a1 1 0 0 1 1-1Z"/></svg>
+                <span class="badge hidden" id="fire-chat-badge"></span>
+              </button>
+              <button class="btn secondary" id="stage-close">Back to chat</button>
+            </header>
+            <div class="fire-ring-wrap">
+              <div class="fire-ring" id="fire-ring">
+                <div class="fire-glow outer"></div>
+                <div class="fire-glow inner"></div>
+                <div class="fire-core"><svg viewBox="0 0 24 24"><path d="M12 2c.5 3 2.4 5 4.2 6.8A7.5 7.5 0 0 1 12 22a7.5 7.5 0 0 1-4.6-13.4c.2 1.6 1 2.9 2.3 3.6C9.6 8.5 10.4 5 12 2Z"/></svg></div>
+              </div>
+            </div>
+            <button class="fire-chat-bar" id="fire-chat-bar">
+              <svg viewBox="0 0 24 24"><path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9l-5 4V5a1 1 0 0 1 1-1Z"/></svg>
+              <span class="fire-chat-bar-text"><b>Fireside chat</b><span id="fire-chat-last">Only people at the fire see it</span></span>
+              <span class="badge hidden" id="fire-chat-bar-badge"></span>
+            </button>
+            <div class="fire-controls">
+              <span class="fc"><button class="fire-btn" id="fire-mute"></button><span>Mute</span></span>
+              <span class="fc"><button class="fire-btn" id="fire-deafen"></button><span>Deafen</span></span>
+              <span class="fc"><button class="fire-btn" id="fire-camera"></button><span>Camera</span></span>
+              <span class="fc share"><button class="fire-btn" id="fire-screen"></button><span>Share</span></span>
+              <span class="fc"><button class="fire-btn" id="fire-settings" title="Microphone, speakers and camera" aria-label="Voice and video settings"></button><span>Settings</span></span>
+              <span class="fc"><button class="fire-btn leave" id="fire-leave" title="Leave the fire" aria-label="Leave the fire"></button><span>Leave</span></span>
+            </div>
+          </section>
+          <aside class="fire-chat" id="fire-chat" aria-label="Fireside chat">
+            <header class="fire-chat-head">
+              <b>Fireside chat</b>
+              <button class="icon-btn" id="fire-chat-close" title="Hide the fireside chat" aria-label="Hide the fireside chat">×</button>
+            </header>
+            <div class="fire-chat-list" id="fire-chat-list">
+              <div class="fire-chat-note">Only people at the fire see this, and it's gone when the fire goes out.</div>
+            </div>
+            <form class="fire-chat-form" id="fire-chat-form">
+              <input id="fire-chat-input" maxlength="1000" autocomplete="off" placeholder="Say something by the fire" aria-label="Say something by the fire" />
+              <button type="submit" class="send" title="Send" aria-label="Send"><svg viewBox="0 0 24 24"><path d="M4 12 20 4l-4 16-4-6-8-2Z"/></svg></button>
+            </form>
+          </aside>
+        </div>
+        <div class="video-view">
+          <header class="stage-head">
+            <h1 id="video-title"></h1>
+            <button class="btn secondary" id="video-back">Back to the fire</button>
+          </header>
+          <div id="stage-grid" class="stage-grid"></div>
+        </div>
       </section>
       <div id="empty-state" class="empty-state hidden">
         <div class="empty-illustration"><span class="logo-mark big"></span></div>

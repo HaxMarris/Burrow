@@ -38,7 +38,10 @@ const state = {
   speaking: new Set(),      // user ids talking right now in our voice room
   mutedInVoice: new Set(),  // user ids muted in our voice room
   sharing: new Map(),       // user id -> { camera, screen } in our voice room
-  stageOpen: false,         // showing video instead of the chat
+  stageOpen: false,         // showing the Campfire (or its video) instead of the chat
+  stageShow: 'fire',        // 'fire': everyone around the fire; 'video': the video grid
+  fireside: { channelId: null, messages: [], unread: 0 }, // the voice room's own chat, while you're in it
+  firesideOpen: false,      // on narrow screens the fireside chat opens over the fire
   avatars: new Map(),       // user id -> profile picture path (or null), kept current by user_updated events
 };
 
@@ -325,6 +328,19 @@ function handleEvent(ev) {
       for (const s of state.servers.values())
         for (const c of s.channels) if (c.id === ev.channelId) Object.assign(c, { voiceUsers: ev.userIds, voiceMuted: ev.muted, voiceDeafened: ev.deafened });
       renderChannels();
+      break;
+    case 'fireside_history':
+      if (state.voice?.channelId !== ev.channelId) break;
+      state.fireside = { channelId: ev.channelId, messages: ev.messages, unread: 0 };
+      renderFireside();
+      break;
+    case 'fireside':
+      if (state.voice?.channelId !== ev.channelId) break;
+      if (state.fireside.channelId !== ev.channelId) state.fireside = { channelId: ev.channelId, messages: [], unread: 0 };
+      state.fireside.messages.push(ev.message);
+      if (state.fireside.messages.length > 100) state.fireside.messages.shift();
+      if (ev.message.userId !== state.me.id && !firesideVisible()) state.fireside.unread++;
+      renderFireside({ added: ev.message });
       break;
     case 'error':
       console.warn('Server error:', ev.error);
@@ -661,8 +677,8 @@ function renderChannels() {
       ? `<div class="voice-room-name"><span class="fire-badge">${FIRE_ICON}</span><span class="fire-text"><span class="room-name">${escapeHtml(c.name)}</span><span class="fire-sub">${escapeHtml(sub)}</span></span>${c.private ? LOCK_ICON : ''}</div>`
       : `<div class="voice-room-name">${FIRE_ICON.replace('<svg', '<svg class="voice-icon"')}<span class="room-name">${escapeHtml(c.name)}</span>${c.private ? LOCK_ICON : ''}</div>`;
     if (can(s, 'rooms')) li.firstChild.append(roomSettingsButton(c));
-    li.title = joined ? 'Show video' : 'Join voice';
-    li.onclick = () => (joined ? openStage() : joinVoice(c.id));
+    li.title = joined ? 'Open the fire' : 'Join voice';
+    li.onclick = () => (joined ? goToVoice() : joinVoice(c.id));
     const people = ids.map((id) => {
       const name = s.members.find((m) => m.id === id)?.username ?? '?';
       const row = document.createElement('div');
@@ -707,6 +723,7 @@ function renderChannels() {
   $('#voice-list').replaceChildren(...voiceRooms.slice(1));
   $('#voice-section').classList.toggle('hidden', voiceRooms.length < 2);
   renderVoicePlaces();
+  renderFire();
 }
 
 async function selectChannel(id) {
@@ -2134,9 +2151,11 @@ async function joinVoice(channelId) {
   leaveVoice(true);
   const voice = { channelId, room: null, muted: false, deafened: false };
   state.voice = voice;
+  state.fireside = { channelId, messages: [], unread: 0 };
   // Made now, while the click still counts, or some browsers start it paused.
   if (wantsMicProcessor()) voice.micCtx = newMicContext();
   renderVoiceBar('Connecting…');
+  goToVoice(); // sit down at the fire
   try {
     const LK = await loadLivekit();
     const { url, token } = await api(`/api/channels/${channelId}/voice`, { method: 'POST' });
@@ -2185,6 +2204,7 @@ async function joinVoice(channelId) {
         renderVoiceBar();
       })
       .on(LK.RoomEvent.ParticipantConnected, renderStage)
+      .on(LK.RoomEvent.TrackSubscribed, renderFire)
       .on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
         state.speaking = new Set(speakers.map((p) => Number(p.identity)));
         renderChannels();
@@ -2233,6 +2253,9 @@ function leaveVoice(quiet) {
   state.speaking.clear();
   state.mutedInVoice.clear();
   state.sharing.clear();
+  state.fireside = { channelId: null, messages: [], unread: 0 };
+  state.firesideOpen = false;
+  renderFireside();
   stopAppAudio(voice);
   voice.room?.disconnect();
   clearTimeout(voice.crypto?.retry);
@@ -2315,6 +2338,17 @@ function renderVoiceBar(status) {
   $('#voice-screen').classList.toggle('on', screen);
   $('#voice-screen').title = screen ? 'Stop sharing your screen' : 'Share your screen';
   for (const id of ['#voice-camera', '#voice-screen', '#voice-watch']) $(id).disabled = !voice.room || !!status;
+  // The same buttons under the fire.
+  for (const name of ['mute', 'deafen', 'camera', 'screen']) {
+    const from = $(`#voice-${name}`), to = $(`#fire-${name}`);
+    to.innerHTML = from.innerHTML;
+    to.title = from.title;
+    to.setAttribute('aria-label', from.title);
+    to.classList.toggle('on', from.classList.contains('on'));
+    to.disabled = from.disabled;
+  }
+  $('#fire-lock').classList.toggle('hidden', !!status || !sealed);
+  renderFire(status);
 }
 
 const HEADPHONES_ON = '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-9 9v6a3 3 0 0 0 3 3h2v-8H5v-1a7 7 0 0 1 14 0v1h-3v8h2a3 3 0 0 0 3-3v-6a9 9 0 0 0-9-9Z"/></svg>';
@@ -2327,8 +2361,21 @@ $('#voice-settings').onclick = openVoiceSettings;
 $('#voice-leave').onclick = () => leaveVoice();
 $('#voice-camera').onclick = toggleCamera;
 $('#voice-screen').onclick = toggleScreen;
-$('#voice-watch').onclick = () => (state.stageOpen ? closeStage() : openStage());
+$('#voice-watch').onclick = () => (state.stageOpen ? closeStage() : goToVoice());
 $('#stage-close').onclick = () => closeStage();
+$('#fire-back').onclick = () => { closeStage(); showView('rooms'); };
+$('#fire-mute').onclick = toggleMute;
+$('#fire-deafen').onclick = toggleDeafen;
+$('#fire-camera').onclick = toggleCamera;
+$('#fire-screen').onclick = toggleScreen;
+$('#fire-settings').onclick = openVoiceSettings;
+$('#fire-settings').innerHTML = $('#voice-settings').innerHTML;
+$('#fire-leave').onclick = () => leaveVoice();
+$('#fire-leave').innerHTML = $('#voice-leave').innerHTML;
+$('#stage-video').onclick = () => openVideo(null);
+$('#video-back').onclick = () => { state.stageShow = 'fire'; focusKey = null; renderStage(); };
+// Phones and tablets can't share their screen from a browser.
+if (!navigator.mediaDevices?.getDisplayMedia && !window.burrowDesktop) $('#fire-screen').parentElement.classList.add('hidden');
 
 // ---------------------------------------------------------------- camera and screen sharing
 //
@@ -2362,7 +2409,7 @@ async function toggleCamera() {
   if (!lp) return;
   try {
     await lp.setCameraEnabled(!lp.isCameraEnabled, { resolution: window.LivekitClient.VideoPresets.h720.resolution });
-    if (lp.isCameraEnabled) openStage(); // so you can see yourself
+    if (lp.isCameraEnabled && !state.stageOpen) goToVoice(); // so you can see yourself
   } catch (err) {
     alert(mediaError(err, 'camera'));
   }
@@ -2488,21 +2535,33 @@ document.addEventListener('fullscreenchange', () => {
 });
 
 function openStage() {
-  if (!state.voice?.room) return;
+  if (!state.voice) return;
+  if (!state.stageOpen) state.stageShow = 'fire';
   state.stageOpen = true;
   $('#stage').classList.remove('hidden');
   $('#app').classList.add('watching');
   renderVoicePlaces();
   renderStage();
+  renderFireside();
 }
 
 function closeStage() {
   if (!state.stageOpen) return;
   state.stageOpen = false;
   focusKey = null;
+  state.firesideOpen = false;
   $('#stage').classList.add('hidden');
   $('#app').classList.remove('watching');
   renderVoicePlaces();
+  renderStage();
+}
+
+/** Swaps the fire for the video grid, with one tile ("id:screen" or "id:camera") shown big. */
+function openVideo(key) {
+  if (!state.voice?.room) return;
+  if (!state.stageOpen) openStage();
+  state.stageShow = 'video';
+  focusKey = key;
   renderStage();
 }
 
@@ -2525,17 +2584,19 @@ function renderStage() {
   const others = [...sharing.keys()].some((id) => id !== state.me?.id);
   $('#voice-watch').classList.toggle('has-video', others && !state.stageOpen);
   $('#voice-watch').classList.toggle('on', state.stageOpen);
-  $('#voice-watch').title = state.stageOpen ? 'Back to chat' : 'Show video';
+  $('#voice-watch').title = state.stageOpen ? 'Back to chat' : 'Open the fire';
+  $('#stage').dataset.show = state.stageShow;
+  $('#stage-video').classList.toggle('hidden', !sharing.size);
   if (JSON.stringify([...sharing]) !== JSON.stringify([...state.sharing])) {
     state.sharing = sharing;
     renderChannels();
   }
 
-  // Off stage, let go of every video so none of it is downloaded.
+  // Off the video grid, let go of its video so none of it is downloaded. (The fire shows cameras itself.)
   const wanted = [];
-  if (state.stageOpen && room) {
+  if (state.stageOpen && state.stageShow === 'video' && room) {
     const ch = [...state.servers.values()].flatMap((s) => s.channels).find((c) => c.id === state.voice.channelId);
-    $('#stage-title').textContent = ch?.name ?? 'Voice';
+    $('#video-title').textContent = ch?.name ?? 'Voice';
     for (const p of people) {
       const id = Number(p.identity);
       const me = p === room.localParticipant;
@@ -2618,7 +2679,207 @@ function renderStage() {
   }
   grid.classList.toggle('focused', !!focused);
   $('#stage-grid').classList.toggle('solo', !!focused && order.length === 1);
+  renderFire();
 }
+
+// ---------------------------------------------------------------- the Campfire
+//
+// Everyone in the voice room sits in a circle around the fire: who's talking, muted or
+// deafened, their camera if it's on, and a way to watch anyone sharing their screen.
+// Next to it is the fireside chat, which only the people at the fire see.
+
+const seats = new Map(); // user id -> { el, face, track }
+
+function clearSeats() {
+  for (const seat of seats.values()) if (seat.track && seat.face) seat.track.detach(seat.face);
+  seats.clear();
+  $('#fire-ring').querySelectorAll('.seat').forEach((el) => el.remove());
+}
+
+function renderFire(status) {
+  const voice = state.voice;
+  if (!voice || !state.stageOpen || state.stageShow !== 'fire') return clearSeats();
+  const LK = window.LivekitClient;
+  const room = voice.room;
+  const ch = [...state.servers.values()].flatMap((s) => s.channels).find((c) => c.id === voice.channelId);
+  const ids = [...(ch?.voiceUsers ?? [])];
+  if (!ids.includes(state.me.id)) ids.push(state.me.id);
+  const s = [...state.servers.values()].find((x) => x.channels.includes(ch));
+  $('#stage-title').textContent = ch && s && !isDm(s) ? `${s.name}'s ${ch.name}` : ch?.name ?? 'Campfire';
+  const streamer = ids.find((id) => id !== state.me.id && state.sharing.get(id)?.screen);
+  $('#fire-count').textContent = (typeof status === 'string' ? status : !room ? 'Connecting…' : `${ids.length} gathered`)
+    + (streamer ? ` · ${nameOf(streamer)} is sharing` : '');
+
+  // Seats are spread evenly around the fire, starting at the top. A small fire keeps a few open seats.
+  const total = Math.max(5, ids.length);
+  const ring = $('#fire-ring');
+  ring.classList.toggle('crowded', total > 8);
+  // How far from the fire the seats are, as a share of the circle's width and height (narrower on phones).
+  const css = getComputedStyle(ring);
+  const rx = Number(css.getPropertyValue('--rx')) || 41, ry = Number(css.getPropertyValue('--ry')) || 40;
+  const place = (el, i) => {
+    const a = (-90 + (i * 360) / total) * (Math.PI / 180);
+    el.style.left = `${50 + rx * Math.cos(a)}%`;
+    el.style.top = `${50 + ry * Math.sin(a)}%`;
+  };
+
+  for (const [id, seat] of seats) {
+    if (ids.includes(id)) continue;
+    if (seat.track && seat.face) seat.track.detach(seat.face);
+    seat.el.remove();
+    seats.delete(id);
+  }
+  ids.forEach((id, i) => {
+    const me = id === state.me.id;
+    const name = nameOf(id, me ? state.me.username : '?');
+    let seat = seats.get(id);
+    if (!seat) {
+      const el = document.createElement('div');
+      el.innerHTML = '<span class="seat-face-wrap"></span><span class="seat-name"></span><span class="seat-status"></span>';
+      seat = { el, face: null, track: null };
+      seats.set(id, seat);
+      ring.append(el);
+    }
+    place(seat.el, i);
+    const participant = !room ? null : me ? room.localParticipant : room.remoteParticipants.get(String(id));
+    const camPub = participant && LK ? participant.getTrackPublication(LK.Track.Source.Camera) : null;
+    const camTrack = camPub && !camPub.isMuted ? camPub.track ?? null : null;
+    const sharing = state.sharing.get(id);
+    const deafened = ch?.voiceDeafened?.includes(id);
+    const muted = state.mutedInVoice.has(id) || ch?.voiceMuted?.includes(id);
+    const speaking = state.speaking.has(id) && !muted;
+
+    // The face: their camera if it's on, else their picture. Clicking someone else changes how loud they are.
+    if (seat.track !== camTrack || !seat.face) {
+      if (seat.track && seat.face) seat.track.detach(seat.face);
+      const wrap = seat.el.querySelector('.seat-face-wrap');
+      wrap.replaceChildren();
+      const button = document.createElement(me && !camTrack ? 'span' : 'button');
+      button.className = 'seat-face';
+      if (camTrack) {
+        const video = camTrack.attach();
+        video.muted = true;
+        button.append(video);
+        button.classList.add('video');
+        button.onclick = (e) => { e.stopPropagation(); openVideo(`${id}:camera`); };
+        button.title = me ? 'See your camera bigger' : `See ${name}'s camera bigger`;
+      } else {
+        const av = document.createElement('span');
+        av.className = 'avatar';
+        setAvatar(av, name, avatarOf(id));
+        button.append(av);
+        if (!me) {
+          button.onclick = (e) => { e.stopPropagation(); openVolume(button, id, name); };
+          button.title = `${name}'s volume`;
+        }
+      }
+      wrap.append(button);
+      seat.face = camTrack ? button.firstChild : null;
+      seat.track = camTrack;
+      if (!camTrack) seat.face = button;
+    }
+    const wrap = seat.el.querySelector('.seat-face-wrap');
+    wrap.querySelector('.seat-live')?.remove();
+    if (sharing?.screen) wrap.insertAdjacentHTML('beforeend', '<span class="seat-live">LIVE</span>');
+    seat.el.className = 'seat' + (me ? ' me' : '') + (speaking ? ' speaking' : '') + (camTrack ? ' has-video' : '');
+    seat.el.querySelector('.seat-name').textContent = me ? `${name} (you)` : name;
+    const v = me ? 1 : volumeFor(id);
+    const statusText = deafened ? 'Deafened' : muted ? 'Muted' : speaking ? 'Talking' : camTrack ? 'Camera on' : v !== 1 ? `${Math.round(v * 100)}% volume` : '';
+    const statusEl = seat.el.querySelector('.seat-status');
+    statusEl.textContent = statusText;
+    statusEl.className = 'seat-status' + (speaking ? ' talking' : '');
+    let watch = seat.el.querySelector('.seat-watch');
+    if (sharing?.screen && !watch) {
+      watch = document.createElement('button');
+      watch.className = 'seat-watch';
+      watch.innerHTML = `${SCREEN_ICON}<span></span>`;
+      watch.onclick = (e) => { e.stopPropagation(); openVideo(`${id}:screen`); };
+      seat.el.append(watch);
+    } else if (!sharing?.screen && watch) watch.remove();
+    if (watch) watch.lastChild.textContent = me ? 'Your screen' : 'Watch screen';
+  });
+
+  // Open seats fill the rest of a small circle.
+  ring.querySelectorAll('.seat.open').forEach((el) => el.remove());
+  for (let i = ids.length; i < total; i++) {
+    const el = document.createElement('div');
+    el.className = 'seat open';
+    el.innerHTML = '<span class="seat-face"></span><span class="seat-status">Open seat</span>';
+    place(el, i);
+    ring.append(el);
+  }
+}
+
+// The fireside chat is in view: docked beside the fire on a wide screen, or opened over it.
+const fireChatDocked = () => matchMedia('(min-width: 1100px)').matches;
+let firesideHidden = store.get('firesideHidden') === '1';
+const firesideVisible = () => state.stageOpen && state.stageShow === 'fire' && !document.hidden
+  && (fireChatDocked() ? !firesideHidden : state.firesideOpen);
+
+function renderFireside({ added } = {}) {
+  const space = $('#stage .fire-space');
+  space.classList.toggle('chat-hidden', firesideHidden);
+  space.classList.toggle('chat-open', state.firesideOpen);
+  if (firesideVisible()) state.fireside.unread = 0;
+  const { messages, unread } = state.fireside;
+  for (const id of ['#fire-chat-badge', '#fire-chat-bar-badge']) {
+    $(id).textContent = unread > 9 ? '9+' : unread;
+    $(id).classList.toggle('hidden', !unread);
+  }
+  $('#campfire-chip').classList.toggle('unread', unread > 0);
+  const last = messages.at(-1);
+  $('#fire-chat-last').textContent = last ? `${last.author}: ${last.content}` : 'Only people at the fire see it';
+
+  const list = $('#fire-chat-list');
+  const stick = list.scrollHeight - list.scrollTop - list.clientHeight < 60 || added?.userId === state.me?.id;
+  const line = (m, prev) => {
+    const el = document.createElement('div');
+    el.className = 'fire-msg' + (m.userId === state.me?.id ? ' mine' : '');
+    // Messages from the same person close together share one name.
+    if (!prev || prev.userId !== m.userId || m.createdAt - prev.createdAt > 5 * 60_000) {
+      const who = document.createElement('b');
+      who.textContent = nameOf(m.userId, m.author);
+      const srv = fireServer();
+      const color = srv && roleColor(srv, m.userId);
+      if (color) who.style.color = color;
+      el.append(who);
+    } else el.classList.add('more');
+    const text = document.createElement('div');
+    text.textContent = m.content;
+    el.append(text);
+    el.title = new Date(m.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return el;
+  };
+  if (added && list.querySelectorAll('.fire-msg').length === messages.length - 1) {
+    list.append(line(added, messages.at(-2)));
+  } else {
+    list.replaceChildren(list.firstElementChild, ...messages.map((m, i) => line(m, messages[i - 1])));
+  }
+  if (stick) list.scrollTop = list.scrollHeight;
+}
+
+/** The burrow whose fire you're at. */
+const fireServer = () => [...state.servers.values()].find((s) => s.channels.some((c) => c.id === state.voice?.channelId));
+
+$('#fire-chat-form').onsubmit = (e) => {
+  e.preventDefault();
+  const content = $('#fire-chat-input').value.trim();
+  if (!content || state.ws?.readyState !== WebSocket.OPEN || !state.voice) return;
+  state.ws.send(JSON.stringify({ type: 'fireside_send', content }));
+  $('#fire-chat-input').value = '';
+};
+const showFireside = (show) => {
+  if (fireChatDocked()) {
+    firesideHidden = !show;
+    store.set('firesideHidden', show ? null : '1');
+  } else state.firesideOpen = show;
+  renderFireside();
+  if (show) $('#fire-chat-input').focus();
+};
+$('#fire-chat-open').onclick = () => showFireside(true);
+$('#fire-chat-bar').onclick = () => showFireside(true);
+$('#fire-chat-close').onclick = () => showFireside(false);
+document.addEventListener('visibilitychange', () => { if (state.voice) renderFireside(); });
 
 // How loud someone's shared screen is, for you only: 0% (muted) to 200%. Kept on this device.
 // Streams start muted until you turn them up; whatever you pick for someone is remembered.
@@ -3640,6 +3901,7 @@ function goToVoice() {
   const s = [...state.servers.values()].find((x) => x.channels.some((c) => c.id === state.voice.channelId));
   if (s && s.id !== state.serverId) selectServer(s.id);
   showView('chat');
+  if (state.stageOpen && state.stageShow === 'video') { state.stageShow = 'fire'; focusKey = null; renderStage(); }
   openStage();
 }
 $('#campfire-chip').onclick = goToVoice;
@@ -3687,7 +3949,7 @@ function openPerson(s, m) {
     r.onchange = () => renderChannels();
     show();
   }
-  $('#person-watch')?.addEventListener('click', () => { closeModal(); goToVoice(); });
+  $('#person-watch')?.addEventListener('click', () => { closeModal(); goToVoice(); openVideo(`${m.id}:${sharing?.screen ? 'screen' : 'camera'}`); });
   $('#person-dm')?.addEventListener('click', () => openDm(m.id));
   $('#person-mention')?.addEventListener('click', () => {
     closeModal();
