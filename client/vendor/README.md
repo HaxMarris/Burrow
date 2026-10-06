@@ -7,3 +7,8 @@
   (voice encryption), wrapped as a JavaScript string so the app can start it from a Blob. Regenerate
   it from a new version with:
   `node -e "const s=require('fs').readFileSync('livekit-client.e2ee.worker.js','utf8'); console.log('window.LivekitE2EEWorkerSource = ' + JSON.stringify(s) + ';')"`
+- `noise/`: noise filters from [@sapphi-red/web-noise-suppressor](https://github.com/sapphi-red/web-noise-suppressor)
+  0.4.1 (MIT): `rnnoise.worklet.js` + `rnnoise.wasm` ([RNNoise](https://github.com/xiph/rnnoise), BSD; the
+  package's `rnnoise_simd.wasm`) and `gtcrn.worklet.js` + `gtcrn.wasm` ([GTCRN](https://github.com/Xiaobin-Rong/gtcrn),
+  MIT). Copied from the package's `dist/` folder (`<model>/workletProcessor.js`, source map reference removed).
+  Loaded only when someone uses the Strong or Strongest noise isolation.

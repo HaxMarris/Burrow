@@ -571,6 +571,23 @@ a.btn { text-decoration: none; display: inline-block; }
 .modal-card select:focus { border-color: var(--moss); }
 .voice-lock { color: var(--online); padding: 6px; }
 .voice-lock svg { width: 16px; height: 16px; fill: currentColor; }
+#voice-deafen.on { color: var(--berry); background: rgba(178, 67, 61, .12); }
+#voice-settings svg { width: 18px; height: 18px; }
+
+/* ---------- voice and video settings ---------- */
+.voice-settings { display: flex; flex-direction: column; gap: 10px; }
+.voice-settings select { width: 100%; text-overflow: ellipsis; }
+.voice-settings input[type="range"] { width: 100%; accent-color: var(--accent); padding: 0; background: none; border: none; box-shadow: none; }
+.voice-settings .range-value { float: right; color: var(--accent); font-weight: 800; font-variant-numeric: tabular-nums; }
+.voice-settings label:has(.range-value) { display: block; }
+.voice-settings label:has(.range-value) input { display: block; margin-top: 6px; }
+.voice-settings .link-btn { align-self: flex-start; font-size: 14px; }
+.mic-test { display: flex; align-items: center; gap: 10px; }
+.mic-test .btn { padding: 6px 14px; flex: none; }
+.level-meter { flex: 1; height: 10px; border-radius: 5px; background: var(--surface-2); overflow: hidden; }
+.level-meter span { display: block; height: 100%; width: 0; border-radius: 5px; background: var(--online); transition: width .06s linear; }
+.cam-preview { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 12px; background: #000; transform: scaleX(-1); }
+.cam-preview.hidden { display: none; }
 
 /* ---------- video: camera and screen sharing ---------- */
 .stage { position: absolute; inset: 0; z-index: 4; background: var(--bg); display: flex; flex-direction: column; min-height: 0; }
