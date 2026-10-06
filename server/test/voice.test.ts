@@ -137,6 +137,50 @@ test('voice rooms', async () => {
   maxWs.ws.close();
 });
 
+test('fireside chat is only for the people at the fire, and goes out with the fire', async () => {
+  const base = bases[0];
+  const reg = async (username: string) => (await call(base, '/api/register', { body: { username, password: 'password1' } })).data;
+  const [ash, bo, cy] = [await reg('ash'), await reg('bo'), await reg('cy')];
+  const server = (await call(base, '/api/servers', { body: { name: 'Fireside' }, token: ash.token })).data;
+  for (const u of [bo, cy]) await call(base, '/api/join', { body: { inviteCode: server.inviteCode }, token: u.token });
+  const room = (await call(base, `/api/servers/${server.id}/channels`, { body: { name: 'Campfire', kind: 'voice' }, token: ash.token }))
+    .data.channels.find((c: any) => c.kind === 'voice');
+  const [a, b, c] = [socket(base, ash.token), socket(base, bo.token), socket(base, cy.token)];
+  for (const s of [a, b, c]) await s.next((e) => e.type === 'ready');
+
+  // Not at the fire: nothing to say there.
+  a.ws.send(JSON.stringify({ type: 'fireside_send', content: 'hello?' }));
+  await a.next((e) => e.type === 'error');
+
+  a.ws.send(JSON.stringify({ type: 'voice_join', channelId: room.id }));
+  assert.deepEqual(await a.next((e) => e.type === 'fireside_history'), { type: 'fireside_history', channelId: room.id, messages: [] });
+  b.ws.send(JSON.stringify({ type: 'voice_join', channelId: room.id }));
+  await b.next((e) => e.type === 'fireside_history');
+  a.ws.send(JSON.stringify({ type: 'fireside_send', content: '  that jump was not my fault  ' }));
+  const heard = await b.next((e) => e.type === 'fireside');
+  assert.equal(heard.channelId, room.id);
+  assert.deepEqual([heard.message.userId, heard.message.author, heard.message.content], [ash.user.id, 'ash', 'that jump was not my fault']);
+  await a.next((e) => e.type === 'fireside'); // the sender gets it back too
+  a.ws.send(JSON.stringify({ type: 'fireside_send', content: '   ' }));
+  await a.next((e) => e.type === 'error');
+  a.ws.send(JSON.stringify({ type: 'fireside_send', content: 'x'.repeat(1001) }));
+  await a.next((e) => e.type === 'error');
+
+  // Someone in the burrow but not at the fire never sees it, until they sit down.
+  await new Promise((r) => setTimeout(r, 100));
+  await assert.rejects(c.next((e) => e.type === 'fireside'));
+  c.ws.send(JSON.stringify({ type: 'voice_join', channelId: room.id }));
+  const caughtUp = await c.next((e) => e.type === 'fireside_history');
+  assert.deepEqual(caughtUp.messages.map((m: any) => m.content), ['that jump was not my fault']);
+
+  // Once everyone has left, the fire's chat is gone.
+  for (const s of [a, b, c]) s.ws.send(JSON.stringify({ type: 'voice_leave' }));
+  await a.next((e) => e.type === 'voice_state' && e.userIds.length === 0);
+  b.ws.send(JSON.stringify({ type: 'voice_join', channelId: room.id }));
+  assert.deepEqual((await b.next((e) => e.type === 'fireside_history')).messages, []);
+  for (const s of [a, b, c]) s.ws.close();
+});
+
 test('removing, leaving or deleting disconnects people from LiveKit', async () => {
   const base = bases[0];
   const reg = async (username: string) => (await call(base, '/api/register', { body: { username, password: 'password1' } })).data;

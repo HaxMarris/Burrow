@@ -344,6 +344,11 @@ export function createApp(opts: AppOptions): Server {
     const flagged = (flag: 'muted' | 'deafened') => userIds.filter((u) => voiceFlags.get(u)?.[flag]);
     return { voiceUsers: userIds, voiceMuted: flagged('muted'), voiceDeafened: flagged('deafened') };
   };
+  // Fireside chat: text for the people in a voice room, while they're there. It's kept in memory
+  // only, sent to whoever is in the room, and gone once the last person leaves.
+  const fireside = new Map<number, Json[]>(); // voice channel id -> recent messages, oldest first
+  let firesideId = 0;
+  const FIRESIDE_KEEP = 100;
   const voiceStateEvent = (channelId: number) => {
     const { voiceUsers, voiceMuted, voiceDeafened } = voiceSummary(channelId);
     return { type: 'voice_state', channelId, userIds: voiceUsers, muted: voiceMuted, deafened: voiceDeafened };
@@ -374,12 +379,14 @@ export function createApp(opts: AppOptions): Server {
     if (prev === undefined && channelId === null) return;
     if (prev !== undefined) {
       inVoice.delete(userId);
+      if (!usersInVoice(prev).length) fireside.delete(prev);
       const old = channelById(prev);
       if (old) broadcastToChannel(old, voiceStateEvent(old.id));
     }
     if (channelId !== null) {
       const channel = channelById(channelId)!;
       inVoice.set(userId, channelId);
+      sendTo([userId], { type: 'fireside_history', channelId, messages: fireside.get(channelId) ?? [] });
       broadcastToChannel(channel, voiceStateEvent(channelId));
     }
   };
@@ -1390,6 +1397,18 @@ export function createApp(opts: AppOptions): Server {
           if (channelId !== undefined) setVoice(user.id, channelId, flagsFrom(msg));
         } else if (msg.type === 'voice_leave') {
           setVoice(user.id, null);
+        } else if (msg.type === 'fireside_send') {
+          const channelId = inVoice.get(user.id);
+          if (channelId === undefined) throw new HttpError(400, 'Join the fire to talk there');
+          const content = typeof msg.content === 'string' ? msg.content.trim() : '';
+          if (!content) throw new HttpError(400, 'Message is empty');
+          if (content.length > 1000) throw new HttpError(400, 'Message is too long');
+          const message = { id: ++firesideId, userId: user.id, author: user.username, content, createdAt: Date.now() };
+          const list = fireside.get(channelId) ?? [];
+          list.push(message);
+          if (list.length > FIRESIDE_KEEP) list.shift();
+          fireside.set(channelId, list);
+          sendTo(usersInVoice(channelId), { type: 'fireside', channelId, message });
         } else if (msg.type === 'typing') {
           const channel = channelById(Number(msg.channelId));
           if (channel && canSee(channel, user.id))
