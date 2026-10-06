@@ -48,7 +48,8 @@ const MAX_ROLES = 30;
 const SESSION_IDLE_MS = 30 * 24 * 60 * 60 * 1000; // logins unused for 30 days expire
 const APP_CSP = [
   "default-src 'self'",
-  "script-src 'self'",
+  // Noise suppression runs as WebAssembly.
+  "script-src 'self' 'wasm-unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "media-src 'self' blob:",
@@ -100,6 +101,7 @@ const MIME: Record<string, string> = {
   '.png': 'image/png',
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
+  '.wasm': 'application/wasm',
 };
 
 export function createApp(opts: AppOptions): Server {
@@ -279,7 +281,7 @@ export function createApp(opts: AppOptions): Server {
       .map(({ serverId: _, private: priv, ...c }) => ({
         ...c,
         private: !!priv,
-        ...(c.kind === 'voice' ? { voiceUsers: usersInVoice(c.id) } : {}),
+        ...(c.kind === 'voice' ? voiceSummary(c.id) : {}),
         // Who has been let in, for the people who can change it.
         ...(priv && manager
           ? {
@@ -334,7 +336,18 @@ export function createApp(opts: AppOptions): Server {
   const online = new Set<number>();
   const inVoice = new Map<number, number>(); // userId -> voice channel they are in
 
+  const voiceFlags = new Map<number, { muted: boolean; deafened: boolean }>(); // userId -> mic off / not listening
   const usersInVoice = (channelId: number) => [...inVoice].filter(([, c]) => c === channelId).map(([u]) => u);
+  /** Who's in a voice room, and which of them are muted or deafened, so everyone in the burrow can see. */
+  const voiceSummary = (channelId: number) => {
+    const userIds = usersInVoice(channelId);
+    const flagged = (flag: 'muted' | 'deafened') => userIds.filter((u) => voiceFlags.get(u)?.[flag]);
+    return { voiceUsers: userIds, voiceMuted: flagged('muted'), voiceDeafened: flagged('deafened') };
+  };
+  const voiceStateEvent = (channelId: number) => {
+    const { voiceUsers, voiceMuted, voiceDeafened } = voiceSummary(channelId);
+    return { type: 'voice_state', channelId, userIds: voiceUsers, muted: voiceMuted, deafened: voiceDeafened };
+  };
 
   const sendTo = (userIds: Iterable<number>, event: Json) => {
     const data = JSON.stringify(event);
@@ -349,20 +362,28 @@ export function createApp(opts: AppOptions): Server {
   };
 
   // Who is in which voice room. The app reports joining and leaving; LiveKit carries the audio.
-  const setVoice = (userId: number, channelId: number | null) => {
+  const setVoice = (userId: number, channelId: number | null, flags?: { muted: boolean; deafened: boolean }) => {
     const prev = inVoice.get(userId);
-    if (prev === channelId || (prev === undefined && channelId === null)) return;
+    if (channelId === null) voiceFlags.delete(userId);
+    else if (flags) voiceFlags.set(userId, flags);
+    if (prev === channelId) {
+      // Same room: only muting or deafening changed.
+      if (flags && prev !== undefined) broadcastToChannel(channelById(prev)!, voiceStateEvent(prev));
+      return;
+    }
+    if (prev === undefined && channelId === null) return;
     if (prev !== undefined) {
       inVoice.delete(userId);
       const old = channelById(prev);
-      if (old) broadcastToChannel(old, { type: 'voice_state', channelId: old.id, userIds: usersInVoice(old.id) });
+      if (old) broadcastToChannel(old, voiceStateEvent(old.id));
     }
     if (channelId !== null) {
       const channel = channelById(channelId)!;
       inVoice.set(userId, channelId);
-      broadcastToChannel(channel, { type: 'voice_state', channelId, userIds: usersInVoice(channelId) });
+      broadcastToChannel(channel, voiceStateEvent(channelId));
     }
   };
+  const flagsFrom = (msg: Json) => ({ muted: msg.muted === true, deafened: msg.deafened === true });
 
   // LiveKit only checks who may join when they join, so people who lose access are disconnected
   // there too. (The key keeper also stops handing them voice keys; see the app.)
@@ -1362,7 +1383,11 @@ export function createApp(opts: AppOptions): Server {
           const channel = channelById(Number(msg.channelId));
           if (!channel || channel.kind !== 'voice' || !canSee(channel, user.id))
             throw new HttpError(404, 'Room not found');
-          setVoice(user.id, channel.id);
+          setVoice(user.id, channel.id, flagsFrom(msg));
+        } else if (msg.type === 'voice_status') {
+          // Muted or deafened, in the room they're already in.
+          const channelId = inVoice.get(user.id);
+          if (channelId !== undefined) setVoice(user.id, channelId, flagsFrom(msg));
         } else if (msg.type === 'voice_leave') {
           setVoice(user.id, null);
         } else if (msg.type === 'typing') {

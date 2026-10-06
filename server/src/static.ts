@@ -6,7 +6,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 const brotli = promisify(brotliCompress);
 const gzipAsync = promisify(gzip);
-const COMPRESSIBLE = new Set(['.html', '.js', '.css', '.svg']);
+const COMPRESSIBLE = new Set(['.html', '.js', '.css', '.svg', '.wasm']);
 
 interface Entry {
   mtime: number;

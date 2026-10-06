@@ -11,7 +11,7 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Accounts with username and password, protected by an optional registration code so strangers can't sign up
 - Burrows (shared spaces) you create, with an invite code to share, and rooms that the host (or anyone whose role allows it) can add
 - Custom roles with their own name, color and permissions, private rooms, and removing or banning people
-- Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) end-to-end encrypted, with mute, who's-talking rings, a volume slider for each person, and camera and screen sharing
+- Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) end-to-end encrypted, with mute and deafen, strong noise isolation, your choice of microphone, speakers and camera, who's-talking rings, a volume slider for each person, and camera and screen sharing
 - Image and file sharing: attach, paste or drag in up to 10 files per message, with inline image and video previews
 - Emoji reactions and replies (a reply to you counts as a mention)
 - Direct messages with anyone you share a burrow with
@@ -128,8 +128,10 @@ Burrow asks LiveKit to do this directly (`LIVEKIT_API_URL`; Docker Compose sets 
 4. On your router, forward **TCP 7881** and **UDP 7882** to the server, alongside 80 and 443.
 
 The host then adds a room with **+** next to *Rooms* and picks *Voice room*. Click a voice room to
-join; the bar above your name has mute, camera, screen sharing, the video view and leave. Click someone
-in a voice room to turn them up or down (0% to 200%, only for you).
+join; the bar above your name has mute, deafen (hear nobody and mute your mic; everyone in the burrow
+sees it), camera, screen sharing, the video view and leave, plus a sliders button for your
+microphone, speakers and camera. Click someone in a voice room to turn them up or down (0% to 200%,
+only for you).
 
 Turning on your camera or sharing your screen shows everyone's video in place of the chat. Others see
 a camera icon or a red **LIVE** tag next to your name, and open the video with the grid button in the
@@ -216,7 +218,7 @@ Burrow has its own names for things: a **burrow** is a shared space for one grou
 - The gear next to the burrow's name shows its invite code. The host, and roles allowed to *edit the burrow*, can give it a picture there; it replaces the burrow's initials in everyone's top bar. The host (whoever created it) can delete the burrow there; everyone else can leave. People whose role lets them ban also see who's banned there, and can unban them. People who can manage roles open **Roles** there.
 - **Roles:** every burrow starts with a *Moderator* role. Under **Roles** you can make your own (like *Admins* or *Friends*), pick a color, choose what each one can do (manage rooms, delete messages, remove people, ban people, manage roles, edit the burrow), and move them up or down. Names show in the color of their highest role. People can only change roles, and remove people, below their own highest role, and can't hand out permissions they don't have. A role with no permissions is just a colored label.
 - People who can manage rooms add them with the **+** next to *Rooms*, and change or delete one with the gear that appears when you hover over it. A private room is only seen by people who manage rooms, plus the roles and people you tick.
-- Your account (your name, bottom left) has voice settings (how clearly others hear you: 48, 64 or 96 kbps, and noise suppression, which you can turn off for music) and sound settings: chimes for new messages and for people joining or leaving your voice room, and how loud they are.
+- Your account (your picture, top right) and the sliders button on the voice bar have voice and video settings: which microphone, speakers or headset and camera to use (with a mic test and a camera preview), your volume and everyone's volume, noise isolation, and voice quality (48, 64 or 96 kbps). Noise isolation has four levels: *Off* (for music), *Light* (the browser's own filter), *Strong* (the default, [RNNoise](https://github.com/xiph/rnnoise)) and *Strongest* ([GTCRN](https://github.com/Xiaobin-Rong/gtcrn); takes out the most noise but makes voices a little flatter). Both run on your own device before your voice is encrypted. Picking speakers works in Chrome, Edge and the desktop app; Safari, iPhones and Firefox play through whatever the system picks. Account also has sound settings: chimes for new messages and for people joining or leaving your voice room, and how loud they are.
 - Hover over someone in the member list and click **⋯** to give them roles, or to remove or ban them, depending on what your roles allow.
 - The speech-bubble tile above your burrows holds your direct messages. Start one with its **+**, or click someone in a burrow's member list.
 - Click your name in the bottom corner to set a profile picture or change your password.

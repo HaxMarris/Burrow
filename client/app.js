@@ -210,7 +210,7 @@ function connect() {
     state.wsRetry = 0;
     setConnected(true, 'Connected');
     // The server forgets who's in voice when we drop off, so tell it again.
-    if (state.voice) ws.send(JSON.stringify({ type: 'voice_join', channelId: state.voice.channelId }));
+    if (state.voice) ws.send(JSON.stringify({ type: 'voice_join', channelId: state.voice.channelId, ...voiceFlags() }));
     // Catch up on anything missed while disconnected.
     if (wasRetry) loadServers().catch(() => {});
   };
@@ -323,7 +323,7 @@ function handleEvent(ev) {
     case 'voice_state':
       if (state.voice?.channelId === ev.channelId) voiceSounds(ev.channelId, ev.userIds);
       for (const s of state.servers.values())
-        for (const c of s.channels) if (c.id === ev.channelId) c.voiceUsers = ev.userIds;
+        for (const c of s.channels) if (c.id === ev.channelId) Object.assign(c, { voiceUsers: ev.userIds, voiceMuted: ev.muted, voiceDeafened: ev.deafened });
       renderChannels();
       break;
     case 'error':
@@ -673,7 +673,9 @@ function renderChannels() {
       const label = document.createElement('span');
       label.textContent = name;
       row.append(av, label);
-      if (state.mutedInVoice.has(id)) row.insertAdjacentHTML('beforeend', MUTED_ICON);
+      // Deafened says more than muted, so it's the one shown.
+      if (c.voiceDeafened?.includes(id)) row.insertAdjacentHTML('beforeend', DEAFENED_ICON);
+      else if (state.mutedInVoice.has(id) || c.voiceMuted?.includes(id)) row.insertAdjacentHTML('beforeend', MUTED_ICON);
       const sharing = joined ? state.sharing.get(id) : null;
       if (sharing?.camera) row.insertAdjacentHTML('beforeend', `<span class="cam-tag" title="Camera on">${CAMERA_ICON}</span>`);
       if (sharing?.screen) row.insertAdjacentHTML('beforeend', '<span class="live-tag" title="Sharing their screen">LIVE</span>');
@@ -2130,8 +2132,10 @@ async function joinVoice(channelId) {
   if (state.voice?.channelId === channelId) return;
   if (!state.voiceEnabled) return alert('Voice is not set up on this server yet.');
   leaveVoice(true);
-  const voice = { channelId, room: null, muted: false };
+  const voice = { channelId, room: null, muted: false, deafened: false };
   state.voice = voice;
+  // Made now, while the click still counts, or some browsers start it paused.
+  if (wantsMicProcessor()) voice.micCtx = newMicContext();
   renderVoiceBar('Connecting…');
   try {
     const LK = await loadLivekit();
@@ -2144,7 +2148,9 @@ async function joinVoice(channelId) {
     const room = new LK.Room({
       // End-to-end encryption: the voice server only ever handles scrambled audio.
       e2ee: { keyProvider: vc.keys, worker: vc.worker },
-      audioCaptureDefaults: { echoCancellation: true, noiseSuppression: voicePrefs.noiseSuppression, autoGainControl: voicePrefs.noiseSuppression },
+      audioCaptureDefaults: { ...micConstraints(), deviceId: await deviceIdFor('audioinput') },
+      videoCaptureDefaults: { deviceId: await deviceIdFor('videoinput') },
+      ...(canPickOutput ? { audioOutput: { deviceId: await deviceIdFor('audiooutput') } } : {}),
       // Opus at a higher bitrate than LiveKit's 48 kbps default; silence still costs almost nothing (DTX).
       publishDefaults: { audioPreset: { maxBitrate: quality.bitrate }, dtx: true, red: true },
       // Mixing through Web Audio lets people be turned up past 100%.
@@ -2158,7 +2164,7 @@ async function joinVoice(channelId) {
       .on(LK.RoomEvent.TrackSubscribed, (track, pub, participant) => {
         if (track.kind !== 'audio') return renderStage();
         const id = Number(participant.identity);
-        const volume = pub.source === LK.Track.Source.ScreenShareAudio ? streamVolumeFor(id) : volumeFor(id);
+        const volume = heard(pub.source === LK.Track.Source.ScreenShareAudio ? streamVolumeFor(id) : volumeFor(id));
         if (volume === 0) pub.setSubscribed(false); // muted by you
         else {
           $('#voice-audio').append(track.attach());
@@ -2194,7 +2200,9 @@ async function joinVoice(channelId) {
     await room.startAudio();
     await room.localParticipant.setMicrophoneEnabled(true);
     if (state.voice !== voice) return room.disconnect();
-    state.ws?.send(JSON.stringify({ type: 'voice_join', channelId }));
+    // Burrow's noise filter works on your voice before it's encrypted and sent.
+    if (wantsMicProcessor()) await micTrack()?.setProcessor(micProcessor(voice)).catch((err) => console.warn("Couldn't start the noise filter:", err));
+    state.ws?.send(JSON.stringify({ type: 'voice_join', channelId, ...voiceFlags() }));
     renderVoiceBar();
     playSound('join');
   } catch (err) {
@@ -2226,6 +2234,7 @@ function leaveVoice(quiet) {
   clearTimeout(voice.crypto?.grace);
   clearTimeout(voice.crypto?.rotateTimer);
   voice.crypto?.worker.terminate();
+  voice.micCtx?.close().catch(() => {});
   closeVolume();
   closeStage();
   $('#voice-audio').replaceChildren();
@@ -2234,16 +2243,49 @@ function leaveVoice(quiet) {
   renderChannels();
 }
 
+function setMicMuted(voice, muted) {
+  voice.muted = muted;
+  voice.room.localParticipant.setMicrophoneEnabled(!muted);
+  if (muted) state.mutedInVoice.add(state.me.id);
+  else state.mutedInVoice.delete(state.me.id);
+}
+
 function toggleMute() {
   const voice = state.voice;
   if (!voice?.room) return;
-  voice.muted = !voice.muted;
-  voice.room.localParticipant.setMicrophoneEnabled(!voice.muted);
-  if (voice.muted) state.mutedInVoice.add(state.me.id);
-  else state.mutedInVoice.delete(state.me.id);
+  // Unmuting while deafened turns your sound back on too, like Discord.
+  if (voice.deafened && voice.muted) setDeafened(voice, false);
+  setMicMuted(voice, !voice.muted);
+  voiceChanged();
+}
+
+/** Deafened: you hear nobody (voices and streams) and your mic is off, and everyone can see it. */
+function toggleDeafen() {
+  const voice = state.voice;
+  if (!voice?.room) return;
+  if (voice.deafened) {
+    setDeafened(voice, false);
+    setMicMuted(voice, voice.mutedBeforeDeafen);
+  } else {
+    voice.mutedBeforeDeafen = voice.muted;
+    setDeafened(voice, true);
+    setMicMuted(voice, true);
+  }
+  voiceChanged();
+}
+
+function setDeafened(voice, deafened) {
+  voice.deafened = deafened;
+  applyAllVolumes();
+}
+
+/** Muted or deafened changed: tell the burrow, and redraw. */
+function voiceChanged() {
+  if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: 'voice_status', ...voiceFlags() }));
   renderVoiceBar();
   renderChannels();
 }
+const voiceFlags = () => ({ muted: !!state.voice?.muted, deafened: !!state.voice?.deafened });
 
 function renderVoiceBar(status) {
   const voice = state.voice;
@@ -2258,6 +2300,9 @@ function renderVoiceBar(status) {
   $('#voice-room-name').textContent = ch?.name ?? '';
   $('#voice-mute').classList.toggle('on', voice.muted);
   $('#voice-mute').title = voice.muted ? 'Unmute' : 'Mute';
+  $('#voice-deafen').classList.toggle('on', voice.deafened);
+  $('#voice-deafen').title = voice.deafened ? 'Undeafen' : 'Deafen (hear nobody, and mute)';
+  $('#voice-deafen').innerHTML = voice.deafened ? HEADPHONES_OFF : HEADPHONES_ON;
   const lp = voice.room?.localParticipant;
   const camera = !!lp?.isCameraEnabled, screen = !!lp?.isScreenShareEnabled;
   $('#voice-camera').classList.toggle('on', camera);
@@ -2267,7 +2312,13 @@ function renderVoiceBar(status) {
   for (const id of ['#voice-camera', '#voice-screen', '#voice-watch']) $(id).disabled = !voice.room || !!status;
 }
 
+const HEADPHONES_ON = '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-9 9v6a3 3 0 0 0 3 3h2v-8H5v-1a7 7 0 0 1 14 0v1h-3v8h2a3 3 0 0 0 3-3v-6a9 9 0 0 0-9-9Z"/></svg>';
+const HEADPHONES_OFF = '<svg viewBox="0 0 24 24"><path d="M3.3 2 2 3.3l3.5 3.5A8.9 8.9 0 0 0 3 12v6a3 3 0 0 0 3 3h2v-8H5v-1c0-1.5.5-2.9 1.3-4l9.4 9.4V21h2c.4 0 .8-.1 1.2-.3l.8.8 1.3-1.3L3.3 2ZM12 3c-2 0-3.8.6-5.3 1.7l1.4 1.4A7 7 0 0 1 19 12v1h-3v.2l5 5V12a9 9 0 0 0-9-9Z"/></svg>';
+const DEAFENED_ICON = HEADPHONES_OFF.replace('<svg', '<svg class="muted-icon" aria-label="Deafened"');
+
 $('#voice-mute').onclick = toggleMute;
+$('#voice-deafen').onclick = toggleDeafen;
+$('#voice-settings').onclick = openVoiceSettings;
 $('#voice-leave').onclick = () => leaveVoice();
 $('#voice-camera').onclick = toggleCamera;
 $('#voice-screen').onclick = toggleScreen;
@@ -2461,10 +2512,23 @@ function setStreamVolume(userId, value) {
  * audio, so silence means not receiving that sound at all, which also saves the download.
  */
 function applyVolume(participant, source, value) {
+  value = heard(value);
   const pub = participant.getTrackPublication(source);
   if (value === 0) return pub?.setSubscribed(false);
   if (pub && !pub.isSubscribed) pub.setSubscribed(true); // the volume is set again when it arrives
   participant.setVolume(value, source);
+}
+
+/** How loud a sound plays: your setting for that person, times everyone's volume. Nothing while deafened. */
+const heard = (value) => (state.voice?.deafened ? 0 : value * voicePrefs.outputVolume);
+
+function applyAllVolumes() {
+  const LK = window.LivekitClient;
+  for (const p of state.voice?.room?.remoteParticipants.values() ?? []) {
+    const id = Number(p.identity);
+    applyVolume(p, LK.Track.Source.Microphone, volumeFor(id));
+    applyVolume(p, LK.Track.Source.ScreenShareAudio, streamVolumeFor(id));
+  }
 }
 
 const SPEAKER_ON = '<svg viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4V9Zm12.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4Zm-2.5-8.8v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6Z"/></svg>';
@@ -2736,7 +2800,10 @@ function playSound(name, force = false) {
     lastMessageSound = Date.now();
   }
   try {
-    soundCtx ??= new AudioContext();
+    if (!soundCtx) {
+      soundCtx = new AudioContext();
+      setChimeOutput();
+    }
     if (soundCtx.state === 'suspended') soundCtx.resume();
     const t0 = soundCtx.currentTime + 0.01;
     for (const [freq, start, length] of sound.notes) {
@@ -2762,29 +2829,412 @@ function voiceSounds(channelId, userIds) {
   else if (others(before).some((id) => !userIds.includes(id))) playSound('leave');
 }
 
-// How you sound to others. Kept on this device; takes effect the next time you join a voice room.
+// ---------------------------------------------------------------- your voice and video settings
+//
+// Which microphone, speakers and camera to use, how loud you are, how loud everyone else is, and
+// how much background noise to take out. All kept on this device. Everything but voice quality
+// changes straight away, even in the middle of a call.
+
 const VOICE_QUALITY = {
   standard: { bitrate: 48000, label: 'Standard (48 kbps)' },
   high: { bitrate: 64000, label: 'High (64 kbps)' },
   best: { bitrate: 96000, label: 'Best (96 kbps)' },
 };
+// "strong" and "strongest" run a small noise-removal model on your device (RNNoise and GTCRN,
+// in vendor/noise), on your voice before it's encrypted, so they work with end-to-end encryption.
+const NOISE_LEVELS = {
+  off: { label: 'Off', hint: 'Nothing is filtered. Best for music or an instrument.' },
+  light: { label: 'Light', hint: "Your browser's own filter. Takes out steady hums and hiss." },
+  strong: { label: 'Strong', model: 'rnnoise', hint: 'Takes out fans, typing, clicks and chatter behind you.' },
+  strongest: { label: 'Strongest', model: 'gtcrn', hint: 'Takes out even more noise, but your voice sounds a little flatter.' },
+};
 const voicePrefs = (() => {
-  const defaults = { quality: 'high', noiseSuppression: true };
-  try { return { ...defaults, ...JSON.parse(store.get('voicePrefs')) }; } catch { return defaults; }
+  const defaults = { quality: 'high', noise: 'strong', inputVolume: 1, outputVolume: 1 };
+  try {
+    const saved = JSON.parse(store.get('voicePrefs')) ?? {};
+    // Noise suppression used to be just on or off.
+    if (saved.noiseSuppression === false && !saved.noise) saved.noise = 'off';
+    delete saved.noiseSuppression;
+    return { ...defaults, ...saved };
+  } catch { return defaults; }
 })();
+const saveVoicePrefs = () => store.set('voicePrefs', JSON.stringify(voicePrefs));
+
+/** What the browser itself does to your microphone. The stronger filters replace its noise filter rather than stack on it. */
+function micConstraints() {
+  const level = voicePrefs.noise;
+  return { echoCancellation: true, noiseSuppression: level === 'light', autoGainControl: level !== 'off' };
+}
+const wantsMicProcessor = () => !!NOISE_LEVELS[voicePrefs.noise]?.model || voicePrefs.inputVolume !== 1;
+
+// ---- devices
+
+const DEVICE_NAMES = { audioinput: 'Microphone', audiooutput: 'Speakers', videoinput: 'Camera' };
+const savedDevices = (() => { try { return JSON.parse(store.get('devices')) ?? {}; } catch { return {}; } })();
+// Burrow mixes voices with Web Audio, which can only be sent to another output where AudioContext
+// has setSinkId: Chrome, Edge and the desktop app. Safari, every iPhone browser and Firefox can't.
+const canPickOutput = typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype;
+const isAppleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+async function listDevices() {
+  try {
+    // "default" and "communications" are Chrome's aliases for real devices; "System default" covers them.
+    return (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications');
+  } catch { return []; }
+}
+
+/** The device you picked: by its id, or by its name, since some browsers change ids between visits. */
+async function deviceIdFor(kind) {
+  const saved = savedDevices[kind];
+  if (!saved) return undefined;
+  const list = (await listDevices()).filter((d) => d.kind === kind);
+  const found = list.find((d) => d.deviceId === saved.id) ?? list.find((d) => saved.label && d.label === saved.label);
+  // A microphone or camera that isn't listed yet (no permission) is still worth asking for: the browser falls back if it's gone.
+  return found?.deviceId ?? (kind === 'audiooutput' ? undefined : saved.id);
+}
+
+async function pickDevice(kind, id, label) {
+  if (id) savedDevices[kind] = { id, label };
+  else delete savedDevices[kind];
+  store.set('devices', JSON.stringify(savedDevices));
+  if (kind === 'audiooutput') setChimeOutput();
+  const room = state.voice?.room;
+  if (!room) return;
+  try {
+    await room.switchActiveDevice(kind, id || 'default', !!id);
+  } catch (err) {
+    alert(mediaError(err, DEVICE_NAMES[kind].toLowerCase()));
+  }
+}
+
+/** Chimes play through the speakers you picked too. */
+async function setChimeOutput() {
+  if (!soundCtx?.setSinkId) return;
+  try { await soundCtx.setSinkId((await deviceIdFor('audiooutput')) ?? ''); } catch {}
+}
+
+// ---- your microphone, through the noise filter
+
+const newMicContext = () => new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' }); // both filters want 48 kHz
+
+/** Browsers start audio paused until you've clicked; if that happened, the next click starts it. */
+function keepRunning(ctx) {
+  if (ctx.state === 'running') return;
+  ctx.resume().catch(() => {});
+  const resume = () => ctx.state !== 'closed' && ctx.resume().catch(() => {});
+  document.addEventListener('pointerdown', resume, { once: true });
+  document.addEventListener('keydown', resume, { once: true });
+}
+
+const noiseWasm = new Map(); // model -> Promise<ArrayBuffer>, downloaded once
+async function noiseFilter(ctx, model) {
+  if (!noiseWasm.has(model)) {
+    const loading = fetch(`vendor/noise/${model}.wasm`).then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.arrayBuffer();
+    });
+    loading.catch(() => noiseWasm.delete(model));
+    noiseWasm.set(model, loading);
+  }
+  const [wasmBinary] = await Promise.all([noiseWasm.get(model), ctx.audioWorklet.addModule(`vendor/noise/${model}.worklet.js`)]);
+  const node = new AudioWorkletNode(ctx, `@sapphi-red/web-noise-suppressor/${model}`, {
+    channelCount: 1, channelCountMode: 'explicit', processorOptions: { maxChannels: 1, wasmBinary },
+  });
+  node.onprocessorerror = () => console.warn(`The ${model} noise filter stopped working.`);
+  return node;
+}
+
+/**
+ * Microphone in, filtered and turned up or down, out as a new track. If the filter can't load,
+ * your voice still goes through, just unfiltered.
+ */
+async function micChain(ctx, track) {
+  const model = NOISE_LEVELS[voicePrefs.noise]?.model;
+  let filter = null;
+  if (model) {
+    try { filter = await noiseFilter(ctx, model); } catch (err) { console.warn(`Couldn't load the ${model} noise filter:`, err); }
+  }
+  const gain = ctx.createGain();
+  gain.gain.value = voicePrefs.inputVolume;
+  const out = ctx.createMediaStreamDestination();
+  out.channelCount = 1;
+  filter?.connect(gain);
+  gain.connect(out);
+  let source = null;
+  const chain = {
+    track: out.stream.getAudioTracks()[0],
+    filtered: !!filter,
+    gain,
+    setInput(t) {
+      source?.disconnect();
+      source = ctx.createMediaStreamSource(new MediaStream([t]));
+      source.connect(filter ?? gain);
+    },
+    setVolume(v) { gain.gain.setTargetAtTime(v, ctx.currentTime, 0.02); },
+    destroy() {
+      source?.disconnect();
+      filter?.port.postMessage('destroy');
+      filter?.disconnect();
+      gain.disconnect();
+      chain.track.stop();
+    },
+  };
+  chain.setInput(track);
+  return chain;
+}
+
+/** The same chain as a LiveKit track processor, so what's sent (and encrypted) is the filtered voice. */
+function micProcessor(voice) {
+  let chain = null;
+  const proc = {
+    name: 'burrow-mic',
+    processedTrack: undefined,
+    async init({ track }) {
+      voice.micCtx ??= newMicContext();
+      keepRunning(voice.micCtx);
+      chain?.destroy();
+      chain = await micChain(voice.micCtx, track);
+      proc.processedTrack = chain.track;
+      voice.micChain = chain;
+    },
+    // A new microphone: same filter, new input, so nothing needs re-sending.
+    async restart({ track }) { if (chain) chain.setInput(track); else await proc.init({ track }); },
+    async destroy() {
+      chain?.destroy();
+      if (voice.micChain === chain) voice.micChain = null;
+      chain = null;
+    },
+  };
+  return proc;
+}
+
+const micTrack = () => state.voice?.room?.localParticipant.getTrackPublication(window.LivekitClient.Track.Source.Microphone)?.audioTrack;
+
+/** The noise level changed mid-call: new browser settings, and the filter swapped. */
+async function applyNoiseLevel() {
+  const voice = state.voice, track = micTrack();
+  if (!voice || !track) return;
+  try {
+    const deviceId = voice.room.getActiveDevice('audioinput');
+    voice.room.options.audioCaptureDefaults = { ...voice.room.options.audioCaptureDefaults, ...micConstraints() };
+    await track.restartTrack({ ...micConstraints(), ...(deviceId ? { deviceId } : {}) });
+    if (wantsMicProcessor()) await track.setProcessor(micProcessor(voice));
+    else if (track.getProcessor()) await track.stopProcessor();
+  } catch (err) {
+    console.warn("Couldn't change noise isolation:", err);
+  }
+}
+
+function applyInputVolume() {
+  const track = micTrack();
+  if (!track) return;
+  if (state.voice.micChain) state.voice.micChain.setVolume(voicePrefs.inputVolume);
+  else if (wantsMicProcessor()) track.setProcessor(micProcessor(state.voice)).catch((err) => console.warn("Couldn't change your volume:", err));
+}
+
+// ---- trying your microphone and camera
+
+let micTest = null; // { stream, ctx, chain, audio, frame }
+
+async function startMicTest() {
+  stopMicTest();
+  const test = {};
+  micTest = test;
+  test.ctx = newMicContext(); // made during the click, so it isn't paused
+  try {
+    const deviceId = await deviceIdFor('audioinput');
+    test.stream = await navigator.mediaDevices.getUserMedia({ audio: { ...micConstraints(), ...(deviceId ? { deviceId } : {}) } });
+    if (micTest !== test) return test.stream.getTracks().forEach((t) => t.stop());
+    test.chain = await micChain(test.ctx, test.stream.getAudioTracks()[0]);
+    if (micTest !== test) return stopMicTest(test);
+    const analyser = test.ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    test.ctx.createMediaStreamSource(new MediaStream([test.chain.track])).connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+    const draw = () => {
+      analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (const v of samples) sum += v * v;
+      const db = 20 * Math.log10(Math.sqrt(sum / samples.length) || 1e-8);
+      const bar = $('#vs-level');
+      if (bar) bar.style.width = `${Math.max(0, Math.min(100, (db + 60) * (100 / 60)))}%`;
+      test.frame = requestAnimationFrame(draw);
+    };
+    draw();
+    // "Hear yourself": played back through the speakers you picked.
+    test.audio = new Audio();
+    test.audio.srcObject = new MediaStream([test.chain.track]);
+    test.audio.muted = !$('#vs-loopback')?.checked;
+    const out = await deviceIdFor('audiooutput');
+    if (out && test.audio.setSinkId) await test.audio.setSinkId(out).catch(() => {});
+    test.audio.play().catch(() => {});
+    $('#vs-test-status').textContent = test.chain.filtered || !NOISE_LEVELS[voicePrefs.noise].model ? '' : "This device couldn't load the noise filter, so it's off.";
+  } catch (err) {
+    if (micTest === test) {
+      stopMicTest();
+      $('#vs-test-status').textContent = mediaError(err, 'microphone');
+    }
+    return;
+  }
+  fillDeviceLists(); // names show once there's permission
+  renderMicTest();
+}
+
+function stopMicTest(test = micTest) {
+  if (!test) return;
+  if (micTest === test) micTest = null;
+  cancelAnimationFrame(test.frame);
+  test.audio?.pause();
+  test.chain?.destroy();
+  test.stream?.getTracks().forEach((t) => t.stop());
+  test.ctx?.close().catch(() => {});
+  if ($('#vs-level')) $('#vs-level').style.width = '0';
+  renderMicTest();
+}
+function renderMicTest() {
+  if ($('#vs-test')) $('#vs-test').textContent = micTest ? 'Stop' : 'Test';
+}
+
+let cameraPreview = null;
+async function startCameraPreview() {
+  stopCameraPreview();
+  const preview = {};
+  cameraPreview = preview;
+  try {
+    const deviceId = await deviceIdFor('videoinput');
+    preview.stream = await navigator.mediaDevices.getUserMedia({ video: deviceId ? { deviceId } : true });
+    if (cameraPreview !== preview) return preview.stream.getTracks().forEach((t) => t.stop());
+    $('#vs-preview').srcObject = preview.stream;
+    $('#vs-preview').classList.remove('hidden');
+    $('#vs-cam').textContent = 'Stop preview';
+    fillDeviceLists();
+  } catch (err) {
+    if (cameraPreview === preview) stopCameraPreview();
+    $('#vs-cam-status').textContent = mediaError(err, 'camera');
+  }
+}
+function stopCameraPreview() {
+  cameraPreview?.stream?.getTracks().forEach((t) => t.stop());
+  cameraPreview = null;
+  if (!$('#vs-preview')) return;
+  $('#vs-preview').srcObject = null;
+  $('#vs-preview').classList.add('hidden');
+  $('#vs-cam').textContent = 'Preview camera';
+}
+
+// ---- the settings themselves: in your account, and from the gear on the voice bar
 
 function voiceSettings() {
-  return `<h3>Voice</h3>
-    <label>Your voice quality
-      <select id="voice-quality">${Object.entries(VOICE_QUALITY).map(([k, q]) => `<option value="${k}" ${voicePrefs.quality === k ? 'selected' : ''}>${q.label}</option>`).join('')}</select>
-    </label>
-    <label class="check"><input type="checkbox" id="voice-ns" ${voicePrefs.noiseSuppression ? 'checked' : ''} /> Noise suppression</label>
-    <span class="small muted">Turn noise suppression off to play music or an instrument. Changes apply the next time you join a voice room.</span>`;
+  const pct = (v) => Math.round(v * 100);
+  const outputNote = isAppleMobile
+    ? 'Sound plays wherever your iPhone or iPad sends it. To switch to AirPods or a speaker, use Control Center.'
+    : "This browser can't pick where sound plays, so it uses your system's choice. Chrome, Edge and the Burrow desktop app can pick.";
+  return `<h3>Voice and video</h3>
+    <div class="voice-settings">
+      <label>Microphone<select id="vs-audioinput"></select></label>
+      <div class="mic-test">
+        <div class="level-meter" title="How loud you are, after the noise filter"><span id="vs-level"></span></div>
+        <button type="button" class="btn secondary" id="vs-test">Test</button>
+      </div>
+      <label class="check"><input type="checkbox" id="vs-loopback" /> Hear yourself while testing (wear headphones)</label>
+      <span class="small muted" id="vs-test-status"></span>
+      <label>Your volume <span class="range-value" id="vs-in-val">${pct(voicePrefs.inputVolume)}%</span>
+        <input type="range" id="vs-in" min="0" max="200" step="5" value="${pct(voicePrefs.inputVolume)}" /></label>
+      <label>Noise isolation
+        <select id="vs-noise">${Object.entries(NOISE_LEVELS).map(([k, n]) => `<option value="${k}" ${voicePrefs.noise === k ? 'selected' : ''}>${n.label}</option>`).join('')}</select></label>
+      <span class="small muted" id="vs-noise-hint">${NOISE_LEVELS[voicePrefs.noise]?.hint ?? ''}</span>
+      ${canPickOutput ? '<label>Speakers or headset<select id="vs-audiooutput"></select></label>' : `<span class="small muted">${outputNote}</span>`}
+      <label>Everyone's volume <span class="range-value" id="vs-out-val">${pct(voicePrefs.outputVolume)}%</span>
+        <input type="range" id="vs-out" min="0" max="200" step="5" value="${pct(voicePrefs.outputVolume)}" /></label>
+      <button type="button" class="link-btn" id="vs-chime">Play a test sound</button>
+      <label>Camera<select id="vs-videoinput"></select></label>
+      <video id="vs-preview" class="cam-preview hidden" autoplay muted playsinline></video>
+      <div class="mic-test"><button type="button" class="btn secondary" id="vs-cam">Preview camera</button><span class="small muted" id="vs-cam-status"></span></div>
+      <label>Your voice quality
+        <select id="voice-quality">${Object.entries(VOICE_QUALITY).map(([k, q]) => `<option value="${k}" ${voicePrefs.quality === k ? 'selected' : ''}>${q.label}</option>`).join('')}</select>
+      </label>
+      <span class="small muted">Voice quality changes the next time you join a voice room. Everything else changes straight away.</span>
+    </div>`;
 }
+
+/** Fills in the device lists. Before Burrow may use your microphone, browsers hide the names. */
+async function fillDeviceLists() {
+  const devices = await listDevices();
+  let unnamed = false;
+  for (const kind of Object.keys(DEVICE_NAMES)) {
+    const select = $(`#vs-${kind}`);
+    if (!select) continue;
+    const list = devices.filter((d) => d.kind === kind);
+    const saved = savedDevices[kind];
+    const chosen = saved && (list.find((d) => d.deviceId === saved.id) ?? list.find((d) => saved.label && d.label === saved.label));
+    select.replaceChildren(new Option('System default', ''), ...list.map((d, i) => {
+      unnamed ||= !d.label;
+      const o = new Option(d.label || `${DEVICE_NAMES[kind]} ${i + 1}`, d.deviceId);
+      o.dataset.label = d.label;
+      return o;
+    }));
+    if (saved && !chosen) {
+      const o = new Option(`${saved.label || DEVICE_NAMES[kind]} (not found)`, saved.id);
+      o.dataset.label = saved.label ?? '';
+      select.append(o);
+    }
+    select.value = chosen?.deviceId ?? saved?.id ?? '';
+  }
+  const status = $('#vs-test-status');
+  if (status && unnamed && !micTest && !status.textContent) status.textContent = 'Press Test to see your devices by name.';
+  if (status && !unnamed && status.textContent.startsWith('Press Test')) status.textContent = '';
+}
+
 function wireVoiceSettings() {
-  const save = () => store.set('voicePrefs', JSON.stringify(voicePrefs));
-  $('#voice-quality').onchange = (e) => { voicePrefs.quality = e.target.value; save(); };
-  $('#voice-ns').onchange = (e) => { voicePrefs.noiseSuppression = e.target.checked; save(); };
+  fillDeviceLists();
+  navigator.mediaDevices?.addEventListener('devicechange', fillDeviceLists);
+  for (const kind of Object.keys(DEVICE_NAMES)) {
+    const select = $(`#vs-${kind}`);
+    if (!select) continue;
+    select.onchange = async () => {
+      await pickDevice(kind, select.value, select.selectedOptions[0]?.dataset.label ?? '');
+      if (kind === 'audioinput' && micTest) startMicTest();
+      if (kind === 'audiooutput' && micTest?.audio?.setSinkId) micTest.audio.setSinkId((await deviceIdFor('audiooutput')) ?? '').catch(() => {});
+      if (kind === 'videoinput' && cameraPreview) startCameraPreview();
+    };
+  }
+  $('#vs-test').onclick = () => (micTest ? stopMicTest() : startMicTest());
+  $('#vs-loopback').onchange = (e) => { if (micTest?.audio) micTest.audio.muted = !e.target.checked; };
+  const slider = (sel, key, apply) => {
+    $(sel).oninput = (e) => {
+      voicePrefs[key] = Number(e.target.value) / 100;
+      $(`${sel}-val`).textContent = `${e.target.value}%`;
+      apply();
+    };
+    $(sel).onchange = saveVoicePrefs;
+  };
+  slider('#vs-in', 'inputVolume', () => { micTest?.chain?.setVolume(voicePrefs.inputVolume); applyInputVolume(); });
+  slider('#vs-out', 'outputVolume', applyAllVolumes);
+  $('#vs-noise').onchange = (e) => {
+    voicePrefs.noise = e.target.value;
+    saveVoicePrefs();
+    $('#vs-noise-hint').textContent = NOISE_LEVELS[voicePrefs.noise].hint;
+    if (state.voice && wantsMicProcessor()) state.voice.micCtx ??= newMicContext(); // during the click, so it isn't paused
+    applyNoiseLevel();
+    if (micTest) startMicTest();
+  };
+  $('#vs-chime').onclick = () => playSound('join', true);
+  $('#vs-cam').onclick = () => (cameraPreview ? stopCameraPreview() : startCameraPreview());
+  $('#voice-quality').onchange = (e) => { voicePrefs.quality = e.target.value; saveVoicePrefs(); };
+  // Whatever closes the settings stops the test and the preview.
+  const closing = onModalClose;
+  onModalClose = () => {
+    closing?.();
+    stopMicTest();
+    stopCameraPreview();
+    navigator.mediaDevices?.removeEventListener('devicechange', fillDeviceLists);
+  };
+}
+
+function openVoiceSettings() {
+  modal(`${voiceSettings().replace('<h3>Voice and video</h3>', '<h2>Voice and video</h2>')}
+    <div class="modal-row"><button class="btn secondary" data-close>Done</button></div>`, 'sheet');
+  wireVoiceSettings();
 }
 
 // Your own theme color, on a color wheel: the angle is the hue, the distance from the middle is
