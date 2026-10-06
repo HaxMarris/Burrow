@@ -86,6 +86,8 @@ export function openDb(file: string): Db {
   if (!serverCols.some((c) => c.name === 'kind')) db.exec("ALTER TABLE servers ADD COLUMN kind TEXT NOT NULL DEFAULT 'burrow'");
   if (!serverCols.some((c) => c.name === 'dm_key')) db.exec('ALTER TABLE servers ADD COLUMN dm_key TEXT');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS servers_by_dm_key ON servers(dm_key)');
+  // Added with burrow pictures: the picture's file name in uploads/burrow-pictures.
+  if (!serverCols.some((c) => c.name === 'icon')) db.exec('ALTER TABLE servers ADD COLUMN icon TEXT');
   // Added with moderators: 'member' or 'mod'. Replaced by custom roles below, and only read to move moderators over.
   // Private rooms and bans came at the same time.
   const memberCols = db.prepare('PRAGMA table_info(members)').all() as { name: string }[];

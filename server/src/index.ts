@@ -19,6 +19,7 @@ const app = createApp({
   registrationCode: process.env.REGISTRATION_CODE || undefined,
   uploadDir: process.env.UPLOAD_DIR ?? join(dirname(dbFile), 'uploads'),
   maxUploadBytes: Number(process.env.MAX_UPLOAD_MB ?? 25) * 1024 * 1024,
+  gifs: process.env.KLIPY_API_KEY ? { apiKey: process.env.KLIPY_API_KEY, rating: process.env.GIF_RATING || undefined } : undefined,
   voice:
     process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET
       ? {
@@ -36,5 +37,6 @@ app.listen(port, () => {
   console.log(backupKeep > 0 ? `Daily backups: ${backupDir} (keeping ${backupKeep})` : 'Daily backups are off.');
   if (!process.env.REGISTRATION_CODE)
     console.log('Warning: REGISTRATION_CODE is not set, so anyone who can reach this server can sign up.');
+  if (!process.env.KLIPY_API_KEY) console.log('The GIF picker is off (set KLIPY_API_KEY to turn it on).');
   if (!process.env.LIVEKIT_API_KEY) console.log('Voice rooms are off (set LIVEKIT_API_KEY and LIVEKIT_API_SECRET to turn them on).');
 });

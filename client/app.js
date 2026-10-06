@@ -31,6 +31,7 @@ const state = {
   wsRetry: 0,
   voiceEnabled: false,      // the server has LiveKit set up
   maxUploadBytes: 0,        // 0 = uploads are off on this server
+  gifsEnabled: false,       // the server has a KLIPY key for the GIF picker
   replyTo: null,            // the message the composer is replying to
   pending: [],              // files attached to the composer: { file, previewUrl, progress, attachment, error, done }
   voice: null,              // { channelId, room, muted } while in a voice room
@@ -175,6 +176,8 @@ async function enterApp() {
   state.voiceEnabled = !!config.voice;
   state.maxUploadBytes = config.maxUploadBytes || 0;
   $('#attach-btn').classList.toggle('hidden', !state.maxUploadBytes);
+  state.gifsEnabled = !!config.gifs;
+  $('#gif-btn').classList.toggle('hidden', !state.gifsEnabled);
   await loadServers();
   connect();
 }
@@ -418,12 +421,20 @@ function renderServers() {
   $('#empty-state').classList.toggle('hidden', state.serverOrder.length > 0 || state.inDms);
 }
 
+// The burrow's picture, or its initials on a forest color.
 function burrowTile(s, id) {
   const t = document.createElement('span');
   t.className = 'tile';
   if (id) t.id = id;
-  t.textContent = initials(s.name);
   t.style.background = colorFor(s.name);
+  if (s.icon) {
+    const img = document.createElement('img');
+    img.src = state.serverUrl + s.icon;
+    img.alt = '';
+    img.onerror = () => img.replaceWith(initials(s.name));
+    t.append(img);
+    t.classList.add('has-picture');
+  } else t.textContent = initials(s.name);
   return t;
 }
 
@@ -1208,6 +1219,18 @@ $('#server-menu-btn').onclick = () => {
       <div class="invite-box"><input id="invite" readonly value="${escapeHtml(s.inviteCode)}" /><button class="btn" id="copy-invite">Copy</button></div>
     </label>
     <p class="small muted">They'll also need the server address: <b>${escapeHtml(state.serverUrl)}</b></p>
+    ${can(s, 'burrow') && state.maxUploadBytes ? `<div class="account-picture burrow-picture">
+      <span id="burrow-picture-tile"></span>
+      <div class="buttons">
+        <div>
+          <button type="button" class="btn secondary" id="burrow-picture-pick">Change picture</button>
+          <button type="button" class="btn secondary ${s.icon ? '' : 'hidden'}" id="burrow-picture-remove">Remove</button>
+        </div>
+        <span class="small muted">Shows in everyone's top bar. PNG, JPEG, GIF or WebP, cropped to a square.</span>
+      </div>
+      <input type="file" id="burrow-picture-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+    </div>
+    <div class="error" id="burrow-picture-error"></div>` : ''}
     ${can(s, 'roles') ? `<button class="btn secondary" id="open-roles">Roles${s.roles.length ? ` · ${s.roles.length}` : ''}</button>` : ''}
     ${can(s, 'ban') ? '<div id="ban-list"></div>' : ''}
     <div class="modal-row">
@@ -1215,6 +1238,7 @@ $('#server-menu-btn').onclick = () => {
       <button class="btn secondary" data-close>Close</button>
     </div>`);
   if (can(s, 'ban')) renderBans(s);
+  if ($('#burrow-picture-tile')) wireBurrowPicture(s);
   $('#open-roles')?.addEventListener('click', () => openRoles(s.id));
   $('#copy-invite').onclick = () => { navigator.clipboard?.writeText(s.inviteCode); $('#copy-invite').textContent = 'Copied!'; };
   $('#leave-server').onclick = async () => {
@@ -1229,6 +1253,39 @@ $('#server-menu-btn').onclick = () => {
     } catch (err) { alertError(err); }
   };
 };
+
+// Changing the burrow's picture, from its settings.
+function wireBurrowPicture(s) {
+  const show = (srv) => {
+    const tile = burrowTile(srv, 'burrow-picture-tile');
+    tile.classList.add('xl');
+    $('#burrow-picture-tile').replaceWith(tile);
+    $('#burrow-picture-remove').classList.toggle('hidden', !srv.icon);
+  };
+  const done = (srv) => {
+    state.servers.set(srv.id, srv);
+    renderServers();
+    show(srv);
+  };
+  show(s);
+  const pick = $('#burrow-picture-pick');
+  pick.onclick = () => $('#burrow-picture-input').click();
+  $('#burrow-picture-input').onchange = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    $('#burrow-picture-error').textContent = '';
+    pick.disabled = true;
+    pick.textContent = 'Uploading…';
+    try { done(await uploadPicture(`/api/servers/${s.id}/picture`, await squarePicture(file))); }
+    catch (err) { $('#burrow-picture-error').textContent = err.message; }
+    finally { pick.disabled = false; pick.textContent = 'Change picture'; }
+  };
+  $('#burrow-picture-remove').onclick = async () => {
+    try { done(await api(`/api/servers/${s.id}/picture`, { method: 'DELETE' })); }
+    catch (err) { $('#burrow-picture-error').textContent = err.message; }
+  };
+}
 
 $('#add-channel').onclick = () => {
   if (state.inDms) return openNewDm();
@@ -1273,6 +1330,7 @@ const PERMS = [
   ['remove', 'Remove people', 'Take people out of the burrow (they can come back with the invite)'],
   ['ban', 'Ban people', "Remove people for good, and see and lift bans"],
   ['roles', 'Manage roles', 'Make, change and hand out the roles below their own'],
+  ['burrow', 'Edit the burrow', "Change the burrow's picture"],
 ];
 const ROLE_COLORS = ['#4f8a5b', '#2f7d74', '#3f6fa8', '#7a5aa6', '#b0527a', '#c2553d', '#c98a2b', '#8a8f87'];
 
@@ -1632,7 +1690,7 @@ function openAccount() {
       $('#avatar-error').textContent = '';
       $('#avatar-pick').disabled = true;
       $('#avatar-pick').textContent = 'Uploading…';
-      try { applyUser(await uploadAvatar(await squarePicture(file))); }
+      try { applyUser(await uploadPicture('/api/me/avatar', await squarePicture(file))); }
       catch (err) { $('#avatar-error').textContent = err.message; }
       finally { $('#avatar-pick').disabled = false; $('#avatar-pick').textContent = 'Upload picture'; }
     };
@@ -1670,8 +1728,8 @@ async function squarePicture(file) {
   return webp?.type === 'image/webp' ? webp : encode('image/png');
 }
 
-async function uploadAvatar(blob) {
-  const res = await fetch(state.serverUrl + '/api/me/avatar', {
+async function uploadPicture(path, blob) {
+  const res = await fetch(state.serverUrl + path, {
     method: 'POST',
     headers: { authorization: 'Bearer ' + state.token, 'content-type': blob.type || 'application/octet-stream' },
     body: blob,
@@ -1772,6 +1830,101 @@ function closeEmojiPicker() {
 }
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeEmojiPicker(); });
 messagesEl.addEventListener('scroll', closeEmojiPicker);
+
+// ---------------------------------------------------------------- GIFs
+
+// The GIF picker opens above the message box: trending GIFs first, then whatever you search for.
+// Searches and previews go through the Burrow server, which keeps the KLIPY key and your address to itself.
+// Picking one sends it straight away (as a reply, if you're replying), and leaves what you typed alone.
+const gifPicker = $('#gif-picker');
+const gifGrid = $('#gif-grid');
+const gifSearch = $('#gif-search');
+const gif = { query: null, page: 0, hasMore: false, loading: false, seq: 0, timer: 0 };
+
+function toggleGifPicker() {
+  if (!gifPicker.classList.contains('hidden')) return closeGifPicker();
+  closeMentions();
+  gifPicker.classList.remove('hidden');
+  $('#gif-btn').setAttribute('aria-expanded', 'true');
+  if (gif.query === null) loadGifs('');
+  if (!isPhone()) gifSearch.focus();
+  document.addEventListener('mousedown', outsideGifPicker);
+}
+function outsideGifPicker(e) { if (!e.target.closest('#gif-picker, #gif-btn')) closeGifPicker(); }
+function closeGifPicker() {
+  if (gifPicker.classList.contains('hidden')) return;
+  gifPicker.classList.add('hidden');
+  $('#gif-btn').setAttribute('aria-expanded', 'false');
+  document.removeEventListener('mousedown', outsideGifPicker);
+}
+
+async function loadGifs(query, more = false) {
+  if (more && (gif.loading || !gif.hasMore)) return;
+  const seq = ++gif.seq;
+  gif.loading = true;
+  if (!more) { gif.query = query; gif.page = 0; gifGrid.replaceChildren(); gifGrid.scrollTop = 0; }
+  $('#gif-status').textContent = 'Loading…';
+  try {
+    const page = gif.page + 1;
+    const res = await api(`/api/gifs?${new URLSearchParams({ q: query, page })}`);
+    if (seq !== gif.seq) return; // a newer search took over
+    gif.page = page;
+    gif.hasMore = res.hasMore && res.items.length > 0;
+    gifGrid.append(...res.items.map(gifTile));
+    $('#gif-status').textContent = gifGrid.children.length ? '' : query ? `No GIFs for "${query}"` : 'No GIFs right now';
+  } catch (err) {
+    if (seq === gif.seq) $('#gif-status').textContent = err.message;
+  } finally {
+    if (seq === gif.seq) gif.loading = false;
+  }
+}
+
+function gifTile(g) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'gif-tile';
+  b.title = g.title || 'GIF';
+  b.style.aspectRatio = `${g.width} / ${g.height}`;
+  const img = document.createElement('img');
+  img.src = state.serverUrl + g.preview;
+  img.alt = g.title || 'GIF';
+  img.loading = 'lazy';
+  img.onerror = () => b.remove();
+  b.append(img);
+  b.onclick = () => sendGif(g);
+  return b;
+}
+
+async function sendGif(g) {
+  const channelId = state.channelId;
+  if (!channelId) return;
+  const replyTo = state.replyTo;
+  closeGifPicker();
+  setReply(null);
+  try {
+    const att = await api(`/api/channels/${channelId}/gifs`, { method: 'POST', body: { id: g.id } });
+    const body = { content: '', attachmentIds: [att.id], replyTo: replyTo?.id };
+    if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: 'send', channelId, ...body }));
+    else await api(`/api/channels/${channelId}/messages`, { method: 'POST', body });
+  } catch (err) {
+    if (replyTo && !state.replyTo) setReply(replyTo);
+    alertError(err);
+  }
+  if (!isPhone()) input.focus();
+}
+
+$('#gif-btn').onclick = toggleGifPicker;
+gifSearch.addEventListener('input', () => {
+  clearTimeout(gif.timer);
+  gif.timer = setTimeout(() => loadGifs(gifSearch.value.trim()), 350);
+});
+gifSearch.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); clearTimeout(gif.timer); loadGifs(gifSearch.value.trim()); }
+});
+gifGrid.addEventListener('scroll', () => {
+  if (gifGrid.scrollTop + gifGrid.clientHeight > gifGrid.scrollHeight - 300) loadGifs(gif.query, true);
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeGifPicker(); });
 
 // ---------------------------------------------------------------- attachments
 
