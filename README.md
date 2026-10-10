@@ -9,12 +9,16 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 **What works today**
 
 - Accounts with username and password, protected by an optional registration code so strangers can't sign up
-- Burrows (shared spaces) you create, with an invite code to share, and rooms that the host (or anyone whose role allows it) can add
+- Burrows (shared spaces) you create, with a picture, banner, description, welcome room and rules, and rooms that the host (or anyone whose role allows it) can add, put in order and group under headings
+- Invite links that never run out, or that expire after a while or a number of uses, with a page that shows the burrow before joining
+- Room topics, slow mode, announcement rooms only some roles can post in, and archived rooms that keep their history
+- Muting a room, a burrow or a conversation for a while, or choosing all messages, only @mentions or nothing
+- Events with RSVPs and a reminder, group conversations, and your own folders of burrows
 - Custom roles with their own name, color and permissions, private rooms, and removing or banning people
 - Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) end-to-end encrypted, with mute and deafen, strong noise isolation, your choice of microphone, speakers and camera, who's-talking rings, a volume slider for each person, and camera and screen sharing
 - Image and file sharing: attach, paste or drag in up to 10 files per message, with inline image and video previews
 - Emoji reactions and replies (a reply to you counts as a mention)
-- Direct messages with anyone you share a burrow with
+- Direct messages with anyone you share a burrow with, one to one or in groups of up to 10
 - Profile pictures and password changes (changing your password logs out your other devices)
 - Real-time messaging over WebSockets, with typing indicators and online/offline presence
 - Full message history with infinite scroll back, edit and delete your own messages (↑ edits your last one)
@@ -222,13 +226,16 @@ Code-signing certificates fix that but cost money.
 
 Burrow has its own names for things: a **burrow** is a shared space for one group of friends (what Discord calls a server), and each burrow has **rooms** (channels).
 
-- Click **+** under *Your burrows* to dig a new burrow, or join one with an invite code.
-- The gear next to the burrow's name shows its invite code. The host, and roles allowed to *edit the burrow*, can give it a picture there; it replaces the burrow's initials in everyone's top bar. The host (whoever created it) can delete the burrow there; everyone else can leave. People whose role lets them ban also see who's banned there, and can unban them. People who can manage roles open **Roles** there.
+- Click **+** under *Your burrows* to dig a new burrow, or join one with an invite link or code.
+- The gear next to the burrow's name opens its settings. **Invite people** has a link that never runs out, and makes links that expire after a while or a number of uses; anyone in the burrow can make one. Opening a link in a browser shows the burrow's picture, banner and description before joining. **Notifications** mutes the burrow or sets it to all messages, only @mentions or nothing. The host, and roles allowed to *edit the burrow*, find **Edit burrow** there: its name, description, picture, banner, welcome room (where new people land) and rules (new people accept them before they can chat). The host can also hand the burrow to someone else there, and delete it; everyone else can leave. People whose role lets them ban also see who's banned there, and can unban them. People who can manage roles open **Roles** there.
 - **Roles:** every burrow starts with a *Moderator* role. Under **Roles** you can make your own (like *Admins* or *Friends*), pick a color, choose what each one can do (manage rooms, delete messages, remove people, ban people, manage roles, edit the burrow), and move them up or down. Names show in the color of their highest role. People can only change roles, and remove people, below their own highest role, and can't hand out permissions they don't have. A role with no permissions is just a colored label.
-- People who can manage rooms add them with the **+** next to *Rooms*, and change or delete one with the gear that appears when you hover over it. A private room is only seen by people who manage rooms, plus the roles and people you tick.
+- People who can manage rooms add rooms and headings with the **+** next to *Rooms*, where *Arrange rooms* also puts them in order (on a computer you can drag them too). Anyone can fold a heading away. The gear that appears when you hover over a room changes its name, topic, slow mode and who can see it, makes it an announcement room that only some roles can post in, archives it or deletes it. A private room is only seen by people who manage rooms, plus the roles and people you tick.
+- The bell at the top of a room mutes it for a while, or sets it to all messages, only @mentions or nothing. Right-clicking a room in the list does the same.
+- **Events** above the rooms plans a game night: pick a time and a room, and people answer *Going*, *Maybe* or *Can't go*. Everyone going or maybe going gets a reminder 15 minutes before.
 - Your account (your picture, top right) and the sliders button on the voice bar have voice and video settings: which microphone, speakers or headset and camera to use (with a mic test and a camera preview), your volume and everyone's volume, noise isolation, and voice quality (48, 64 or 96 kbps). Noise isolation has four levels: *Off* (for music), *Light* (the browser's own filter), *Strong* (the default, [RNNoise](https://github.com/xiph/rnnoise)) and *Strongest* ([GTCRN](https://github.com/Xiaobin-Rong/gtcrn); takes out the most noise but makes voices a little flatter). Both run on your own device before your voice is encrypted. Picking speakers works in Chrome, Edge and the desktop app; Safari, iPhones and Firefox play through whatever the system picks. Account also has sound settings: chimes for new messages and for people joining or leaving your voice room, and how loud they are.
 - Hover over someone in the member list and click **⋯** to give them roles, or to remove or ban them, depending on what your roles allow.
-- The speech-bubble tile above your burrows holds your direct messages. Start one with its **+**, or click someone in a burrow's member list.
+- The speech-bubble tile above your burrows holds your direct messages. Start one with its **+** (tick several people for a group conversation), or click someone in a burrow's member list. A group's gear renames it, adds people or leaves it.
+- In the burrow list (*more* on a computer, or the burrow button on a phone), the folder button next to each burrow puts it in one of your own folders.
 - Click your name in the bottom corner to set a profile picture or change your password.
 - The **GIF** button next to the message box opens trending GIFs; type to search, and tap one to send it.
 - The **+** in the message box uploads files, makes a poll, sends a sticker, or sends what you've typed later. The smiley opens every emoji (and your burrows' own), and the microphone records a voice message.
@@ -252,7 +259,7 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, and the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more).
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more), and the rooms, burrows and organization update (headings and room order, topics, slow mode, announcement and archived rooms, invite links that run out, banners, rules and a welcome room, muting, events, group conversations and folders).
 
 Ideas for later: text message encryption, sharing one program's sound on macOS.
 

@@ -17,6 +17,8 @@ const state = {
   servers: new Map(),       // id -> { id, name, kind, ownerId, inviteCode, channels, members }; DMs are kind 'dm'
   serverOrder: [],          // burrow ids, in the order they're shown
   favorites: [],            // up to 5 burrow ids kept in the top bar, in order
+  folders: [],              // your own folders of burrows: { id, name, serverIds }
+  pendingInvite: null,      // an invite link this page was opened with, shown once you're in
   dmOrder: [],              // direct message conversation ids, most recent first
   inDms: false,             // showing direct messages instead of a burrow
   serverId: Number(store.get('lastServer')) || null,
@@ -100,6 +102,7 @@ async function showAuth() {
   $('#server-url').value = state.serverUrl;
   if (!isDesktop && !/Android|iPhone|iPad/.test(navigator.userAgent)) showDesktopDownloads();
   renderAuthMode();
+  showAuthInvite();
 }
 
 // Download buttons for the desktop app, on the web only. They open the latest release page,
@@ -198,7 +201,8 @@ $('#logout').addEventListener('click', () => logout());
 // ---------------------------------------------------------------- app bootstrap
 
 async function enterApp() {
-  if (!state.me) state.me = await api('/api/me');
+  state.me = await api('/api/me');
+  state.folders = state.me.folders ?? [];
   $('#auth').classList.add('hidden');
   $('#app').classList.remove('hidden');
   $('#me-name').textContent = state.me.username;
@@ -216,6 +220,7 @@ async function enterApp() {
   await loadServers();
   connect();
   loadSavedAndScheduled();
+  openPendingInvite();
 }
 
 async function loadServers() {
@@ -299,7 +304,8 @@ function handleEvent(ev) {
         renderServers();
         renderChannels();
       }
-      if (m.authorId !== state.me.id && (document.hidden || m.channelId !== state.channelId)) {
+      if (mine) startSlowWait(m.channelId);
+      if (!mine && (document.hidden || m.channelId !== state.channelId) && !quietFor(m)) {
         notify(m);
         playSound('message');
       }
@@ -356,9 +362,10 @@ function handleEvent(ev) {
       state.servers.delete(ev.serverId);
       state.favorites = state.favorites.filter((id) => id !== ev.serverId);
       state.serverOrder = state.serverOrder.filter((id) => id !== ev.serverId);
+      state.dmOrder = state.dmOrder.filter((id) => id !== ev.serverId);
       leaveVoiceIfGone();
-      if (state.serverId === ev.serverId) selectServer(state.serverOrder[0] ?? null);
-      else renderServers();
+      if (state.serverId === ev.serverId) state.inDms ? openDms() : selectServer(state.serverOrder[0] ?? null);
+      else { renderServers(); if (state.inDms) renderChannels(); }
       break;
     case 'presence':
       for (const s of state.servers.values())
@@ -424,7 +431,15 @@ function handleEvent(ev) {
       toast(`A scheduled message couldn't be sent: ${ev.error}`, { timeout: 0 });
       break;
     case 'error':
-      console.warn('Server error:', ev.error);
+      // Usually a message that couldn't be sent: slow mode, an archived room, and so on.
+      toast(ev.error);
+      break;
+    case 'folders':
+      state.folders = ev.folders;
+      if ($('#switcher').dataset.open) renderSwitcher();
+      break;
+    case 'event_reminder':
+      showEventReminder(ev);
       break;
   }
 }
@@ -437,7 +452,7 @@ function notify(m) {
   const mentioned = isDm(server) || mentionsMe(m);
   if (!mentioned && !document.hidden) return;
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const title = isDm(server) ? `${m.author} (direct message)` : `${m.author} in ${channel?.name ?? 'Burrow'}`;
+  const title = isDm(server) ? (server.group ? `${m.author} in ${dmTitle(server)}` : `${m.author} (direct message)`) : `${m.author} in ${channel?.name ?? 'Burrow'}`;
   const body = plainText(m.content).slice(0, 200) || (m.poll ? `Poll: ${m.poll.question}` : m.sticker ? 'Sent a sticker' : 'Sent a file');
   const n = new Notification(title, { body, silent: !mentioned });
   n.onclick = () => { window.focus(); jumpTo(m.channelId, m.id); };
@@ -661,7 +676,13 @@ function renderSwitcher() {
       : full ? `You can have up to ${MAX_FAVORITES} favorites. Unstar one first.` : `Keep ${s.name} in your top bar`;
     star.setAttribute('aria-label', star.title);
     star.onclick = () => toggleFavorite(id);
-    el.append(b, star);
+    const folder = document.createElement('button');
+    folder.className = 'icon-btn folder-btn';
+    folder.innerHTML = FOLDER_ICON;
+    folder.title = folderOf(id) ? `In ${folderOf(id).name}. Move it` : 'Put in a folder';
+    folder.setAttribute('aria-label', folder.title);
+    folder.onclick = () => openFolderMenu(folder, id);
+    el.append(b, folder, star);
     return el;
   };
   const heading = (text) => {
@@ -670,7 +691,9 @@ function renderSwitcher() {
     h.textContent = text;
     return h;
   };
-  const others = state.serverOrder.filter((id) => !favs.includes(id));
+  // Burrows in one of your folders show there (favorites too); the rest come last.
+  const inFolders = new Set(state.folders.flatMap((f) => f.serverIds));
+  const others = state.serverOrder.filter((id) => !favs.includes(id) && !inFolders.has(id));
   const rows = [];
   if (favs.length) rows.push(heading(`Favorites · ${favs.length} of ${MAX_FAVORITES}`), ...favs.map(row));
   else {
@@ -679,7 +702,12 @@ function renderSwitcher() {
     hint.textContent = `Star up to ${MAX_FAVORITES} burrows to keep them in your top bar.`;
     rows.push(hint);
   }
-  if (others.length) rows.push(heading(favs.length ? 'Other burrows' : 'Your burrows'), ...others.map(row));
+  for (const f of state.folders) {
+    const { el, folded } = folderHeading(f);
+    rows.push(el);
+    if (!folded) rows.push(...f.serverIds.filter((id) => state.servers.has(id)).map(row));
+  }
+  if (others.length) rows.push(heading(favs.length || state.folders.length ? 'Other burrows' : 'Your burrows'), ...others.map(row));
   const foot = document.createElement('div');
   foot.className = 'switch-foot';
   foot.innerHTML = '<button class="btn" data-act="new">New burrow</button><button class="btn secondary" data-act="join">Use an invite</button>';
@@ -705,7 +733,8 @@ function closeSwitcher() {
 }
 $('#burrow-switch').onclick = (e) => { e.stopPropagation(); toggleSwitcher($('#burrow-switch')); };
 $('#switcher').onclick = (e) => e.stopPropagation();
-document.addEventListener('click', closeSwitcher);
+// Menus and windows opened from the list (folders, for one) leave it open.
+document.addEventListener('click', (e) => { if (!e.target.closest('#pop-menu, #modal')) closeSwitcher(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSwitcher(); });
 window.addEventListener('resize', placeSwitcher);
 
@@ -718,10 +747,13 @@ async function selectServer(id, initial = false, open = null) {
   renderServers();
   renderMembers();
   if (!s) { state.channelId = null; renderChannels(); state.messages = []; renderMessages(); return; }
+  maybeShowRules(s);
   if (open) return selectChannel(open.channelId, open);
   const remembered = state.lastChannel[id];
   const textRooms = s.channels.filter((c) => c.kind !== 'voice');
-  const ch = textRooms.find((c) => c.id === remembered) ?? s.threads?.find((t) => t.id === remembered) ?? textRooms[0];
+  // New here: the welcome room, if the burrow has one.
+  const ch = textRooms.find((c) => c.id === remembered) ?? s.threads?.find((t) => t.id === remembered)
+    ?? textRooms.find((c) => c.id === s.welcomeChannelId) ?? textRooms.find((c) => !c.archived) ?? textRooms[0];
   if (initial && ch && ch.id === state.channelId) return renderChannels();
   await selectChannel(ch?.id ?? null);
 }
@@ -733,24 +765,48 @@ function renderChannels() {
   $('#rooms-title').textContent = state.inDms ? 'Conversations' : 'Rooms';
   $('#server-menu-btn').classList.toggle('hidden', !s || state.inDms);
   $('#add-channel').classList.toggle('hidden', !state.inDms && !can(s, 'rooms'));
-  $('#add-channel').title = state.inDms ? 'New message' : 'New room';
-  if (state.inDms) return renderDmList();
+  $('#add-channel').title = state.inDms ? 'New message' : 'New room, heading or order';
+  renderBurrowHead(state.inDms ? null : s);
+  renderEvents(state.inDms ? null : s);
+  if (state.inDms) {
+    $('#archived-section').classList.add('hidden');
+    return renderDmList();
+  }
   const channels = s?.channels ?? [];
-  const textRooms = channels.filter((c) => c.kind !== 'voice').map((c) => {
+  const manager = can(s, 'rooms');
+  const roomRow = (c) => {
     const li = document.createElement('li');
     const name = document.createElement('span');
     name.className = 'room-name';
     name.textContent = c.name;
     li.append(name);
     if (c.private) li.insertAdjacentHTML('beforeend', LOCK_ICON);
-    if (c.id === state.channelId) li.className = 'active';
-    else if (isUnread(c)) li.className = 'unread';
+    const n = notifyState(s, c);
+    if (n.muted || n.level === 'none') li.classList.add('muted-room');
+    if (c.id === state.channelId) li.classList.add('active');
+    else if (isUnread(c) && (roomLoud(s, c) || c.mentions)) li.classList.add('unread');
     li.prepend(roomIcon());
-    if (c.id !== state.channelId && c.mentions) li.append(pingCount(c.mentions));
+    if (c.id !== state.channelId && c.mentions && n.level !== 'none') li.append(pingCount(c.mentions));
     li.onclick = () => { selectChannel(c.id); showView('chat'); };
-    if (can(s, 'rooms')) li.append(roomSettingsButton(c));
+    li.oncontextmenu = (e) => { e.preventDefault(); openNotifyMenu(li, s, c); };
+    if (manager) li.append(roomSettingsButton(c));
+    if (manager && !c.archived && !isPhone()) makeDraggable(li, s, c);
     return [li, ...threadRows(s, c)];
-  }).flat();
+  };
+  // Rooms without a heading come first, then each heading with its rooms.
+  const groups = s?.groups ?? [];
+  const live = channels.filter((c) => c.kind !== 'voice' && !c.archived);
+  const textRooms = live.filter((c) => !groups.some((g) => g.id === c.groupId)).flatMap(roomRow);
+  for (const g of groups) {
+    const rooms = live.filter((c) => c.groupId === g.id);
+    textRooms.push(groupHeading(s, g, rooms));
+    // A folded heading still shows the room you're in.
+    textRooms.push(...rooms.filter((c) => !isFolded(g.id) || c.id === state.channelId).flatMap(roomRow));
+  }
+  const archived = channels.filter((c) => c.kind === 'text' && c.archived);
+  $('#archived-section').classList.toggle('hidden', !archived.length);
+  $('#archived-title').textContent = `Archived · ${archived.length}`;
+  $('#archived-list').replaceChildren(...archived.flatMap(roomRow));
   // The first voice room is the burrow's Campfire, shown as a card above the rooms. Any others are "other fires".
   const voiceRooms = channels.filter((c) => c.kind === 'voice').map((c, i) => {
     const li = document.createElement('li');
@@ -869,6 +925,9 @@ async function selectChannel(id, { around = null, present = false } = {}) {
   if (parentLoad) await parentLoad;
   if (state.channelId !== id) return;
   state.messages = msgs;
+  // In slow mode, your last message here decides when you can send the next.
+  const lastMine = msgs.findLast((m) => m.authorId === state.me.id);
+  if (lastMine) startSlowWait(id, lastMine.createdAt);
   if (target != null) {
     state.reachedStart = msgs.filter((m) => m.id <= target).length < 25;
     state.reachedEnd = msgs.filter((m) => m.id > target).length < 25;
@@ -965,9 +1024,12 @@ function renderChannelSub() {
     sub.append(back);
     return;
   }
+  if (s.group) return ($('#channel-sub').textContent = `Group · ${s.members.length} people, ${s.members.filter((m) => m.online).length} around`);
   if (isDm(s)) return ($('#channel-sub').textContent = `Direct message · ${partner(s).online ? 'around' : 'away'}`);
   const here = s.members.filter((m) => m.online).length;
-  $('#channel-sub').textContent = `${s.name} · ${here} of ${s.members.length} around`;
+  const topic = where?.c.topic;
+  $('#channel-sub').textContent = topic || `${s.name} · ${here} of ${s.members.length} around`;
+  $('#channel-sub').title = topic || '';
 }
 
 // ---------------------------------------------------------------- messages
@@ -991,8 +1053,8 @@ function renderMessages({ stick = false } = {}) {
       if (p?.deleted) start.insertAdjacentHTML('beforeend', '<p class="muted small">The message this thread started from was deleted.</p>');
       else if (p) start.append(messageCard(p, null, { onOpen: () => jumpTo(ch.parentId, p.id) }));
     } else start.innerHTML = isDm(server)
-      ? `<h2>This is the beginning of your conversation with ${escapeHtml(partner(server).username)}</h2>`
-      : `<h2>This is the beginning of ${escapeHtml(ch.name)}</h2><div class="muted">Pull up a stump and say hello.</div>`;
+      ? `<h2>This is the beginning of ${server.group ? escapeHtml(dmTitle(server)) : `your conversation with ${escapeHtml(partner(server).username)}`}</h2>`
+      : `<h2>This is the beginning of ${escapeHtml(ch.name)}</h2><div class="muted">${ch.topic ? escapeHtml(ch.topic) : 'Pull up a stump and say hello.'}</div>`;
     frag.append(start);
   }
   let prev = null;
@@ -1199,6 +1261,7 @@ async function sendComposer() {
   const files = state.pending;
   const replyTo = state.replyTo;
   if ((!content && !files.length) || !channelId) return;
+  if ((slowWaits.get(channelId) ?? 0) > Date.now()) return renderSlowNote(); // slow mode: what you typed stays put
   if (files.some((p) => p.error)) return alert('Remove the files that failed to upload first.');
   if (content.length > 4000) return alert('Messages can be at most 4000 characters. Paste long text and it goes up as a file instead.');
   input.value = '';
@@ -1382,11 +1445,29 @@ function openAddServer(focus) {
     </form>
     <div class="or">or</div>
     <form id="join-form">
-      <label>Join with an invite code<input id="invite-code" placeholder="e.g. a1B2c3D4" required /></label>
+      <label>Join with an invite link or code<input id="invite-code" placeholder="e.g. a1B2c3D4" required /></label>
+      <div id="join-preview" class="invite-card small-card hidden"></div>
       <button type="submit" class="btn secondary">Join</button>
     </form>
     <div class="error" id="modal-error"></div>`);
   if (focus === 'join') $('#invite-code').focus();
+  // Shows what the code opens as soon as it's typed or pasted.
+  let previewTimer = 0;
+  $('#invite-code').oninput = (e) => {
+    clearTimeout(previewTimer);
+    const code = inviteCodeFrom(e.target.value);
+    const box = $('#join-preview');
+    if (code.length < 6) return box.classList.add('hidden');
+    previewTimer = setTimeout(async () => {
+      try {
+        const p = await invitePreview(code);
+        if (inviteCodeFrom($('#invite-code')?.value) !== code) return;
+        box.innerHTML = inviteCardHtml(p);
+        fillInviteTile(box, p);
+      } catch (err) { box.innerHTML = `<p class="small">${escapeHtml(err.message)}</p>`; }
+      box.classList.remove('hidden');
+    }, 300);
+  };
   $('#create-form').onsubmit = async (e) => {
     e.preventDefault();
     try { addServer(await api('/api/servers', { method: 'POST', body: { name: $('#new-server-name').value } })); }
@@ -1413,35 +1494,29 @@ $('#server-menu-btn').onclick = () => {
   const s = state.servers.get(state.serverId);
   if (!s) return;
   const owner = s.ownerId === state.me.id;
+  const n = notifyState(s, null);
   modal(`<h2>${escapeHtml(s.name)}</h2>
-    <label>Invite code: share it with friends
-      <div class="invite-box"><input id="invite" readonly value="${escapeHtml(s.inviteCode)}" /><button class="btn" id="copy-invite">Copy</button></div>
-    </label>
-    <p class="small muted">They'll also need the server address: <b>${escapeHtml(state.serverUrl)}</b></p>
-    ${can(s, 'burrow') && state.maxUploadBytes ? `<div class="account-picture burrow-picture">
-      <span id="burrow-picture-tile"></span>
-      <div class="buttons">
-        <div>
-          <button type="button" class="btn secondary" id="burrow-picture-pick">Change picture</button>
-          <button type="button" class="btn secondary ${s.icon ? '' : 'hidden'}" id="burrow-picture-remove">Remove</button>
-        </div>
-        <span class="small muted">Shows in everyone's top bar. PNG, JPEG, GIF or WebP, cropped to a square.</span>
-      </div>
-      <input type="file" id="burrow-picture-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+    ${s.description ? `<p class="muted">${escapeHtml(s.description)}</p>` : ''}
+    <div class="settings-buttons">
+      <button class="btn" id="open-invites">Invite people</button>
+      <button class="btn secondary" id="open-notify" aria-haspopup="menu">Notifications: ${n.muted ? 'muted' : { all: 'all messages', mentions: 'only @mentions', none: 'nothing' }[n.level]}</button>
+      ${s.rules ? '<button class="btn secondary" id="open-rules">Rules</button>' : ''}
+      ${can(s, 'burrow') ? '<button class="btn secondary" id="open-edit">Edit burrow</button>' : ''}
+      ${can(s, 'roles') ? `<button class="btn secondary" id="open-roles">Roles${s.roles.length ? ` · ${s.roles.length}` : ''}</button>` : ''}
+      ${can(s, 'emoji') && state.maxUploadBytes ? `<button class="btn secondary" id="open-emoji">Emoji and stickers${s.emoji?.length ? ` · ${s.emoji.length}` : ''}</button>` : ''}
     </div>
-    <div class="error" id="burrow-picture-error"></div>` : ''}
-    ${can(s, 'roles') ? `<button class="btn secondary" id="open-roles">Roles${s.roles.length ? ` · ${s.roles.length}` : ''}</button>` : ''}
-    ${can(s, 'emoji') && state.maxUploadBytes ? `<button class="btn secondary" id="open-emoji">Emoji and stickers${s.emoji?.length ? ` · ${s.emoji.length}` : ''}</button>` : ''}
     ${can(s, 'ban') ? '<div id="ban-list"></div>' : ''}
     <div class="modal-row">
       <button class="btn danger" id="leave-server">${owner ? 'Delete burrow' : 'Leave burrow'}</button>
       <button class="btn secondary" data-close>Close</button>
     </div>`);
   if (can(s, 'ban')) renderBans(s);
-  if ($('#burrow-picture-tile')) wireBurrowPicture(s);
+  $('#open-invites').onclick = () => openInvites(s.id);
+  $('#open-notify').onclick = () => openNotifyMenu($('#open-notify'), s, null);
+  $('#open-rules')?.addEventListener('click', () => openRules(s));
+  $('#open-edit')?.addEventListener('click', () => openEditBurrow(s.id));
   $('#open-roles')?.addEventListener('click', () => openRoles(s.id));
   $('#open-emoji')?.addEventListener('click', () => openEmojiManager(s.id));
-  $('#copy-invite').onclick = () => { navigator.clipboard?.writeText(s.inviteCode); $('#copy-invite').textContent = 'Copied!'; };
   $('#leave-server').onclick = async () => {
     if (owner && !confirm(`Delete "${s.name}" and all its messages for everyone?`)) return;
     try {
@@ -1490,6 +1565,11 @@ function wireBurrowPicture(s) {
 
 $('#add-channel').onclick = () => {
   if (state.inDms) return openNewDm();
+  openRoomsMenu();
+};
+
+function openNewRoom() {
+  const s = state.servers.get(state.serverId);
   modal(`<h2>New room</h2>
     <form id="channel-form">
       <label>Room name<input id="new-channel-name" placeholder="e.g. game-night" maxlength="32" required /></label>
@@ -1497,7 +1577,8 @@ $('#add-channel').onclick = () => {
         <label><input type="radio" name="kind" value="text" checked /> Text room</label>
         <label><input type="radio" name="kind" value="voice" /> Voice room</label>
       </div>` : ''}
-      ${privacyFields(state.servers.get(state.serverId), false, [])}
+      ${s.groups?.length ? `<label>Under heading<select id="new-channel-group"><option value="">No heading</option>${s.groups.map((g) => `<option value="${g.id}">${escapeHtml(g.name)}</option>`).join('')}</select></label>` : ''}
+      ${privacyFields(s, false, [])}
       <div class="error" id="modal-error"></div>
       <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">Create room</button></div>
     </form>`);
@@ -1508,15 +1589,16 @@ $('#add-channel').onclick = () => {
       const kind = $('input[name="kind"]:checked')?.value ?? 'text';
       const s = await api(`/api/servers/${state.serverId}/channels`, {
         method: 'POST',
-        body: { name: $('#new-channel-name').value, kind, ...readPrivacyFields() },
+        body: { name: $('#new-channel-name').value, kind, groupId: $('#new-channel-group')?.value ? Number($('#new-channel-group').value) : null, ...readPrivacyFields() },
       });
+      const known = new Set(state.servers.get(s.id).channels.map((c) => c.id));
       state.servers.set(s.id, s);
       closeModal();
       if (kind === 'voice') renderChannels();
-      else selectChannel(s.channels[s.channels.length - 1].id);
+      else selectChannel(s.channels.find((c) => !known.has(c.id))?.id ?? s.channels[s.channels.length - 1].id);
     } catch (err) { $('#modal-error').textContent = err.message; }
   };
-};
+}
 
 // ---------------------------------------------------------------- roles: host, moderators, private rooms
 
@@ -1531,7 +1613,7 @@ const PERMS = [
   ['remove', 'Remove people', 'Take people out of the burrow (they can come back with the invite)'],
   ['ban', 'Ban people', "Remove people for good, and see and lift bans"],
   ['roles', 'Manage roles', 'Make, change and hand out the roles below their own'],
-  ['burrow', 'Edit the burrow', "Change the burrow's picture"],
+  ['burrow', 'Edit the burrow', "Change its name, pictures, description, welcome room and rules, and manage invites and events"],
   ['emoji', 'Manage emoji', "Add, rename and remove the burrow's own emoji and stickers"],
 ];
 const ROLE_COLORS = ['#4f8a5b', '#2f7d74', '#3f6fa8', '#7a5aa6', '#b0527a', '#c2553d', '#c98a2b', '#8a8f87'];
@@ -1590,23 +1672,48 @@ function readPrivacyFields() {
 
 function openRoomSettings(c) {
   const s = state.servers.get(state.serverId);
+  const text = c.kind === 'text';
+  const postRoles = c.postRoleIds ?? [];
   modal(`<h2>Room settings</h2>
     <form id="room-form">
       <label>Room name<input id="room-name" maxlength="32" required value="${escapeHtml(c.name)}" /></label>
+      ${text ? `<label>Topic<input id="room-topic" maxlength="200" placeholder="What's this room for?" value="${escapeHtml(c.topic ?? '')}" /></label>
+      <label>Slow mode<select id="room-slow">${SLOW_CHOICES.map(([v, l]) => `<option value="${v}" ${v === (c.slow ?? 0) ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <span class="small muted">How long people wait between messages. People who manage rooms or messages don't wait.</span></label>
+      <label class="check"><input type="checkbox" id="room-announce" ${c.announce ? 'checked' : ''} /> Announcement room: only some roles can post</label>
+      <div id="room-posters" class="${c.announce ? '' : 'hidden'}">
+        <p class="small muted">The host and people who manage rooms can always post. Which roles can too?</p>
+        ${s.roles?.length ? `<ul class="access-list" id="post-roles">${s.roles.map((r) => `<li><label class="check"><input type="checkbox" value="${r.id}" ${postRoles.includes(r.id) ? 'checked' : ''} /> ${roleDot(r.color)}${escapeHtml(r.name)}</label></li>`).join('')}</ul>` : '<p class="small muted">This burrow has no roles yet.</p>'}
+      </div>` : ''}
       ${privacyFields(s, c.private, c.memberIds ?? [], c.roleIds ?? [])}
       <div class="error" id="modal-error"></div>
       <div class="modal-row">
         <button type="button" class="btn danger" id="room-delete">Delete room</button>
+        ${text ? `<button type="button" class="btn secondary" id="room-archive">${c.archived ? 'Unarchive' : 'Archive'}</button>` : ''}
         <span class="spacer"></span>
         <button type="button" class="btn secondary" data-close>Cancel</button>
         <button type="submit" class="btn">Save</button>
       </div>
     </form>`);
   wirePrivacyFields();
+  $('#room-announce')?.addEventListener('change', (e) => $('#room-posters').classList.toggle('hidden', !e.target.checked));
+  $('#room-archive')?.addEventListener('click', async () => {
+    if (!c.archived && !confirm(`Archive ${c.name}? It moves to the bottom of the list, keeps everything said in it, and takes no new messages.`)) return;
+    try {
+      handleEvent({ type: 'server_updated', server: await api(`/api/channels/${c.id}`, { method: 'PATCH', body: { archived: !c.archived } }) });
+      closeModal();
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  });
   $('#room-form').onsubmit = async (e) => {
     e.preventDefault();
+    const extra = text ? {
+      topic: $('#room-topic').value,
+      slow: Number($('#room-slow').value),
+      announce: $('#room-announce').checked,
+      postRoleIds: [...document.querySelectorAll('#post-roles input:checked')].map((i) => Number(i.value)),
+    } : {};
     try {
-      const updated = await api(`/api/channels/${c.id}`, { method: 'PATCH', body: { name: $('#room-name').value, ...readPrivacyFields() } });
+      const updated = await api(`/api/channels/${c.id}`, { method: 'PATCH', body: { name: $('#room-name').value, ...extra, ...readPrivacyFields() } });
       state.servers.set(updated.id, updated);
       closeModal();
       renderChannels();
@@ -1779,7 +1886,7 @@ function openDms() {
 
 async function openDm(userId) {
   try {
-    let id = state.dmOrder.find((d) => partner(state.servers.get(d)).id === userId);
+    let id = state.dmOrder.find((d) => !state.servers.get(d).group && partner(state.servers.get(d)).id === userId);
     if (!id) {
       const s = await api('/api/dms', { method: 'POST', body: { userId } });
       addDm(s);
@@ -1795,16 +1902,23 @@ async function openDm(userId) {
 function renderDmList() {
   const items = state.dmOrder.map((id) => {
     const s = state.servers.get(id);
-    const p = partner(s);
     const li = document.createElement('li');
     li.className = 'dm' + (id === state.serverId ? ' active' : serverUnread(s) ? ' unread' : '');
-    const av = document.createElement('span');
-    av.className = 'avatar xs';
-    setAvatar(av, p.username, avatarOf(p.id, p.avatar));
+    let av;
+    if (s.group) av = groupAvatar();
+    else {
+      const p = partner(s);
+      av = document.createElement('span');
+      av.className = 'avatar xs';
+      setAvatar(av, p.username, avatarOf(p.id, p.avatar));
+    }
     const name = document.createElement('span');
-    name.textContent = p.username;
+    name.className = 'dm-name';
+    name.textContent = dmTitle(s);
     li.append(av, name);
-    const n = id === state.serverId ? 0 : s.channels.reduce((sum, c) => sum + (c.unread ?? 0), 0);
+    if (notifyState(s, null).muted) li.classList.add('muted-room');
+    li.oncontextmenu = (e) => { e.preventDefault(); openNotifyMenu(li, s); };
+    const n = id === state.serverId || notifyState(s, null).muted ? 0 : s.channels.reduce((sum, c) => sum + (c.unread ?? 0), 0);
     if (n) li.insertAdjacentHTML('beforeend', `<span class="ping-count">${n > 99 ? '99+' : n}</span>`);
     li.onclick = () => { store.set('lastDm', id); selectServer(id); showView('chat'); };
     return li;
@@ -1820,33 +1934,25 @@ function renderDmList() {
   $('#voice-section').classList.add('hidden');
 }
 
-// Pick someone you share a burrow with.
+// Pick someone you share a burrow with, or several for a group conversation.
 function openNewDm() {
-  const people = new Map();
-  for (const id of state.serverOrder)
-    for (const m of state.servers.get(id).members) if (m.id !== state.me.id) people.set(m.id, m);
-  const list = [...people.values()].sort((a, b) => a.username.localeCompare(b.username));
-  modal(`<h2>New message</h2>
-    ${list.length ? '<input id="dm-filter" placeholder="Find someone" />' : '<p class="muted">Join a burrow first. You can message anyone who shares one with you.</p>'}
-    <ul class="people-picker" id="dm-people"></ul>
-    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
-  const render = (q = '') => {
-    $('#dm-people').replaceChildren(
-      ...list.filter((m) => m.username.toLowerCase().includes(q.toLowerCase())).map((m) => {
-        const li = document.createElement('li');
-        const av = document.createElement('span');
-        av.className = 'avatar';
-        setAvatar(av, m.username, avatarOf(m.id, m.avatar));
-        const name = document.createElement('span');
-        name.textContent = m.username;
-        li.append(av, name);
-        li.onclick = () => openDm(m.id);
-        return li;
-      }),
-    );
-  };
-  render();
-  $('#dm-filter')?.addEventListener('input', (e) => render(e.target.value));
+  peoplePicker({
+    title: 'New message',
+    intro: 'Pick one person, or a few for a group conversation.',
+    list: messageablePeople(),
+    button: (n) => (n > 1 ? `Start a group of ${n + 1}` : 'Message'),
+    extra: '<label id="group-name-row" class="hidden">Group name (optional)<input id="new-group-name" maxlength="64" placeholder="e.g. Road trip" /></label>',
+    wire: (picked) => $('#group-name-row').classList.toggle('hidden', picked.size < 2),
+    onDone: async (ids) => {
+      if (ids.length === 1) return openDm(ids[0]);
+      const s = await api('/api/dms', { method: 'POST', body: { userIds: ids, name: $('#new-group-name').value } });
+      addDm(s);
+      closeModal();
+      store.set('lastDm', s.id);
+      selectServer(s.id);
+      showView('chat');
+    },
+  });
 }
 
 // ---------------------------------------------------------------- your account
@@ -3964,8 +4070,10 @@ function roomById(id) {
   return null;
 }
 const isUnread = (c) => !!c && c.kind !== 'voice' && (c.unread ?? 0) > 0 && c.id !== state.channelId;
-const serverUnread = (s) => !!s && (s.channels.some(isUnread) || (s.threads ?? []).some(isUnread));
-const serverMentions = (s) => [...s.channels, ...(s.threads ?? [])].reduce((n, c) => n + (c.id === state.channelId ? 0 : c.mentions ?? 0), 0);
+// Muted rooms, and ones set to @mentions or nothing, don't light up the burrow. Mentions still count unless it's nothing.
+const serverUnread = (s) => !!s && [...s.channels, ...(s.threads ?? [])].some((c) => isUnread(c) && roomLoud(s, c));
+const serverMentions = (s) =>
+  [...s.channels, ...(s.threads ?? [])].reduce((n, c) => n + (c.id === state.channelId || notifyState(s, c).level === 'none' ? 0 : c.mentions ?? 0), 0);
 function pingCount(n) {
   const b = document.createElement('span');
   b.className = 'ping-count';
@@ -4006,14 +4114,20 @@ function renderChatHeader() {
   const where = roomById(state.channelId);
   const s = where?.s ?? state.servers.get(state.serverId);
   const ch = where?.c;
-  const title = !ch ? '' : isDm(s) ? partner(s).username : ch.name;
+  const title = !ch ? '' : isDm(s) ? dmTitle(s) : ch.name;
   $('#channel-name').textContent = title;
   renderChannelSub();
-  input.placeholder = !ch ? '' : isDm(s) ? `Message ${title}` : where.thread ? `Reply in ${title}` : `Say something in ${title}`;
+  const slow = !where?.thread && ch?.slow && !slowExempt(s) ? ` (slow mode: ${slowLabel(ch.slow)})` : '';
+  input.placeholder = !ch ? '' : isDm(s) ? `Message ${title}` : where.thread ? `Reply in ${title}` : `Say something in ${title}${slow}`;
   $('#pins-btn').classList.toggle('hidden', !ch);
-  const manage = where?.thread && (ch.createdBy === state.me.id || can(s, 'rooms'));
+  // The gear is for a thread's settings, or a group conversation's.
+  const manage = (where?.thread && (ch.createdBy === state.me.id || can(s, 'rooms'))) || (ch && s?.group);
   $('#thread-btn').classList.toggle('hidden', !manage);
   $('#thread-btn').innerHTML = GEAR_ICON;
+  $('#thread-btn').title = s?.group ? 'Conversation settings' : 'Thread settings';
+  renderNotifyButton();
+  renderComposerLock();
+  renderSlowNote();
 }
 
 // ---- reading: the room you're looking at is read up to its newest message
@@ -4389,7 +4503,7 @@ function forwardTargets() {
   for (const id of state.dmOrder) {
     const s = state.servers.get(id);
     const c = s.channels[0];
-    if (c) out.push({ id: c.id, label: `Direct message with ${partner(s).username}` });
+    if (c) out.push({ id: c.id, label: s.group ? dmTitle(s) : `Direct message with ${partner(s).username}` });
   }
   return out;
 }
@@ -5132,6 +5246,7 @@ async function startThread(m) {
 
 $('#thread-btn').onclick = () => {
   const where = roomById(state.channelId);
+  if (where?.s.group) return openGroupSettings(where.s);
   if (!where?.thread) return;
   const t = where.c;
   modal(`<h2>Thread settings</h2>
@@ -5427,6 +5542,936 @@ $('#plus-btn').onclick = (e) => {
     { label: 'Send later…', run: openSchedule },
   ]);
 };
+
+// ---------------------------------------------------------------- rooms, burrows and organization
+
+const BELL_ICON = '<svg viewBox="0 0 24 24"><path d="M12 22a2.5 2.5 0 0 0 2.5-2.5h-5A2.5 2.5 0 0 0 12 22Zm7-6v-5a7 7 0 0 0-5.5-6.8V3a1.5 1.5 0 0 0-3 0v1.2A7 7 0 0 0 5 11v5l-2 2v1h18v-1l-2-2Z"/></svg>';
+const BELL_OFF_ICON = '<svg viewBox="0 0 24 24"><path d="M12 22a2.5 2.5 0 0 0 2.5-2.5h-5A2.5 2.5 0 0 0 12 22Zm7-6v-5a7 7 0 0 0-5.5-6.8V3a1.5 1.5 0 0 0-3 0v1.2c-1 .2-1.9.7-2.7 1.3L19 16.7V16ZM3.3 2.3 2 3.6l4.1 4.1A7 7 0 0 0 5 11v5l-2 2v1h14.4l3 3 1.3-1.3L3.3 2.3Z"/></svg>';
+const CALENDAR_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 2h2v2h6V2h2v2h2a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2V2Zm12 8H5v9h14v-9Z"/></svg>';
+const FOLDER_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5Z"/></svg>';
+const PEOPLE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-6 9c0-3.3 2.7-6 6-6s6 2.7 6 6H3Zm13-9a3 3 0 1 0 0-6 3 3 0 0 1 0 6Zm1 3c2.5.4 4 2.6 4 6h-4.5c0-2.4-.8-4.5-2.2-6H17Z"/></svg>';
+
+// ---- notifications: rooms and burrows can be muted for a while, or set to all messages, @mentions only, or nothing
+
+const isMutedPref = (p) => !!p?.mutedUntil && (p.mutedUntil === -1 || p.mutedUntil > Date.now());
+/** Threads follow the room they hang off. */
+const settingsRoom = (s, c) => (c?.parentId ? s?.channels.find((x) => x.id === c.parentId) ?? c : c);
+/** How loudly a room tells you about messages: its own setting, else the burrow's, else everything. */
+function notifyState(s, c) {
+  const own = settingsRoom(s, c)?.notify;
+  return { muted: isMutedPref(s?.notify) || isMutedPref(own), level: own?.level ?? s?.notify?.level ?? 'all' };
+}
+/** New messages here light up the room and the burrow. */
+const roomLoud = (s, c) => { const n = notifyState(s, c); return !n.muted && n.level === 'all'; };
+/** No sound or notification for this message. */
+function quietFor(m) {
+  const where = roomById(m.channelId);
+  if (!where) return false;
+  const n = notifyState(where.s, where.c);
+  return n.muted || n.level === 'none' || (n.level === 'mentions' && !isDm(where.s) && !mentionsMe(m));
+}
+
+const muteLabel = (until) => (until === -1 ? 'until you turn it back on' : `until ${formatTime(new Date(until)).replace(/^(Today|Yesterday)/, (w) => w.toLowerCase())}`);
+
+// The menu for a room (c) or a whole burrow or conversation (c null).
+function openNotifyMenu(anchor, s, c = null) {
+  const pref = (c ? c.notify : s.notify) ?? { level: null, mutedUntil: null };
+  const muted = isMutedPref(pref);
+  const level = pref.level ?? null;
+  const tick = (on, label) => (on ? `✓ ${label}` : label);
+  const set = (change) => setNotify(s, c, { level, mutedUntil: muted ? pref.mutedUntil : null, ...change });
+  const levels = isDm(s) ? [] : [
+    c && { label: tick(level === null, `Same as ${s.name}`), run: () => set({ level: null }) },
+    { label: tick(level === 'all' || (!c && level === null), 'All messages'), run: () => set({ level: 'all' }) },
+    { label: tick(level === 'mentions', 'Only @mentions'), run: () => set({ level: 'mentions' }) },
+    { label: tick(level === 'none', 'Nothing'), run: () => set({ level: 'none' }) },
+  ];
+  const later = (ms) => Date.now() + ms;
+  openMenu(anchor, [
+    ...levels,
+    muted
+      ? { label: `Unmute (muted ${muteLabel(pref.mutedUntil)})`, run: () => set({ mutedUntil: null }) }
+      : null,
+    ...(muted ? [] : [
+      { label: 'Mute for 1 hour', run: () => set({ mutedUntil: later(3600e3) }) },
+      { label: 'Mute for 8 hours', run: () => set({ mutedUntil: later(8 * 3600e3) }) },
+      { label: 'Mute for 24 hours', run: () => set({ mutedUntil: later(24 * 3600e3) }) },
+      { label: 'Mute until I turn it back on', run: () => set({ mutedUntil: -1 }) },
+    ]),
+  ]);
+}
+
+async function setNotify(s, c, body) {
+  try {
+    const server = await api('/api/notify', { method: 'POST', body: { serverId: s.id, channelId: c?.id ?? null, ...body } });
+    handleEvent({ type: 'server_updated', server });
+  } catch (err) { alertError(err); }
+}
+
+$('#notify-btn').onclick = () => {
+  const where = roomById(state.channelId);
+  if (!where) return;
+  // In a DM the whole conversation is muted; in a burrow, the room (or the room a thread is in).
+  openNotifyMenu($('#notify-btn'), where.s, isDm(where.s) ? null : settingsRoom(where.s, where.c));
+};
+
+function renderNotifyButton() {
+  const where = roomById(state.channelId);
+  const btn = $('#notify-btn');
+  btn.classList.toggle('hidden', !where);
+  if (!where) return;
+  const n = notifyState(where.s, where.c);
+  const quiet = n.muted || n.level === 'none';
+  btn.innerHTML = quiet ? BELL_OFF_ICON : BELL_ICON;
+  btn.classList.toggle('on', quiet || n.level === 'mentions');
+  btn.title = n.muted ? 'Muted. Click to change.' : n.level === 'mentions' ? 'Only @mentions notify you' : n.level === 'none' ? 'Nothing here notifies you' : 'Notifications';
+}
+
+// Mutes run out on their own; check every minute so the dots come back.
+setInterval(() => {
+  if (!state.me) return;
+  const timed = [...state.servers.values()].some((s) => [s.notify, ...s.channels.map((c) => c.notify)].some((p) => p?.mutedUntil > 0 && p.mutedUntil <= Date.now()));
+  if (timed) { renderServers(); renderChannels(); renderNotifyButton(); }
+}, 60e3);
+
+// ---- room headings, order and archive
+
+const foldKey = (id) => `fold:${id}`;
+const isFolded = (id) => store.get(foldKey(id)) === '1';
+
+/** Text rooms in the order they're shown: those without a heading, then each heading's rooms. */
+function shownTextRooms(s) {
+  const live = s.channels.filter((c) => c.kind !== 'voice' && !c.archived);
+  const groups = s.groups ?? [];
+  const known = (c) => groups.some((g) => g.id === c.groupId);
+  return [...live.filter((c) => !known(c)).map((c) => ({ id: c.id, groupId: null })),
+    ...groups.flatMap((g) => live.filter((c) => c.groupId === g.id).map((c) => ({ id: c.id, groupId: g.id })))];
+}
+
+/** Saves the rooms in this order (text rooms as given, then archived and voice rooms as they are). */
+async function saveLayout(s, order, groups = (s.groups ?? []).map((g) => g.id)) {
+  const rest = s.channels.filter((c) => c.kind === 'voice' || c.archived).map((c) => ({ id: c.id, groupId: c.groupId ?? null }));
+  const updated = await api(`/api/servers/${s.id}/layout`, { method: 'POST', body: { rooms: [...order, ...rest], groups } });
+  state.servers.set(updated.id, updated);
+  renderChannels();
+  return updated;
+}
+
+/** Moves a room before another one (taking its heading), or to the end of a heading's rooms. */
+function moveRoom(s, id, { beforeId = null, groupId = null }) {
+  const order = shownTextRooms(s).filter((x) => x.id !== id);
+  const i = beforeId ? order.findIndex((x) => x.id === beforeId) : -1;
+  if (i >= 0) order.splice(i, 0, { id, groupId: order[i].groupId });
+  else {
+    const last = order.map((x) => x.groupId).lastIndexOf(groupId);
+    order.splice(last >= 0 ? last + 1 : groupId === null ? 0 : order.length, 0, { id, groupId });
+  }
+  return saveLayout(s, order).catch(alertError);
+}
+
+// Dragging rooms in the list, for people who manage rooms (on a computer; phones use "Arrange rooms").
+let draggingRoom = null;
+function makeDraggable(li, s, c) {
+  li.draggable = true;
+  li.addEventListener('dragstart', (e) => { draggingRoom = c.id; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', c.name); li.classList.add('dragging'); });
+  li.addEventListener('dragend', () => { draggingRoom = null; li.classList.remove('dragging'); clearDropMarks(); });
+  dropTarget(li, () => draggingRoom !== c.id && moveRoom(s, draggingRoom, { beforeId: c.id }));
+}
+function dropTarget(el, drop) {
+  el.addEventListener('dragover', (e) => {
+    if (draggingRoom === null) return;
+    e.preventDefault();
+    clearDropMarks();
+    el.classList.add('drop-here');
+  });
+  el.addEventListener('dragleave', () => el.classList.remove('drop-here'));
+  el.addEventListener('drop', (e) => { e.preventDefault(); clearDropMarks(); if (draggingRoom !== null) drop(); });
+}
+const clearDropMarks = () => document.querySelectorAll('.drop-here').forEach((x) => x.classList.remove('drop-here'));
+
+/** A heading in the room list. Clicking folds it; a folded heading shows a dot when a room under it has news. */
+function groupHeading(s, g, rooms) {
+  const li = document.createElement('li');
+  const folded = isFolded(g.id);
+  li.className = 'room-group' + (folded ? ' folded' : '');
+  li.innerHTML = CHEVRON_ICON;
+  const name = document.createElement('span');
+  name.textContent = g.name;
+  li.append(name);
+  li.setAttribute('role', 'button');
+  li.setAttribute('aria-expanded', String(!folded));
+  if (folded && rooms.some((c) => isUnread(c) && roomLoud(s, c))) li.classList.add('unread');
+  li.onclick = () => { store.set(foldKey(g.id), folded ? null : '1'); renderChannels(); };
+  if (can(s, 'rooms') && !isPhone()) dropTarget(li, () => moveRoom(s, draggingRoom, { groupId: g.id }));
+  return li;
+}
+
+$('#archived-toggle').onclick = () => {
+  const open = $('#archived-list').classList.toggle('hidden') === false;
+  $('#archived-toggle').setAttribute('aria-expanded', String(open));
+};
+
+// The + by "Rooms": people who manage rooms also get headings and arranging.
+function openRoomsMenu() {
+  const s = state.servers.get(state.serverId);
+  openMenu($('#add-channel'), [
+    { label: 'New room', run: openNewRoom },
+    { label: 'New heading', run: () => openHeadingEditor(s, null) },
+    { label: 'Arrange rooms', run: () => openArrange(s.id) },
+  ]);
+}
+
+function openHeadingEditor(s, g, back = null) {
+  modal(`<h2>${g ? 'Rename heading' : 'New heading'}</h2>
+    <p class="muted small">Headings group rooms in the list, like "Games" or "Hangout". Anyone can fold them away.</p>
+    <form id="heading-form">
+      <label>Heading<input id="heading-name" maxlength="32" required value="${escapeHtml(g?.name ?? '')}" placeholder="e.g. Games" /></label>
+      <div class="error" id="modal-error"></div>
+      <div class="modal-row"><button type="button" class="btn secondary" id="heading-cancel">Cancel</button><button type="submit" class="btn">${g ? 'Save' : 'Add heading'}</button></div>
+    </form>`);
+  $('#heading-cancel').onclick = () => (back ? back() : closeModal());
+  $('#heading-form').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const body = { name: $('#heading-name').value };
+      const updated = await api(g ? `/api/groups/${g.id}` : `/api/servers/${s.id}/groups`, { method: g ? 'PATCH' : 'POST', body });
+      state.servers.set(updated.id, updated);
+      renderChannels();
+      back ? back() : closeModal();
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+}
+
+// Moving rooms with buttons, and managing headings. Works the same on phones.
+function openArrange(serverId) {
+  const s = state.servers.get(serverId);
+  if (!s) return closeModal();
+  const groups = s.groups ?? [];
+  const order = shownTextRooms(s);
+  const voice = s.channels.filter((c) => c.kind === 'voice');
+  const roomName = (id) => s.channels.find((c) => c.id === id)?.name ?? '';
+  const options = (sel) => `<option value="">No heading</option>${groups.map((g) => `<option value="${g.id}" ${g.id === sel ? 'selected' : ''}>${escapeHtml(g.name)}</option>`).join('')}`;
+  const roomRow = (x) => {
+    const same = order.filter((o) => o.groupId === x.groupId);
+    const i = same.findIndex((o) => o.id === x.id);
+    return `<li data-room="${x.id}"><span class="arrange-name">#${escapeHtml(roomName(x.id))}</span>
+      <button class="icon-btn" data-up="${x.id}" title="Move up" ${i === 0 ? 'disabled' : ''}>▲</button>
+      <button class="icon-btn" data-down="${x.id}" title="Move down" ${i === same.length - 1 ? 'disabled' : ''}>▼</button>
+      ${groups.length ? `<select data-group="${x.id}" aria-label="Heading for ${escapeHtml(roomName(x.id))}">${options(x.groupId)}</select>` : ''}</li>`;
+  };
+  const section = (g, i) => `<li class="arrange-head"><b>${escapeHtml(g.name)}</b>
+      <button class="icon-btn" data-gup="${g.id}" title="Move heading up" ${i === 0 ? 'disabled' : ''}>▲</button>
+      <button class="icon-btn" data-gdown="${g.id}" title="Move heading down" ${i === groups.length - 1 ? 'disabled' : ''}>▼</button>
+      <button class="btn secondary" data-rename="${g.id}">Rename</button><button class="btn danger" data-gdel="${g.id}">Delete</button></li>
+    ${order.filter((o) => o.groupId === g.id).map(roomRow).join('') || '<li class="muted small">No rooms here yet.</li>'}`;
+  modal(`<h2>Arrange rooms</h2>
+    <p class="muted small">This is the order everyone sees. On a computer you can also drag rooms in the list.</p>
+    <ul class="arrange-list">
+      ${order.filter((o) => o.groupId === null).map(roomRow).join('')}
+      ${groups.map(section).join('')}
+    </ul>
+    ${voice.length > 1 ? `<h3>Voice rooms</h3><p class="muted small">The first one is the Campfire.</p>
+      <ul class="arrange-list">${voice.map((c, i) => `<li><span class="arrange-name">${escapeHtml(c.name)}</span>
+        <button class="icon-btn" data-vup="${c.id}" ${i === 0 ? 'disabled' : ''} title="Move up">▲</button>
+        <button class="icon-btn" data-vdown="${c.id}" ${i === voice.length - 1 ? 'disabled' : ''} title="Move down">▼</button></li>`).join('')}</ul>` : ''}
+    <div class="error" id="modal-error"></div>
+    <div class="modal-row"><button class="btn secondary" id="arrange-heading">New heading</button><span class="spacer"></span><button class="btn" data-close>Done</button></div>`);
+  const card = $('#modal-card');
+  const run = async (work) => {
+    try { await work(); openArrange(serverId); } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+  const swap = (list, id, dir) => {
+    const i = list.findIndex((x) => (x.id ?? x) === id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= list.length) return list;
+    [list[i], list[j]] = [list[j], list[i]];
+    return list;
+  };
+  const moveWithin = (id, dir) => {
+    const x = order.find((o) => o.id === id);
+    const same = order.filter((o) => o.groupId === x.groupId);
+    const j = same.findIndex((o) => o.id === id) + dir;
+    if (!same[j]) return;
+    const a = order.indexOf(x), b = order.indexOf(same[j]);
+    [order[a], order[b]] = [order[b], order[a]];
+    return saveLayout(s, order);
+  };
+  card.querySelectorAll('[data-up]').forEach((b) => (b.onclick = () => run(() => moveWithin(Number(b.dataset.up), -1))));
+  card.querySelectorAll('[data-down]').forEach((b) => (b.onclick = () => run(() => moveWithin(Number(b.dataset.down), 1))));
+  card.querySelectorAll('[data-group]').forEach((sel) => (sel.onchange = () => run(() => moveRoom(s, Number(sel.dataset.group), { groupId: sel.value ? Number(sel.value) : null }))));
+  const groupIds = groups.map((g) => g.id);
+  card.querySelectorAll('[data-gup]').forEach((b) => (b.onclick = () => run(() => saveLayout(s, order, swap(groupIds, Number(b.dataset.gup), -1)))));
+  card.querySelectorAll('[data-gdown]').forEach((b) => (b.onclick = () => run(() => saveLayout(s, order, swap(groupIds, Number(b.dataset.gdown), 1)))));
+  card.querySelectorAll('[data-rename]').forEach((b) => (b.onclick = () => openHeadingEditor(s, groups.find((g) => g.id === Number(b.dataset.rename)), () => openArrange(serverId))));
+  card.querySelectorAll('[data-gdel]').forEach((b) => (b.onclick = () => run(async () => {
+    const g = groups.find((x) => x.id === Number(b.dataset.gdel));
+    if (!confirm(`Delete the ${g.name} heading? Its rooms stay, without a heading.`)) return;
+    state.servers.set(s.id, await api(`/api/groups/${g.id}`, { method: 'DELETE' }));
+    renderChannels();
+  })));
+  // Voice rooms keep their own order, after the text rooms.
+  const moveVoice = (id, dir) => {
+    const ids = swap(voice.map((c) => c.id), id, dir);
+    const archived = s.channels.filter((c) => c.kind === 'text' && c.archived).map((c) => ({ id: c.id, groupId: c.groupId ?? null }));
+    return api(`/api/servers/${s.id}/layout`, { method: 'POST', body: { rooms: [...order, ...archived, ...ids.map((id) => ({ id }))], groups: groupIds } })
+      .then((u) => { state.servers.set(u.id, u); renderChannels(); });
+  };
+  card.querySelectorAll('[data-vup]').forEach((b) => (b.onclick = () => run(() => moveVoice(Number(b.dataset.vup), -1))));
+  card.querySelectorAll('[data-vdown]').forEach((b) => (b.onclick = () => run(() => moveVoice(Number(b.dataset.vdown), 1))));
+  $('#arrange-heading').onclick = () => openHeadingEditor(s, null, () => openArrange(serverId));
+}
+
+// ---- writing in a room: archived rooms, announcement rooms, rules and slow mode
+
+/** Why you can't write in the open room, or null. */
+function postBlock(where) {
+  if (!where || isDm(where.s)) return null;
+  const { s, c } = where;
+  if (settingsRoom(s, c)?.archived) return { text: 'This room is archived. You can read it, but nobody can write in it.' };
+  if (!s.rulesAccepted) return { text: `Accept ${s.name}'s rules to start chatting.`, button: 'Read the rules', run: () => openRules(s) };
+  if (!where.thread && c.canPost === false) return { text: 'Only some people can post in this room. You can still react and reply in threads.' };
+  return null;
+}
+
+function renderComposerLock() {
+  const block = postBlock(roomById(state.channelId));
+  const lock = $('#composer-lock');
+  lock.classList.toggle('hidden', !block);
+  $('#composer').classList.toggle('hidden', !!block);
+  if (!block) return;
+  lock.replaceChildren(block.text);
+  if (block.button) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn';
+    b.textContent = block.button;
+    b.onclick = block.run;
+    lock.append(b);
+  }
+}
+
+const slowExempt = (s) => can(s, 'rooms') || can(s, 'messages');
+const slowWaits = new Map(); // channel id -> when you can send again
+const SLOW_CHOICES = [[0, 'Off'], [5, '5 seconds'], [10, '10 seconds'], [30, '30 seconds'], [60, '1 minute'], [300, '5 minutes'], [900, '15 minutes'], [3600, '1 hour'], [21600, '6 hours']];
+const slowLabel = (sec) => SLOW_CHOICES.find(([v]) => v === sec)?.[1] ?? `${sec} seconds`;
+
+/** After you send in a slow room, the send button waits it out. */
+function startSlowWait(channelId, sentAt = Date.now()) {
+  const where = roomById(channelId);
+  const slow = where?.c.slow ?? 0;
+  if (!slow || slowExempt(where.s) || where.thread || sentAt + slow * 1000 <= Date.now()) return;
+  slowWaits.set(channelId, sentAt + slow * 1000);
+  renderSlowNote();
+}
+let slowTimer = 0;
+function renderSlowNote() {
+  clearTimeout(slowTimer);
+  const note = $('#slow-note');
+  const left = Math.ceil(((slowWaits.get(state.channelId) ?? 0) - Date.now()) / 1000);
+  note.classList.toggle('hidden', left <= 0);
+  $('#send-btn').disabled = left > 0 || !state.channelId;
+  if (left <= 0) return slowWaits.delete(state.channelId);
+  note.textContent = `Slow mode is on. You can send again in ${left >= 60 ? `${Math.ceil(left / 60)} min` : `${left}s`}.`;
+  slowTimer = setTimeout(renderSlowNote, 1000);
+}
+
+// ---- burrow banner, description, rules and welcome room
+
+function renderBurrowHead(s) {
+  const show = s && !isDm(s);
+  const banner = $('#burrow-banner');
+  banner.classList.toggle('hidden', !show || !s.banner);
+  if (show && s.banner && banner.dataset.src !== s.banner) {
+    banner.dataset.src = s.banner;
+    const img = document.createElement('img');
+    img.src = state.serverUrl + s.banner;
+    img.alt = '';
+    img.onerror = () => banner.classList.add('hidden');
+    banner.replaceChildren(img);
+  }
+  const desc = $('#server-desc');
+  desc.textContent = show ? s.description ?? '' : '';
+  desc.title = desc.textContent;
+  desc.classList.toggle('hidden', !desc.textContent);
+}
+
+const rulesShown = new Set(); // burrows whose rules popped up this visit
+function openRules(s) {
+  modal(`<h2>${escapeHtml(s.name)}'s rules</h2>
+    <div class="rules-text">${formatContent(s.rules)}</div>
+    <p class="muted small">${s.rulesAccepted ? 'You accepted these.' : 'Agree to them to start chatting here.'}</p>
+    <div class="error" id="modal-error"></div>
+    <div class="modal-row"><button class="btn secondary" data-close>${s.rulesAccepted ? 'Close' : 'Not now'}</button>${s.rulesAccepted ? '' : '<button class="btn" id="rules-accept">I agree</button>'}</div>`);
+  $('#rules-accept')?.addEventListener('click', async () => {
+    try {
+      handleEvent({ type: 'server_updated', server: await api(`/api/servers/${s.id}/rules/accept`, { method: 'POST' }) });
+      closeModal();
+      toast(`Welcome to ${s.name}!`);
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  });
+}
+function maybeShowRules(s) {
+  if (!s || isDm(s) || s.rulesAccepted || rulesShown.has(s.id)) return;
+  rulesShown.add(s.id);
+  openRules(s);
+}
+
+// A wide banner: cropped to 3:1 from the middle and shrunk, so it loads fast.
+async function bannerPicture(file) {
+  let img;
+  try { img = await createImageBitmap(file); }
+  catch { throw new Error("That file doesn't look like a picture"); }
+  const w = Math.min(img.width, img.height * 3), h = w / 3;
+  const canvas = document.createElement('canvas');
+  canvas.width = 960;
+  canvas.height = 320;
+  canvas.getContext('2d').drawImage(img, (img.width - w) / 2, (img.height - h) / 2, w, h, 0, 0, 960, 320);
+  const encode = (type) => new Promise((resolve) => canvas.toBlob(resolve, type, 0.85));
+  const webp = await encode('image/webp');
+  return webp?.type === 'image/webp' ? webp : encode('image/jpeg');
+}
+
+// Name, description, pictures, welcome room, rules and handing the burrow over.
+function openEditBurrow(serverId) {
+  const s = state.servers.get(serverId);
+  if (!s) return closeModal();
+  const host = isHost(s, state.me.id);
+  const rooms = s.channels.filter((c) => c.kind === 'text' && !c.private && !c.archived);
+  const others = s.members.filter((m) => m.id !== state.me.id);
+  modal(`<h2>Edit ${escapeHtml(s.name)}</h2>
+    <form id="burrow-form">
+      <label>Name<input id="burrow-name" maxlength="64" required value="${escapeHtml(s.name)}" /></label>
+      <label>Description<textarea id="burrow-desc" maxlength="300" rows="2" placeholder="What's this burrow for?">${escapeHtml(s.description ?? '')}</textarea></label>
+      <label>Welcome room
+        <select id="burrow-welcome"><option value="">The first room</option>${rooms.map((c) => `<option value="${c.id}" ${c.id === s.welcomeChannelId ? 'selected' : ''}>#${escapeHtml(c.name)}</option>`).join('')}</select>
+        <span class="small muted">Where new people land when they first open the burrow.</span>
+      </label>
+      <label>Rules<textarea id="burrow-rules" maxlength="2000" rows="4" placeholder="Leave empty for no rules">${escapeHtml(s.rules ?? '')}</textarea>
+        <span class="small muted">New people accept these before they can chat. Changing them asks everyone again.</span>
+      </label>
+      <div class="error" id="modal-error"></div>
+      <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">Save</button></div>
+    </form>
+    ${state.maxUploadBytes ? `<h3>Picture</h3>
+    <div class="account-picture burrow-picture">
+      <span id="burrow-picture-tile"></span>
+      <div class="buttons">
+        <div>
+          <button type="button" class="btn secondary" id="burrow-picture-pick">Change picture</button>
+          <button type="button" class="btn secondary ${s.icon ? '' : 'hidden'}" id="burrow-picture-remove">Remove</button>
+        </div>
+        <span class="small muted">Shows in everyone's top bar. PNG, JPEG, GIF or WebP, cropped to a square.</span>
+      </div>
+      <input type="file" id="burrow-picture-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+    </div>
+    <div class="error" id="burrow-picture-error"></div>
+    <h3>Banner</h3>
+    <div class="banner-edit">
+      <div class="banner-preview" id="banner-preview">${s.banner ? `<img src="${escapeHtml(state.serverUrl + s.banner)}" alt="" />` : '<span class="muted small">No banner</span>'}</div>
+      <div>
+        <button type="button" class="btn secondary" id="banner-pick">${s.banner ? 'Change banner' : 'Add a banner'}</button>
+        <button type="button" class="btn secondary ${s.banner ? '' : 'hidden'}" id="banner-remove">Remove</button>
+      </div>
+      <span class="small muted">Shows above the rooms and on invite links. Cropped to a wide strip.</span>
+      <input type="file" id="banner-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+      <div class="error" id="banner-error"></div>
+    </div>` : ''}
+    ${host && others.length ? `<h3>Hand the burrow over</h3>
+    <p class="small muted">Someone else becomes the host and can do everything. You stay in the burrow with your roles.</p>
+    <div class="transfer-row"><select id="transfer-to">${others.map((m) => `<option value="${m.id}">${escapeHtml(m.username)}</option>`).join('')}</select>
+      <button type="button" class="btn danger" id="transfer-go">Hand over</button></div>` : ''}`);
+  const done = (updated) => { handleEvent({ type: 'server_updated', server: updated }); };
+  $('#burrow-form').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      done(await api(`/api/servers/${s.id}`, {
+        method: 'PATCH',
+        body: {
+          name: $('#burrow-name').value,
+          description: $('#burrow-desc').value,
+          welcomeChannelId: $('#burrow-welcome').value ? Number($('#burrow-welcome').value) : null,
+          rules: $('#burrow-rules').value,
+        },
+      }));
+      closeModal();
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+  if ($('#burrow-picture-tile')) wireBurrowPicture(s);
+  // The banner saves straight away, leaving the rest of the form as it is.
+  const showBanner = (updated) => {
+    done(updated);
+    $('#banner-preview').innerHTML = updated.banner ? `<img src="${escapeHtml(state.serverUrl + updated.banner)}" alt="" />` : '<span class="muted small">No banner</span>';
+    $('#banner-remove').classList.toggle('hidden', !updated.banner);
+  };
+  if ($('#banner-pick')) {
+    const pick = $('#banner-pick');
+    pick.onclick = () => $('#banner-input').click();
+    $('#banner-input').onchange = async (e) => {
+      const file = e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      pick.disabled = true;
+      pick.textContent = 'Uploading…';
+      $('#banner-error').textContent = '';
+      try { showBanner(await uploadPicture(`/api/servers/${s.id}/banner`, await bannerPicture(file))); }
+      catch (err) { $('#banner-error').textContent = err.message; }
+      pick.disabled = false;
+      pick.textContent = 'Change banner';
+    };
+    $('#banner-remove').onclick = async () => {
+      try { showBanner(await api(`/api/servers/${s.id}/banner`, { method: 'DELETE' })); }
+      catch (err) { $('#banner-error').textContent = err.message; }
+    };
+  }
+  $('#transfer-go')?.addEventListener('click', async () => {
+    const to = others.find((m) => m.id === Number($('#transfer-to').value));
+    if (!to || !confirm(`Make ${to.username} the host of ${s.name}? You can't take this back yourself.`)) return;
+    try { done(await api(`/api/servers/${s.id}/transfer`, { method: 'POST', body: { userId: to.id } })); closeModal(); toast(`${to.username} is now the host.`); }
+    catch (err) { alertError(err); }
+  });
+}
+
+// ---- invites: the permanent code, and links that run out
+
+const inviteLink = (code) => `${state.serverUrl}/invite/${code}`;
+const EXPIRES = [[1800, '30 minutes'], [3600, '1 hour'], [6 * 3600, '6 hours'], [86400, '1 day'], [7 * 86400, '7 days'], [30 * 86400, '30 days'], [0, 'Never']];
+const USES = [[0, 'No limit'], [1, '1 use'], [5, '5 uses'], [10, '10 uses'], [25, '25 uses'], [100, '100 uses']];
+
+function copyButton(btn, text) {
+  btn.onclick = () => { navigator.clipboard?.writeText(text).catch(() => {}); btn.textContent = 'Copied!'; setTimeout(() => (btn.textContent = 'Copy'), 1500); };
+}
+
+function openInvites(serverId) {
+  const s = state.servers.get(serverId);
+  if (!s) return closeModal();
+  modal(`<h2>Invite people to ${escapeHtml(s.name)}</h2>
+    <label>Invite link
+      <div class="invite-box"><input id="invite" readonly value="${escapeHtml(inviteLink(s.inviteCode))}" /><button class="btn" id="copy-invite">Copy</button></div>
+    </label>
+    <p class="small muted">It never runs out. In the desktop app, people can paste the link or just the code <b>${escapeHtml(s.inviteCode)}</b>.
+      ${can(s, 'burrow') ? '<button type="button" class="link-btn" id="new-code">Make a new one</button> if it got out.' : ''}</p>
+    <h3>A link that runs out</h3>
+    <div class="invite-make">
+      <label>Expires after<select id="inv-expires">${EXPIRES.map(([v, l]) => `<option value="${v}" ${v === 86400 ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>Can be used<select id="inv-uses">${USES.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>
+      <button class="btn secondary" id="inv-make">Make link</button>
+    </div>
+    <div id="inv-new"></div>
+    <div id="inv-list"></div>
+    <div class="error" id="modal-error"></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
+  copyButton($('#copy-invite'), inviteLink(s.inviteCode));
+  $('#new-code')?.addEventListener('click', async () => {
+    if (!confirm('Make a new permanent link? The old link and code stop working.')) return;
+    try { handleEvent({ type: 'server_updated', server: await api(`/api/servers/${s.id}/invite-code`, { method: 'POST' }) }); openInvites(s.id); }
+    catch (err) { $('#modal-error').textContent = err.message; }
+  });
+  const showList = (invites) => {
+    const box = $('#inv-list');
+    if (!box) return;
+    if (!invites.length) return box.replaceChildren();
+    box.innerHTML = `<h3>Links still working</h3><ul class="invite-list">${invites.map((i) => `<li>
+      <span><code>${escapeHtml(i.code)}</code><span class="small muted"> · ${i.maxUses ? `${i.uses} of ${i.maxUses} used` : `${i.uses} used`}${i.expiresAt ? ` · until ${escapeHtml(formatTime(new Date(i.expiresAt)))}` : ''}${i.createdBy && i.createdBy !== state.me.username ? ` · by ${escapeHtml(i.createdBy)}` : ''}</span></span>
+      <button class="btn secondary" data-copy="${escapeHtml(i.code)}">Copy</button><button class="btn danger" data-cancel="${escapeHtml(i.code)}">Cancel</button></li>`).join('')}</ul>`;
+    box.querySelectorAll('[data-copy]').forEach((b) => copyButton(b, inviteLink(b.dataset.copy)));
+    box.querySelectorAll('[data-cancel]').forEach((b) => (b.onclick = async () => {
+      try { showList(await api(`/api/invites/${b.dataset.cancel}`, { method: 'DELETE' })); }
+      catch (err) { $('#modal-error').textContent = err.message; }
+    }));
+  };
+  api(`/api/servers/${s.id}/invites`).then(showList).catch(() => {});
+  $('#inv-make').onclick = async () => {
+    const expiresIn = Number($('#inv-expires').value) || null;
+    const maxUses = Number($('#inv-uses').value) || null;
+    try {
+      const { code, invites } = await api(`/api/servers/${s.id}/invites`, { method: 'POST', body: { expiresIn, maxUses } });
+      $('#inv-new').innerHTML = `<div class="invite-box"><input readonly value="${escapeHtml(inviteLink(code))}" /><button class="btn" id="inv-copy">Copy</button></div>`;
+      copyButton($('#inv-copy'), inviteLink(code));
+      $('#inv-copy').click();
+      showList(invites);
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+}
+
+/** A small card for what an invite opens: picture, name, blurb and how many are in it. */
+function inviteCardHtml(p) {
+  return `${p.banner ? `<div class="invite-banner"><img src="${escapeHtml(state.serverUrl + p.banner)}" alt="" /></div>` : ''}
+    <div class="invite-body">
+      <span class="invite-tile"></span>
+      <div><div class="muted small">You're invited to</div><b>${escapeHtml(p.name)}</b>
+      <div class="muted small">${p.members} member${p.members === 1 ? '' : 's'} · ${p.online} around</div></div>
+    </div>
+    ${p.description ? `<p class="small">${escapeHtml(p.description)}</p>` : ''}`;
+}
+function fillInviteTile(el, p) {
+  const tile = el.querySelector('.invite-tile');
+  if (tile) tile.replaceWith(burrowTile({ name: p.name, icon: p.icon }));
+}
+async function invitePreview(code) {
+  const res = await fetch(`${state.serverUrl}/api/invites/${encodeURIComponent(code)}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "That invite doesn't work");
+  return data;
+}
+const inviteCodeFrom = (text) => String(text ?? '').trim().split('/').pop();
+
+// Opening an invite link on the web shows the burrow first. Logged out, it sits above the login form.
+// (The server sends /invite/<code> links here as /?invite=<code>.)
+const linkInvite = new URLSearchParams(location.search).get('invite')?.match(/^[\w-]{1,32}$/)?.[0] ?? null;
+if (linkInvite) {
+  state.pendingInvite = linkInvite;
+  history.replaceState(null, '', '/');
+}
+async function showAuthInvite() {
+  const card = $('#invite-card');
+  if (!state.pendingInvite || !state.serverUrl) return card.classList.add('hidden');
+  try {
+    const p = await invitePreview(state.pendingInvite);
+    card.innerHTML = inviteCardHtml(p) + '<p class="muted small">Log in or make an account to join.</p>';
+    fillInviteTile(card, p);
+  } catch (err) {
+    card.innerHTML = `<p class="small">${escapeHtml(err.message)}. Ask for a new link.</p>`;
+    state.pendingInvite = null;
+  }
+  card.classList.remove('hidden');
+}
+async function openPendingInvite() {
+  const code = state.pendingInvite;
+  if (!code) return;
+  state.pendingInvite = null;
+  modal('<h2>Invite</h2><p class="muted">Looking it up…</p>');
+  let p;
+  try { p = await invitePreview(code); }
+  catch (err) {
+    return modal(`<h2>That invite doesn't work</h2><p class="muted">${escapeHtml(err.message)}. Ask whoever sent it for a new one.</p>
+      <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
+  }
+  modal(`<div class="invite-card">${inviteCardHtml(p)}</div>
+    <div class="error" id="modal-error"></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Not now</button><button class="btn" id="invite-join">Join ${escapeHtml(p.name)}</button></div>`);
+  fillInviteTile($('#modal-card'), p);
+  $('#invite-join').onclick = async () => {
+    try { addServer(await api('/api/join', { method: 'POST', body: { inviteCode: code } })); }
+    catch (err) { $('#modal-error').textContent = err.message; }
+  };
+}
+
+// ---- events
+
+const RSVP_LABELS = { going: 'Going', maybe: 'Maybe', no: "Can't go" };
+function eventWhen(t) {
+  if (t <= Date.now()) return 'Happening now';
+  const d = new Date(t);
+  const days = Math.round((new Date(d).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 864e5);
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (days === 0) return `Today ${time}`;
+  if (days === 1) return `Tomorrow ${time}`;
+  if (days < 7) return `${d.toLocaleDateString([], { weekday: 'long' })} ${time}`;
+  return `${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} ${time}`;
+}
+const going = (e) => e.rsvps.filter((r) => r.status === 'going').length;
+
+function renderEvents(s) {
+  const section = $('#events-section');
+  section.classList.toggle('hidden', !s || isDm(s));
+  if (!s || isDm(s)) return;
+  const events = s.events ?? [];
+  const rows = events.slice(0, 4).map((e) => {
+    const li = document.createElement('li');
+    li.className = 'event-row' + (e.startsAt <= Date.now() ? ' now' : '');
+    li.innerHTML = `${CALENDAR_ICON}<span class="event-text"><b></b><span class="small muted"></span></span>`;
+    li.querySelector('b').textContent = e.title;
+    const mine = e.rsvps.find((r) => r.userId === state.me.id)?.status;
+    li.querySelector('.muted').textContent = `${eventWhen(e.startsAt)} · ${going(e)} going${mine === 'going' ? ', you too' : ''}`;
+    li.onclick = () => openEvent(s.id, e.id);
+    return li;
+  });
+  if (events.length > 4) {
+    const more = document.createElement('li');
+    more.className = 'event-more';
+    more.textContent = `${events.length - 4} more`;
+    more.onclick = () => openEventList(s.id);
+    rows.push(more);
+  }
+  if (!rows.length) {
+    const hint = document.createElement('li');
+    hint.className = 'hint';
+    hint.textContent = 'Nothing planned. Press + to plan a game night.';
+    rows.push(hint);
+  }
+  $('#event-list').replaceChildren(...rows);
+}
+$('#add-event').onclick = () => openEventEditor(state.serverId, null);
+
+function openEventList(serverId) {
+  const s = state.servers.get(serverId);
+  modal(`<h2>Events in ${escapeHtml(s.name)}</h2>
+    <ul class="event-list big">${s.events.map((e) => `<li class="event-row" data-ev="${e.id}">${CALENDAR_ICON}<span class="event-text"><b>${escapeHtml(e.title)}</b><span class="small muted">${escapeHtml(eventWhen(e.startsAt))} · ${going(e)} going</span></span></li>`).join('')}</ul>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button><button class="btn" id="ev-new">Plan an event</button></div>`);
+  $('#modal-card').querySelectorAll('[data-ev]').forEach((li) => (li.onclick = () => openEvent(serverId, Number(li.dataset.ev))));
+  $('#ev-new').onclick = () => openEventEditor(serverId, null);
+}
+
+function openEvent(serverId, eventId) {
+  const s = state.servers.get(serverId);
+  const e = s?.events?.find((x) => x.id === eventId);
+  if (!e) return modal('<h2>Event</h2><p class="muted">This event is over or was cancelled.</p><div class="modal-row"><button class="btn secondary" data-close>Close</button></div>');
+  const room = e.channelId ? s.channels.find((c) => c.id === e.channelId) : null;
+  const mine = e.rsvps.find((r) => r.userId === state.me.id)?.status ?? null;
+  const names = (status) => e.rsvps.filter((r) => r.status === status).map((r) => nameOf(r.userId, 'someone'));
+  const editable = e.createdBy === state.me.id || can(s, 'burrow');
+  modal(`<h2>${escapeHtml(e.title)}</h2>
+    <p class="event-when">${CALENDAR_ICON}<span>${escapeHtml(new Date(e.startsAt).toLocaleString([], { weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}${e.startsAt <= Date.now() ? ' · happening now' : ''}</span></p>
+    ${room ? `<p class="small">Where: <button type="button" class="link-btn" id="ev-room">${room.kind === 'voice' ? escapeHtml(room.name) : '#' + escapeHtml(room.name)}</button></p>` : ''}
+    ${e.details ? `<div class="event-details">${formatContent(e.details)}</div>` : ''}
+    <p class="small muted">Planned by ${escapeHtml(nameOf(e.createdBy, 'someone'))}</p>
+    <div class="rsvp-row">${Object.entries(RSVP_LABELS).map(([k, l]) => `<button class="btn ${mine === k ? '' : 'secondary'}" data-rsvp="${k}" aria-pressed="${mine === k}">${l}${k !== 'no' ? ` · ${names(k).length}` : ''}</button>`).join('')}</div>
+    ${names('going').length ? `<p class="small"><b>Going:</b> ${names('going').map(escapeHtml).join(', ')}</p>` : ''}
+    ${names('maybe').length ? `<p class="small"><b>Maybe:</b> ${names('maybe').map(escapeHtml).join(', ')}</p>` : ''}
+    <p class="small muted">People going or maybe going get a reminder 15 minutes before.</p>
+    <div class="error" id="modal-error"></div>
+    <div class="modal-row">
+      ${editable ? '<button class="btn danger" id="ev-delete">Cancel event</button><button class="btn secondary" id="ev-edit">Edit</button>' : ''}
+      <span class="spacer"></span><button class="btn secondary" data-close>Close</button>
+    </div>`);
+  const card = $('#modal-card');
+  card.querySelectorAll('[data-rsvp]').forEach((b) => (b.onclick = async () => {
+    try {
+      handleEvent({ type: 'server_updated', server: await api(`/api/events/${e.id}/rsvp`, { method: 'POST', body: { status: mine === b.dataset.rsvp ? null : b.dataset.rsvp } }) });
+      openEvent(serverId, eventId);
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  }));
+  $('#ev-room')?.addEventListener('click', () => {
+    closeModal();
+    if (room.kind === 'voice') joinVoice(room.id);
+    else { selectChannel(room.id); showView('chat'); }
+  });
+  $('#ev-edit')?.addEventListener('click', () => openEventEditor(serverId, e));
+  $('#ev-delete')?.addEventListener('click', async () => {
+    if (!confirm(`Cancel ${e.title}?`)) return;
+    try { handleEvent({ type: 'server_updated', server: await api(`/api/events/${e.id}`, { method: 'DELETE' }) }); closeModal(); }
+    catch (err) { $('#modal-error').textContent = err.message; }
+  });
+}
+
+function openEventEditor(serverId, e) {
+  const s = state.servers.get(serverId);
+  if (!s) return;
+  const rooms = s.channels.filter((c) => !c.archived);
+  const start = e?.startsAt ?? (() => { const d = new Date(Date.now() + 864e5); d.setHours(20, 0, 0, 0); return d.getTime(); })();
+  modal(`<h2>${e ? 'Edit event' : 'Plan an event'}</h2>
+    <form id="event-form">
+      <label>What<input id="ev-title" maxlength="100" required placeholder="e.g. Game night" value="${escapeHtml(e?.title ?? '')}" /></label>
+      <label>When<input type="datetime-local" id="ev-when" required value="${localInputValue(start)}" min="${localInputValue(Date.now())}" /></label>
+      <label>Where<select id="ev-room"><option value="">Nowhere in particular</option>${rooms.map((c) => `<option value="${c.id}" ${c.id === e?.channelId ? 'selected' : ''}>${c.kind === 'voice' ? escapeHtml(c.name) + ' (voice)' : '#' + escapeHtml(c.name)}</option>`).join('')}</select></label>
+      <label>Details<textarea id="ev-details" maxlength="1000" rows="3" placeholder="Anything people should know">${escapeHtml(e?.details ?? '')}</textarea></label>
+      <div class="error" id="modal-error"></div>
+      <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">${e ? 'Save' : 'Plan it'}</button></div>
+    </form>`);
+  $('#event-form').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const body = {
+      title: $('#ev-title').value,
+      startsAt: new Date($('#ev-when').value).getTime(),
+      channelId: $('#ev-room').value ? Number($('#ev-room').value) : null,
+      details: $('#ev-details').value,
+    };
+    try {
+      const updated = await api(e ? `/api/events/${e.id}` : `/api/servers/${serverId}/events`, { method: e ? 'PATCH' : 'POST', body });
+      handleEvent({ type: 'server_updated', server: updated });
+      const saved = e ?? updated.events.filter((x) => x.title === body.title.trim()).sort((a, b) => b.id - a.id)[0];
+      saved ? openEvent(serverId, saved.id) : closeModal();
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+}
+
+function showEventReminder(ev) {
+  const s = state.servers.get(ev.serverId);
+  const e = ev.event;
+  const text = `${e.title} starts ${e.startsAt <= Date.now() ? 'now' : `at ${new Date(e.startsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`}${s ? ` in ${s.name}` : ''}.`;
+  const open = () => { if (s) { selectServer(s.id); openEvent(s.id, e.id); } };
+  toast(text, { action: 'Open', onAction: open, timeout: 0 });
+  playSound('message');
+  if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
+    const n = new Notification(e.title, { body: text });
+    n.onclick = () => { window.focus(); open(); };
+  }
+}
+
+// ---- group conversations
+
+/** What a conversation is called: the other person, or a group's name (or its people). */
+function dmTitle(s) {
+  if (!s.group) return partner(s).username;
+  if (s.name) return s.name;
+  const names = s.members.filter((m) => m.id !== state.me.id).map((m) => m.username);
+  return names.length > 3 ? `${names.slice(0, 3).join(', ')} and ${names.length - 3} more` : names.join(', ') || 'Just you';
+}
+function groupAvatar(cls = 'xs') {
+  const av = document.createElement('span');
+  av.className = `avatar ${cls} group-avatar`;
+  av.innerHTML = PEOPLE_ICON;
+  return av;
+}
+
+/** People you can message: everyone who shares a burrow with you. */
+function messageablePeople() {
+  const people = new Map();
+  for (const id of state.serverOrder)
+    for (const m of state.servers.get(id).members) if (m.id !== state.me.id) people.set(m.id, m);
+  return [...people.values()].sort((a, b) => a.username.localeCompare(b.username));
+}
+
+/** A list of people to tick. `done(ids)` gets the ticked ones. */
+function peoplePicker({ title, intro = '', list, button, onDone, extra = '', wire }) {
+  modal(`<h2>${escapeHtml(title)}</h2>
+    ${intro ? `<p class="muted small">${escapeHtml(intro)}</p>` : ''}
+    ${list.length ? '<input id="dm-filter" placeholder="Find someone" />' : '<p class="muted">Join a burrow first. You can message anyone who shares one with you.</p>'}
+    <ul class="people-picker" id="dm-people"></ul>
+    ${extra}
+    <div class="error" id="modal-error"></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button><button class="btn" id="people-go" disabled>${escapeHtml(button(0))}</button></div>`);
+  const picked = new Set();
+  const update = () => {
+    $('#people-go').disabled = !picked.size;
+    $('#people-go').textContent = button(picked.size);
+    wire?.(picked);
+  };
+  const render = (q = '') => {
+    $('#dm-people').replaceChildren(
+      ...list.filter((m) => m.username.toLowerCase().includes(q.toLowerCase())).map((m) => {
+        const li = document.createElement('li');
+        li.classList.toggle('picked', picked.has(m.id));
+        li.setAttribute('role', 'checkbox');
+        li.setAttribute('aria-checked', String(picked.has(m.id)));
+        li.tabIndex = 0;
+        const av = document.createElement('span');
+        av.className = 'avatar';
+        setAvatar(av, m.username, avatarOf(m.id, m.avatar));
+        const name = document.createElement('span');
+        name.textContent = m.username;
+        const tick = document.createElement('span');
+        tick.className = 'pick-tick';
+        li.append(av, name, tick);
+        li.onclick = () => {
+          picked.has(m.id) ? picked.delete(m.id) : picked.add(m.id);
+          li.classList.toggle('picked', picked.has(m.id));
+          li.setAttribute('aria-checked', String(picked.has(m.id)));
+          update();
+        };
+        li.onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); li.click(); } };
+        return li;
+      }),
+    );
+  };
+  render();
+  update();
+  $('#dm-filter')?.addEventListener('input', (e) => render(e.target.value));
+  $('#people-go').onclick = async () => {
+    try { await onDone([...picked]); } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+}
+
+function openGroupSettings(s) {
+  const others = s.members.filter((m) => m.id !== state.me.id);
+  modal(`<h2>${escapeHtml(dmTitle(s))}</h2>
+    <form id="group-form">
+      <label>Name<input id="group-name" maxlength="64" placeholder="${escapeHtml(others.map((m) => m.username).join(', '))}" value="${escapeHtml(s.name ?? '')}" /></label>
+      <div class="error" id="modal-error"></div>
+      <div class="modal-row"><button type="submit" class="btn secondary">Rename</button></div>
+    </form>
+    <h3>People · ${s.members.length}</h3>
+    <ul class="group-people">${s.members.map((m) => `<li data-avatar="${m.id}"><span class="avatar xs"></span>${escapeHtml(m.username)}${m.id === state.me.id ? ' <span class="muted small">(you)</span>' : ''}</li>`).join('')}</ul>
+    <div class="modal-row">
+      <button class="btn danger" id="group-leave">Leave conversation</button>
+      <span class="spacer"></span>
+      <button class="btn secondary" id="group-add">Add people</button>
+      <button class="btn secondary" data-close>Close</button>
+    </div>`);
+  $('#modal-card').querySelectorAll('[data-avatar]').forEach((li) => {
+    const m = s.members.find((x) => x.id === Number(li.dataset.avatar));
+    setAvatar(li.querySelector('.avatar'), m.username, avatarOf(m.id, m.avatar));
+  });
+  $('#group-form').onsubmit = async (e) => {
+    e.preventDefault();
+    try { handleEvent({ type: 'server_updated', server: await api(`/api/servers/${s.id}`, { method: 'PATCH', body: { name: $('#group-name').value } }) }); closeModal(); }
+    catch (err) { $('#modal-error').textContent = err.message; }
+  };
+  $('#group-add').onclick = () => peoplePicker({
+    title: `Add people to ${dmTitle(s)}`,
+    intro: 'They can read everything already said here.',
+    list: messageablePeople().filter((m) => !s.members.some((x) => x.id === m.id)),
+    button: (n) => (n ? `Add ${n}` : 'Add'),
+    onDone: async (ids) => {
+      handleEvent({ type: 'server_updated', server: await api(`/api/dms/${s.id}/members`, { method: 'POST', body: { userIds: ids } }) });
+      openGroupSettings(state.servers.get(s.id));
+    },
+  });
+  $('#group-leave').onclick = async () => {
+    if (!confirm(`Leave ${dmTitle(s)}? You won't see it any more.`)) return;
+    try {
+      await api(`/api/servers/${s.id}/leave`, { method: 'POST' });
+      closeModal();
+      handleEvent({ type: 'server_deleted', serverId: s.id });
+    } catch (err) { alertError(err); }
+  };
+}
+
+// ---- folders of burrows, in the burrow list
+
+async function saveFolders(next) {
+  const before = state.folders;
+  state.folders = next;
+  renderSwitcher();
+  try { state.folders = (await api('/api/me/folders', { method: 'POST', body: { folders: next } })).folders; }
+  catch (err) { state.folders = before; alertError(err); }
+  renderSwitcher();
+}
+const folderOf = (id) => state.folders.find((f) => f.serverIds.includes(id));
+
+function openFolderMenu(anchor, serverId) {
+  const current = folderOf(serverId);
+  const without = state.folders.map((f) => ({ ...f, serverIds: f.serverIds.filter((x) => x !== serverId) }));
+  openMenu(anchor, [
+    ...state.folders.filter((f) => f !== current).map((f) => ({
+      label: `Move to ${f.name}`,
+      run: () => saveFolders(without.map((x) => (x.id === f.id ? { ...x, serverIds: [...x.serverIds, serverId] } : x))),
+    })),
+    current && { label: `Take out of ${current.name}`, run: () => saveFolders(without) },
+    { label: 'New folder…', run: () => openFolderName(null, (name) => saveFolders([...without, { id: `f${Date.now().toString(36)}`, name, serverIds: [serverId] }])) },
+  ]);
+}
+
+function openFolderName(folder, done) {
+  modal(`<h2>${folder ? 'Rename folder' : 'New folder'}</h2>
+    <form id="folder-form"><label>Folder name<input id="folder-name" maxlength="32" required value="${escapeHtml(folder?.name ?? '')}" placeholder="e.g. Gaming" /></label>
+      <p class="muted small">Only you see your folders.</p>
+      <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">${folder ? 'Save' : 'Make folder'}</button></div></form>`);
+  $('#folder-form').onsubmit = (e) => { e.preventDefault(); closeModal(); done($('#folder-name').value.trim()); };
+}
+
+function folderHeading(f) {
+  const h = document.createElement('div');
+  h.className = 'switch-head folder-head';
+  const folded = store.get(`folder:${f.id}`) === '1';
+  const toggle = document.createElement('button');
+  toggle.className = 'folder-toggle' + (folded ? ' folded' : '');
+  toggle.innerHTML = `${CHEVRON_ICON}${FOLDER_ICON}<span></span>`;
+  toggle.querySelector('span').textContent = `${f.name} · ${f.serverIds.length}`;
+  toggle.setAttribute('aria-expanded', String(!folded));
+  if (folded && f.serverIds.some((id) => serverUnread(state.servers.get(id)))) toggle.classList.add('unread');
+  toggle.onclick = () => { store.set(`folder:${f.id}`, folded ? null : '1'); renderSwitcher(); };
+  const more = document.createElement('button');
+  more.className = 'icon-btn folder-more';
+  more.innerHTML = MORE_ICON;
+  more.title = `${f.name} folder`;
+  more.onclick = () => openMenu(more, [
+    { label: 'Rename folder', run: () => openFolderName(f, (name) => saveFolders(state.folders.map((x) => (x.id === f.id ? { ...x, name } : x)))) },
+    { label: 'Delete folder', danger: true, run: () => saveFolders(state.folders.filter((x) => x.id !== f.id)) },
+  ]);
+  h.append(toggle, more);
+  return { el: h, folded };
+}
 
 // ---------------------------------------------------------------- helpers
 

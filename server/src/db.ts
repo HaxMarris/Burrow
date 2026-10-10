@@ -146,6 +146,7 @@ export function openDb(file: string): Db {
     }
   }
   addChatExtras(db);
+  addOrganization(db);
   return db;
 }
 
@@ -268,6 +269,78 @@ function addChatExtras(db: Db) {
     db.exec(`INSERT OR IGNORE INTO read_state (user_id, channel_id, last_read_id)
              SELECT m.user_id, c.id, COALESCE((SELECT MAX(id) FROM messages WHERE channel_id = c.id), 0)
              FROM members m JOIN channels c ON c.server_id = m.server_id`);
+}
+
+/** Added with the rooms, burrows and organization update. */
+function addOrganization(db: Db) {
+  // Rooms: their place in the list, an optional heading they sit under, a topic line,
+  // slow mode, announcement rooms (only some roles post) and archiving.
+  addColumn(db, 'channels', 'position', 'INTEGER');
+  addColumn(db, 'channels', 'group_id', 'INTEGER REFERENCES room_groups(id) ON DELETE SET NULL');
+  addColumn(db, 'channels', 'topic', "TEXT NOT NULL DEFAULT ''");
+  addColumn(db, 'channels', 'slow_seconds', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'channels', 'announce', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'channels', 'archived_at', 'INTEGER');
+  // Burrows: a banner and blurb, a welcome room and rules. Group DMs use the name too.
+  addColumn(db, 'servers', 'description', "TEXT NOT NULL DEFAULT ''");
+  addColumn(db, 'servers', 'banner', 'TEXT');
+  addColumn(db, 'servers', 'welcome_channel_id', 'INTEGER');
+  addColumn(db, 'servers', 'rules', "TEXT NOT NULL DEFAULT ''");
+  addColumn(db, 'members', 'rules_accepted_at', 'INTEGER');
+  // Your own folders of burrows, as JSON: [{ id, name, serverIds }].
+  addColumn(db, 'users', 'burrow_folders', "TEXT NOT NULL DEFAULT '[]'");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS room_groups (
+      id        INTEGER PRIMARY KEY,
+      server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      name      TEXT NOT NULL,
+      position  INTEGER NOT NULL
+    );
+    -- Roles that may post in an announcement room (people who manage rooms always can).
+    CREATE TABLE IF NOT EXISTS channel_post_roles (
+      channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      role_id    INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+      PRIMARY KEY (channel_id, role_id)
+    );
+    -- Invite links with a time or use limit, on top of each burrow's permanent code.
+    CREATE TABLE IF NOT EXISTS invites (
+      code       TEXT PRIMARY KEY,
+      server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER,
+      max_uses   INTEGER,
+      uses       INTEGER NOT NULL DEFAULT 0
+    );
+    -- How loudly each room or burrow tells you about messages. channel_id 0 is the whole burrow.
+    -- level: 'all', 'mentions' or 'none' (null: follow the burrow, or the usual).
+    CREATE TABLE IF NOT EXISTS notify_prefs (
+      user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      server_id   INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      channel_id  INTEGER NOT NULL DEFAULT 0,
+      level       TEXT,
+      muted_until INTEGER, -- -1: until turned back on
+      PRIMARY KEY (user_id, server_id, channel_id)
+    );
+    CREATE TABLE IF NOT EXISTS events (
+      id          INTEGER PRIMARY KEY,
+      server_id   INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      channel_id  INTEGER REFERENCES channels(id) ON DELETE SET NULL, -- where it happens, if anywhere
+      title       TEXT NOT NULL,
+      details     TEXT NOT NULL DEFAULT '',
+      starts_at   INTEGER NOT NULL,
+      created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at  INTEGER NOT NULL,
+      reminded    INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS events_by_server ON events(server_id, starts_at);
+    CREATE TABLE IF NOT EXISTS event_rsvps (
+      event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+      user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      status   TEXT NOT NULL, -- 'going', 'maybe' or 'no'
+      PRIMARY KEY (event_id, user_id)
+    );
+  `);
 }
 
 /** Every new burrow starts with a Moderator role, which the host can change or delete. */
