@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import { writeFile, mkdir, unlink, stat } from 'node:fs/promises';
+import { writeFile, mkdir, unlink, stat, copyFile } from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { extname, join, normalize } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { addModeratorRole, type Db } from './db.ts';
@@ -9,6 +9,7 @@ import { hashPassword, verifyPassword, newToken, newInviteCode } from './auth.ts
 import { closeRoom, removeFromRoom, voiceToken, type VoiceOptions } from './voice.ts';
 import { staticFiles } from './static.ts';
 import { gifSearch, download, type GifOptions } from './gifs.ts';
+import { fetchEmbed, fetchImage, linksIn, type Embed, type EmbedOptions } from './embeds.ts';
 
 export interface AppOptions {
   db: Db;
@@ -23,14 +24,16 @@ export interface AppOptions {
   maxUploadBytes?: number;
   /** KLIPY settings; the GIF picker is turned off without them (or without uploads). */
   gifs?: GifOptions;
+  /** Link previews are on unless this is false. */
+  linkPreviews?: EmbedOptions | false;
 }
 
 type User = { id: number; username: string; avatar: string | null };
-const PERMS = ['rooms', 'messages', 'remove', 'ban', 'roles', 'burrow'] as const;
+const PERMS = ['rooms', 'messages', 'remove', 'ban', 'roles', 'burrow', 'emoji'] as const;
 type Perm = (typeof PERMS)[number];
 type Standing = { host: boolean; rank: number; perms: Set<Perm>; roleIds: number[] };
 const parsePerms = (text: string) => text.split(',').filter((p): p is Perm => (PERMS as readonly string[]).includes(p));
-type Channel = { id: number; serverId: number; name: string; kind: 'text' | 'voice'; private: number };
+type Channel = { id: number; serverId: number; name: string; kind: 'text' | 'voice' | 'thread'; private: number; parentId: number | null };
 type Json = Record<string, unknown>;
 
 class HttpError extends Error {
@@ -91,7 +94,8 @@ const EMOJI = /\p{Extended_Pictographic}|\p{Regional_Indicator}/u;
 // Shown in the page. Everything else downloads, so an uploaded .html or .svg can't run as part of Burrow.
 const INLINE_TYPES = new Set([
   'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif',
-  'video/mp4', 'video/webm', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
+  'video/mp4', 'video/webm', 'video/quicktime', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
+  'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/flac',
 ]);
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -159,7 +163,7 @@ export function createApp(opts: AppOptions): Server {
     !!db.prepare('SELECT 1 FROM members WHERE server_id = ? AND user_id = ?').get(serverId, userId);
 
   const channelById = (id: number) =>
-    db.prepare('SELECT id, server_id AS serverId, name, kind, private FROM channels WHERE id = ?').get(id) as
+    db.prepare('SELECT id, server_id AS serverId, name, kind, private, parent_id AS parentId FROM channels WHERE id = ?').get(id) as
       | Channel
       | undefined;
 
@@ -189,7 +193,12 @@ export function createApp(opts: AppOptions): Server {
   };
   const can = (serverId: number, userId: number, perm: Perm) => !!standing(serverId, userId)?.perms.has(perm);
   /** Private rooms are seen by people who manage rooms, the people let in, and anyone with a role let in. */
-  const canSee = (channel: Channel, userId: number) => {
+  const canSee = (channel: Channel, userId: number): boolean => {
+    // A thread is seen by whoever sees the room it hangs off.
+    if (channel.kind === 'thread') {
+      const parent = channel.parentId === null ? undefined : channelById(channel.parentId);
+      return !!parent && canSee(parent, userId);
+    }
     if (!isMember(channel.serverId, userId)) return false;
     if (!channel.private || can(channel.serverId, userId, 'rooms')) return true;
     return !!db
@@ -212,6 +221,8 @@ export function createApp(opts: AppOptions): Server {
     type: a.type,
     size: a.size,
     url: `/api/attachments/${a.id}/${encodeURIComponent(a.name as string)}`,
+    ...(a.spoiler ? { spoiler: true } : {}),
+    ...(a.voice_seconds != null ? { voiceSeconds: a.voice_seconds } : {}),
   });
 
   const reactionsFor = (messageId: number) => {
@@ -237,29 +248,46 @@ export function createApp(opts: AppOptions): Server {
     return { ...m, content: (m.content as string).slice(0, 160), hasAttachments: !!m.hasAttachments };
   };
 
-  /** Adds attachments, reactions and reply previews to a list of message rows. */
-  const withAttachments = (rows: Json[]) => {
+  /** Adds attachments, reactions, reply previews, polls, link previews and threads to a list of message rows. */
+  const withAttachments = (rows: Json[]): Json[] => {
     if (!rows.length) return rows;
-    rows = rows.map(({ replyToId, ...r }) => ({ ...r, replyTo: replyPreview(replyToId), reactions: reactionsFor(r.id as number) }));
+    rows = rows.map(({ replyToId, stickerId, embedsOff, forwarded, ...r }) => ({
+      ...r,
+      pinnedAt: r.pinnedAt ?? null,
+      replyTo: replyPreview(replyToId),
+      reactions: reactionsFor(r.id as number),
+      forwarded: forwarded ? JSON.parse(forwarded as string) : null,
+      sticker: stickerId == null ? null : stickerJson(stickerId as number),
+      poll: pollFor(r.id as number),
+      embeds: embedsOff ? [] : embedsFor(r.id as number),
+      thread: threadOf(r.id as number),
+    }));
     const ids = rows.map((r) => r.id as number);
     const atts = db
       .prepare(
-        `SELECT id, message_id, name, type, size FROM attachments
+        `SELECT id, message_id, name, type, size, spoiler, voice_seconds FROM attachments
          WHERE message_id IN (${ids.map(() => '?').join(',')}) ORDER BY position`,
       )
       .all(...ids) as Json[];
     return rows.map((r) => ({ ...r, attachments: atts.filter((a) => a.message_id === r.id).map(attachmentJson) }));
   };
 
+  // Every message is read with these columns, then filled in by withAttachments.
+  const MESSAGE_SELECT = `SELECT m.id, m.channel_id AS channelId, m.content, m.created_at AS createdAt, m.edited_at AS editedAt,
+      m.reply_to AS replyToId, m.pinned_at AS pinnedAt, m.forwarded, m.sticker_id AS stickerId, m.embeds_off AS embedsOff,
+      u.id AS authorId, u.username AS author, ${avatarUrl('u.avatar')} AS authorAvatar
+    FROM messages m JOIN users u ON u.id = m.author_id`;
+
   const messageById = (id: number) => {
-    const row = db
-      .prepare(
-        `SELECT m.id, m.channel_id AS channelId, m.content, m.created_at AS createdAt, m.edited_at AS editedAt,
-                m.reply_to AS replyToId, u.id AS authorId, u.username AS author, ${avatarUrl('u.avatar')} AS authorAvatar
-         FROM messages m JOIN users u ON u.id = m.author_id WHERE m.id = ?`,
-      )
-      .get(id) as Json | undefined;
+    const row = db.prepare(`${MESSAGE_SELECT} WHERE m.id = ?`).get(id) as Json | undefined;
     return row && withAttachments([row])[0];
+  };
+  /** Messages by id, in the order given, leaving out any that are gone. */
+  const messagesByIds = (ids: number[]) => {
+    if (!ids.length) return [];
+    const rows = db.prepare(`${MESSAGE_SELECT} WHERE m.id IN (${ids.map(() => '?').join(',')})`).all(...ids) as Json[];
+    const byId = new Map(withAttachments(rows).map((r) => [r.id, r]));
+    return ids.map((id) => byId.get(id)).filter((r): r is Json => !!r);
   };
 
   /** A burrow as one person sees it: private rooms they can't enter are left out. */
@@ -275,13 +303,15 @@ export function createApp(opts: AppOptions): Server {
     const manager = can(serverId, viewerId, 'rooms');
     const ids = (sql: string, id: number) => (db.prepare(sql).all(id) as { id: number }[]).map((r) => r.id);
     const channels = (
-      db.prepare('SELECT id, server_id AS serverId, name, kind, private FROM channels WHERE server_id = ? ORDER BY id').all(serverId) as Channel[]
+      db
+        .prepare("SELECT id, server_id AS serverId, name, kind, private, parent_id AS parentId FROM channels WHERE server_id = ? AND kind != 'thread' ORDER BY id")
+        .all(serverId) as Channel[]
     )
       .filter((c) => canSee(c, viewerId))
-      .map(({ serverId: _, private: priv, ...c }) => ({
+      .map(({ serverId: _, private: priv, parentId: __, ...c }) => ({
         ...c,
         private: !!priv,
-        ...(c.kind === 'voice' ? voiceSummary(c.id) : {}),
+        ...(c.kind === 'voice' ? voiceSummary(c.id) : readInfo(c.id, serverId, viewerId)),
         // Who has been let in, for the people who can change it.
         ...(priv && manager
           ? {
@@ -305,6 +335,9 @@ export function createApp(opts: AppOptions): Server {
     return {
       ...server,
       channels,
+      threads: threadsIn(serverId, viewerId),
+      emoji: emojiOf(serverId),
+      ...(server.kind === 'dm' ? { seen: dmSeen(serverId, viewerId) } : {}),
       roles,
       members: members.map((m) => {
         // Highest role first. 'role' is kept for apps from before custom roles.
@@ -419,13 +452,21 @@ export function createApp(opts: AppOptions): Server {
         .all(userId) as { user_id: number }[]
     ).map((r) => r.user_id);
 
-  const postMessage = (user: User, channelId: number, content: unknown, attachmentIds: unknown = [], replyTo: unknown = null) => {
+  type PollInput = { question: string; options: string[]; multi: boolean; closesAt: number | null };
+  type PostExtras = { forwarded?: Json; poll?: PollInput };
+
+  /**
+   * Posts a message: text, files (some hidden as spoilers), a sticker, a reply, and for polls
+   * and forwards, the extras those bring. Everyone who can see the room gets it.
+   */
+  const postMessage = (user: User, channelId: number, input: Json, extras: PostExtras = {}) => {
     const channel = channelById(channelId);
     if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
-    if (content == null) content = '';
+    let content = input.content ?? '';
     if (typeof content !== 'string') throw new HttpError(400, 'Message is empty');
     if (content.length > MAX_MESSAGE_LENGTH) throw new HttpError(400, 'Message is too long');
+    const attachmentIds = input.attachmentIds;
     const ids = Array.isArray(attachmentIds) ? [...new Set(attachmentIds.map(String))] : [];
     if (ids.length > MAX_ATTACHMENTS) throw new HttpError(400, `At most ${MAX_ATTACHMENTS} files per message`);
     // Only your own uploads to this room that aren't on a message yet.
@@ -436,8 +477,18 @@ export function createApp(opts: AppOptions): Server {
           .get(id, user.id, channelId),
     );
     if (usable.length !== ids.length) throw new HttpError(400, 'One of the files is missing or already sent');
-    if (!content.trim() && !usable.length) throw new HttpError(400, 'Message is empty');
+    const spoilers = new Set(Array.isArray(input.spoilerIds) ? input.spoilerIds.map(String) : []);
+    let stickerId: number | null = null;
+    if (input.stickerId != null) {
+      const sticker = db.prepare("SELECT server_id FROM custom_emoji WHERE id = ? AND kind = 'sticker'").get(Number(input.stickerId)) as
+        | { server_id: number }
+        | undefined;
+      if (!sticker || !isMember(sticker.server_id, user.id)) throw new HttpError(400, "That sticker isn't available");
+      stickerId = Number(input.stickerId);
+    }
+    if (!content.trim() && !usable.length && !stickerId && !extras.poll && !extras.forwarded) throw new HttpError(400, 'Message is empty');
     let replyId: number | null = null;
+    const replyTo = input.replyTo;
     if (replyTo != null) {
       const target = db.prepare('SELECT channel_id FROM messages WHERE id = ?').get(Number(replyTo)) as
         | { channel_id: number }
@@ -446,13 +497,25 @@ export function createApp(opts: AppOptions): Server {
       replyId = Number(replyTo);
     }
     const r = db
-      .prepare('INSERT INTO messages (channel_id, author_id, content, created_at, reply_to) VALUES (?, ?, ?, ?, ?)')
-      .run(channelId, user.id, content, now(), replyId);
+      .prepare('INSERT INTO messages (channel_id, author_id, content, created_at, reply_to, sticker_id, forwarded) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(channelId, user.id, content, now(), replyId, stickerId, extras.forwarded ? JSON.stringify(extras.forwarded) : null);
+    const messageId = Number(r.lastInsertRowid);
     usable.forEach((id, position) =>
-      db.prepare('UPDATE attachments SET message_id = ?, position = ? WHERE id = ?').run(Number(r.lastInsertRowid), position, id),
+      db.prepare('UPDATE attachments SET message_id = ?, position = ?, spoiler = ? WHERE id = ?').run(messageId, position, spoilers.has(id) ? 1 : 0, id),
     );
-    const message = messageById(Number(r.lastInsertRowid))!;
+    if (extras.poll) {
+      const p = extras.poll;
+      db.prepare('INSERT INTO polls (message_id, question, options, multi, closes_at) VALUES (?, ?, ?, ?, ?)').run(
+        messageId, p.question, JSON.stringify(p.options), p.multi ? 1 : 0, p.closesAt,
+      );
+      if (p.closesAt) wakeAt(p.closesAt);
+    }
+    const message = messageById(messageId)!;
     broadcastToChannel(channel, { type: 'message', message });
+    // Writing in a room means you've read it.
+    markRead(user.id, channel, messageId);
+    if (channel.kind === 'thread') threadChanged(channel);
+    previewLinks(messageId, channel, content);
     return message;
   };
 
@@ -525,7 +588,7 @@ export function createApp(opts: AppOptions): Server {
     return { ok: true };
   });
 
-  route('GET', '/api/me', ({ user }) => user);
+  route('GET', '/api/me', ({ user }) => ({ ...user, readReceipts: readReceiptsOn(user.id) }));
 
   // Changing your password signs you out everywhere else.
   route('POST', '/api/me/password', ({ user, body, token }) => {
@@ -674,6 +737,7 @@ export function createApp(opts: AppOptions): Server {
           .all(serverId) as Json[],
       );
       removeBurrowPicture(serverId);
+      for (const e of db.prepare('SELECT file FROM custom_emoji WHERE server_id = ?').all(serverId) as { file: string }[]) removeEmojiFile(e.file);
       db.prepare('DELETE FROM servers WHERE id = ?').run(serverId);
     } else {
       removeMember(serverId, user.id);
@@ -874,6 +938,7 @@ export function createApp(opts: AppOptions): Server {
   route('PATCH', '/api/channels/:id', ({ user, params, body }) => {
     const channel = channelById(Number(params[0]));
     if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    if (channel.kind === 'thread') return renameThread(channel, user, body.name);
     allowed(channel.serverId, user, 'rooms');
     if (body.name !== undefined) db.prepare('UPDATE channels SET name = ? WHERE id = ?').run(roomName(body.name, channel.kind), channel.id);
     if (body.private !== undefined) db.prepare('UPDATE channels SET private = ? WHERE id = ?').run(body.private ? 1 : 0, channel.id);
@@ -886,12 +951,16 @@ export function createApp(opts: AppOptions): Server {
   route('DELETE', '/api/channels/:id', ({ user, params }) => {
     const channel = channelById(Number(params[0]));
     if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
-    allowed(channel.serverId, user, 'rooms');
+    const threadMessage = channel.kind === 'thread' ? manageableThread(channel, user) : null;
+    if (channel.kind !== 'thread') allowed(channel.serverId, user, 'rooms');
     const textRooms = db.prepare("SELECT COUNT(*) AS n FROM channels WHERE server_id = ? AND kind = 'text'").get(channel.serverId) as { n: number };
     if (channel.kind === 'text' && textRooms.n <= 1) throw new HttpError(400, 'A burrow needs at least one text room');
     if (channel.kind === 'voice') closeVoiceRoom(channel.id);
-    removeFiles(db.prepare('SELECT id FROM attachments WHERE channel_id = ?').all(channel.id) as Json[]);
+    removeFiles(
+      db.prepare('SELECT id FROM attachments WHERE channel_id = ? OR channel_id IN (SELECT id FROM channels WHERE parent_id = ?)').all(channel.id, channel.id) as Json[],
+    );
     db.prepare('DELETE FROM channels WHERE id = ?').run(channel.id);
+    if (channel.kind === 'thread') threadDeleted(channel, threadMessage);
     sendServerUpdate(channel.serverId);
     return { ok: true };
   });
@@ -904,26 +973,25 @@ export function createApp(opts: AppOptions): Server {
     return { url: opts.voice.url ?? null, token: voiceToken(opts.voice, user, `room-${channel.id}`) };
   });
 
+  // The newest messages, or with ?before= older ones, ?after= newer ones (oldest first),
+  // or ?around= the messages either side of one (to jump to it).
   route('GET', '/api/channels/:id/messages', ({ user, params, url }) => {
     const channel = channelById(Number(params[0]));
     if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
     if (channel.kind === 'voice') return [];
-    const before = Number(url.searchParams.get('before')) || Number.MAX_SAFE_INTEGER;
     const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 100);
-    const rows = db
-      .prepare(
-        `SELECT m.id, m.channel_id AS channelId, m.content, m.created_at AS createdAt, m.edited_at AS editedAt,
-                m.reply_to AS replyToId, u.id AS authorId, u.username AS author, ${avatarUrl('u.avatar')} AS authorAvatar
-         FROM messages m JOIN users u ON u.id = m.author_id
-         WHERE m.channel_id = ? AND m.id < ? ORDER BY m.id DESC LIMIT ?`,
-      )
-      .all(channel.id, before, limit) as Json[];
-    return withAttachments(rows.reverse());
+    const older = (before: number, n: number) =>
+      (db.prepare(`${MESSAGE_SELECT} WHERE m.channel_id = ? AND m.id < ? ORDER BY m.id DESC LIMIT ?`).all(channel.id, before, n) as Json[]).reverse();
+    const newer = (after: number, n: number) =>
+      db.prepare(`${MESSAGE_SELECT} WHERE m.channel_id = ? AND m.id > ? ORDER BY m.id LIMIT ?`).all(channel.id, after, n) as Json[];
+    const around = Number(url.searchParams.get('around'));
+    if (around) return withAttachments([...older(around + 1, Math.ceil(limit / 2)), ...newer(around, Math.floor(limit / 2))]);
+    const after = url.searchParams.get('after');
+    if (after !== null) return withAttachments(newer(Number(after) || 0, limit));
+    return withAttachments(older(Number(url.searchParams.get('before')) || Number.MAX_SAFE_INTEGER, limit));
   });
 
-  route('POST', '/api/channels/:id/messages', ({ user, params, body }) =>
-    postMessage(user, Number(params[0]), body.content, body.attachmentIds, body.replyTo),
-  );
+  route('POST', '/api/channels/:id/messages', ({ user, params, body }) => postMessage(user, Number(params[0]), body));
 
   const ownMessage = (user: User, id: number) => {
     const msg = db.prepare('SELECT author_id, channel_id FROM messages WHERE id = ?').get(id) as
@@ -940,9 +1008,16 @@ export function createApp(opts: AppOptions): Server {
     const hasFiles = !!db.prepare('SELECT 1 FROM attachments WHERE message_id = ?').get(id);
     if (typeof body.content !== 'string' || (!body.content.trim() && !hasFiles)) throw new HttpError(400, 'Message is empty');
     if (body.content.length > MAX_MESSAGE_LENGTH) throw new HttpError(400, 'Message is too long');
+    const before = db.prepare('SELECT content, COALESCE(edited_at, created_at) AS at FROM messages WHERE id = ?').get(id) as { content: string; at: number };
+    if (before.content === body.content) return messageById(id);
+    // The old wording is kept, so anyone can see what an edited message used to say.
+    db.prepare('INSERT INTO message_edits (message_id, content, edited_at) VALUES (?, ?, ?)').run(id, before.content, before.at);
     db.prepare('UPDATE messages SET content = ?, edited_at = ? WHERE id = ?').run(body.content, now(), id);
+    const linksChanged = linksIn(before.content).join() !== linksIn(body.content).join();
+    if (linksChanged) db.prepare('DELETE FROM message_embeds WHERE message_id = ?').run(id);
     const message = messageById(id)!;
     broadcastToChannel(channel, { type: 'message_updated', message });
+    if (linksChanged) previewLinks(id, channel, body.content);
     return message;
   });
 
@@ -953,7 +1028,7 @@ export function createApp(opts: AppOptions): Server {
     const channel = msg && channelById(msg.channel_id);
     if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Message not found');
     const emoji = typeof body.emoji === 'string' ? body.emoji.trim() : '';
-    if (!emoji || emoji.length > 16 || !EMOJI.test(emoji)) throw new HttpError(400, 'That is not an emoji');
+    if (!emoji || !(isCustomEmoji(emoji, user.id) || (emoji.length <= 16 && EMOJI.test(emoji)))) throw new HttpError(400, 'That is not an emoji');
     const mine = db.prepare('SELECT 1 FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?').get(id, user.id, emoji);
     if (mine) {
       db.prepare('DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?').run(id, user.id, emoji);
@@ -1034,10 +1109,13 @@ export function createApp(opts: AppOptions): Server {
       unlink(filePath(id)).catch(() => {});
       throw new HttpError(400, 'File is empty');
     }
+    // Voice messages say how long they are, so the player can show it before loading.
+    const voiceSeconds = Number(req.headers['x-voice-seconds']);
+    const voice = type.startsWith('audio/') && voiceSeconds > 0 && voiceSeconds <= 3600 ? Math.round(voiceSeconds * 10) / 10 : null;
     db.prepare(
-      'INSERT INTO attachments (id, channel_id, uploader_id, name, type, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    ).run(id, channel.id, user.id, name, type, size, now());
-    send(res, 200, attachmentJson({ id, name, type, size }));
+      'INSERT INTO attachments (id, channel_id, uploader_id, name, type, size, created_at, voice_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(id, channel.id, user.id, name, type, size, now(), voice);
+    send(res, 200, attachmentJson({ id, name, type, size, voice_seconds: voice }));
   };
 
   // Attachment links are unguessable (128 random bits), so images work in <img> tags without a login.
@@ -1252,6 +1330,728 @@ export function createApp(opts: AppOptions): Server {
     setInterval(sweep, 3600_000).unref();
   }
 
+  // ---- where a message is, for lists that mix rooms (saved, search, reminders) ----
+
+  /** The burrow (or DM) and room a message is in, as someone sees it. */
+  const placeOf = (channelId: number, viewerId: number) => {
+    const c = db
+      .prepare(
+        `SELECT c.name, c.kind, p.name AS parentName, s.id AS serverId, s.name AS serverName, s.kind AS serverKind
+         FROM channels c JOIN servers s ON s.id = c.server_id LEFT JOIN channels p ON p.id = c.parent_id WHERE c.id = ?`,
+      )
+      .get(channelId) as Json | undefined;
+    if (!c) return null;
+    const dm = c.serverKind === 'dm';
+    const partnerName = dm
+      ? (db.prepare('SELECT u.username FROM members m JOIN users u ON u.id = m.user_id WHERE m.server_id = ? AND m.user_id != ?').get(c.serverId as number, viewerId) as { username: string } | undefined)?.username
+      : null;
+    return {
+      serverId: c.serverId,
+      channelId,
+      kind: dm ? 'dm' : 'burrow',
+      serverName: dm ? partnerName ?? 'Direct message' : c.serverName,
+      channelName: c.kind === 'thread' ? c.parentName : c.name,
+      threadName: c.kind === 'thread' ? c.name : null,
+    };
+  };
+
+  /** A message and its room, if this person can see it. */
+  const visibleMessage = (user: User, id: number) => {
+    const msg = db.prepare('SELECT channel_id, author_id FROM messages WHERE id = ?').get(id) as { channel_id: number; author_id: number } | undefined;
+    const channel = msg && channelById(msg.channel_id);
+    if (!msg || !channel || !canSee(channel, user.id)) throw new HttpError(404, 'Message not found');
+    return { channel, authorId: msg.author_id };
+  };
+  const messageChanged = (id: number, channel: Channel) => {
+    const message = messageById(id);
+    if (message) broadcastToChannel(channel, { type: 'message_updated', message });
+    return message;
+  };
+
+  // ---- unread messages: the newest message each person has read in each room ----
+
+  // Whether a message mentions someone: "@name" as a whole word, the way the app highlights it.
+  db.function('mentions_name', { deterministic: true }, (content, name) =>
+    new RegExp(`@${String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(String(content)) ? 1 : 0,
+  );
+  const UNREAD_CAP = 100; // counts stop here; the app shows "99+"
+
+  const lastReadOf = (userId: number, channelId: number, serverId: number) => {
+    const row = db.prepare('SELECT last_read_id FROM read_state WHERE user_id = ? AND channel_id = ?').get(userId, channelId) as
+      | { last_read_id: number }
+      | undefined;
+    if (row) return row.last_read_id;
+    // A room you've never opened: what was said before you joined counts as read.
+    const joined = (db.prepare('SELECT joined_at FROM members WHERE server_id = ? AND user_id = ?').get(serverId, userId) as { joined_at: number } | undefined)?.joined_at ?? 0;
+    return (db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE channel_id = ? AND created_at < ?').get(channelId, joined) as { id: number }).id;
+  };
+
+  /** Where someone stopped reading a room, how many messages came after, and how many of those are for them. */
+  const readInfo = (channelId: number, serverId: number, userId: number) => {
+    const lastReadId = lastReadOf(userId, channelId, serverId);
+    const count = (sql: string, ...args: (number | string)[]) =>
+      (db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM messages m WHERE m.channel_id = ? AND m.id > ? AND m.author_id != ? ${sql} LIMIT ${UNREAD_CAP})`)
+        .get(channelId, lastReadId, userId, ...args) as { n: number }).n;
+    const unread = count('');
+    if (!unread) return { lastReadId, unread, mentions: 0 };
+    const dm = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind === 'dm';
+    const name = (db.prepare('SELECT username FROM users WHERE id = ?').get(userId) as { username: string }).username;
+    // In a DM everything is for you; elsewhere it's @mentions and replies to you.
+    const mentions = dm
+      ? unread
+      : count('AND (mentions_name(m.content, ?) OR EXISTS (SELECT 1 FROM messages r WHERE r.id = m.reply_to AND r.author_id = ?))', name, userId);
+    return { lastReadId, unread, mentions };
+  };
+
+  const readReceiptsOn = (userId: number) =>
+    !!(db.prepare('SELECT read_receipts FROM users WHERE id = ?').get(userId) as { read_receipts: number } | undefined)?.read_receipts;
+  const dmPartner = (serverId: number, userId: number) =>
+    (db.prepare('SELECT user_id FROM members WHERE server_id = ? AND user_id != ?').get(serverId, userId) as { user_id: number } | undefined)?.user_id;
+  /** In a DM, how far the other person has read, if you both share that. */
+  const dmSeen = (serverId: number, viewerId: number) => {
+    const partner = dmPartner(serverId, viewerId);
+    const channel = db.prepare("SELECT id FROM channels WHERE server_id = ? AND kind = 'text'").get(serverId) as { id: number } | undefined;
+    if (!partner || !channel || !readReceiptsOn(partner) || !readReceiptsOn(viewerId)) return null;
+    return { userId: partner, lastReadId: lastReadOf(partner, channel.id, serverId) };
+  };
+
+  /**
+   * Moves where someone has read up to. It only moves forward, unless `force` (marking a message
+   * unread moves it back). Their other devices hear about it, and in a DM so does the other person.
+   */
+  const markRead = (userId: number, channel: Channel, messageId: number, { force = false, quiet = false } = {}) => {
+    if (channel.kind === 'voice') return;
+    if (!force && messageId <= lastReadOf(userId, channel.id, channel.serverId)) return;
+    db.prepare(
+      `INSERT INTO read_state (user_id, channel_id, last_read_id) VALUES (?, ?, ?)
+       ON CONFLICT (user_id, channel_id) DO UPDATE SET last_read_id = excluded.last_read_id`,
+    ).run(userId, channel.id, messageId);
+    sendTo([userId], { type: 'read', channelId: channel.id, ...readInfo(channel.id, channel.serverId, userId) });
+    if (quiet || force || channel.kind !== 'text') return;
+    const kind = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(channel.serverId) as { kind: string }).kind;
+    const partner = kind === 'dm' ? dmPartner(channel.serverId, userId) : undefined;
+    if (partner && readReceiptsOn(partner) && readReceiptsOn(userId))
+      sendTo([partner], { type: 'dm_seen', serverId: channel.serverId, channelId: channel.id, userId, lastReadId: messageId });
+  };
+
+  // You've read a room up to here. With unread: true, it's set back to here ("mark unread").
+  route('POST', '/api/channels/:id/read', ({ user, params, body }) => {
+    const channel = channelById(Number(params[0]));
+    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    const newest = (db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE channel_id = ?').get(channel.id) as { id: number }).id;
+    const id = Math.max(0, Math.min(Math.floor(Number(body.lastReadId) || 0), newest));
+    markRead(user.id, channel, id, { force: body.unread === true });
+    return readInfo(channel.id, channel.serverId, user.id);
+  });
+
+  // Turning DM read receipts on or off. Your conversations update for both sides.
+  route('PATCH', '/api/me', ({ user, body }) => {
+    if (body.readReceipts !== undefined) {
+      db.prepare('UPDATE users SET read_receipts = ? WHERE id = ?').run(body.readReceipts ? 1 : 0, user.id);
+      const dms = db.prepare("SELECT s.id FROM members m JOIN servers s ON s.id = m.server_id WHERE m.user_id = ? AND s.kind = 'dm'").all(user.id) as { id: number }[];
+      for (const { id } of dms) sendServerUpdate(id);
+    }
+    return { ...user, readReceipts: readReceiptsOn(user.id) };
+  });
+
+  // ---- pinned messages ----
+
+  const MAX_PINS = 50;
+  route('POST', '/api/messages/:id/pin', ({ user, params, body }) => {
+    const id = Number(params[0]);
+    const { channel } = visibleMessage(user, id);
+    if (body.pinned === false) db.prepare('UPDATE messages SET pinned_at = NULL, pinned_by = NULL WHERE id = ?').run(id);
+    else {
+      const pins = (db.prepare('SELECT COUNT(*) AS n FROM messages WHERE channel_id = ? AND pinned_at IS NOT NULL AND id != ?').get(channel.id, id) as { n: number }).n;
+      if (pins >= MAX_PINS) throw new HttpError(400, `A room can have at most ${MAX_PINS} pins. Unpin one first.`);
+      db.prepare('UPDATE messages SET pinned_at = COALESCE(pinned_at, ?), pinned_by = COALESCE(pinned_by, ?) WHERE id = ?').run(now(), user.id, id);
+    }
+    return messageChanged(id, channel);
+  });
+
+  /** A room's pinned messages, most recently pinned first. */
+  route('GET', '/api/channels/:id/pins', ({ user, params }) => {
+    const channel = channelById(Number(params[0]));
+    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    const ids = db.prepare('SELECT id FROM messages WHERE channel_id = ? AND pinned_at IS NOT NULL ORDER BY pinned_at DESC').all(channel.id) as { id: number }[];
+    return messagesByIds(ids.map((r) => r.id));
+  });
+
+  // ---- edit history ----
+
+  /** What an edited message used to say, oldest first, each with when it was written. */
+  route('GET', '/api/messages/:id/edits', ({ user, params }) => {
+    const id = Number(params[0]);
+    visibleMessage(user, id);
+    return db.prepare('SELECT content, edited_at AS writtenAt FROM message_edits WHERE message_id = ? ORDER BY rowid').all(id);
+  });
+
+  // ---- saved messages and reminders: a private list of messages to come back to ----
+
+  const MAX_SAVED = 500;
+  const savedJson = (row: Json) => ({
+    messageId: row.message_id,
+    savedAt: row.saved_at,
+    remindAt: row.remind_at,
+    reminded: !!row.reminded,
+  });
+
+  route('POST', '/api/messages/:id/save', ({ user, params, body }) => {
+    const id = Number(params[0]);
+    visibleMessage(user, id);
+    if (body.saved === false) {
+      db.prepare('DELETE FROM saved_messages WHERE user_id = ? AND message_id = ?').run(user.id, id);
+      sendTo([user.id], { type: 'saved', messageId: id, saved: null });
+      return { saved: null };
+    }
+    let remindAt: number | null = null;
+    if (body.remindAt != null) {
+      remindAt = Math.floor(Number(body.remindAt));
+      if (!(remindAt > now() && remindAt < now() + 366 * 86400_000)) throw new HttpError(400, 'Pick a time in the next year');
+    }
+    const count = (db.prepare('SELECT COUNT(*) AS n FROM saved_messages WHERE user_id = ?').get(user.id) as { n: number }).n;
+    const already = db.prepare('SELECT 1 FROM saved_messages WHERE user_id = ? AND message_id = ?').get(user.id, id);
+    if (!already && count >= MAX_SAVED) throw new HttpError(400, `You can save up to ${MAX_SAVED} messages`);
+    db.prepare(
+      `INSERT INTO saved_messages (user_id, message_id, saved_at, remind_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT (user_id, message_id) DO UPDATE SET remind_at = excluded.remind_at, reminded = 0`,
+    ).run(user.id, id, now(), remindAt);
+    if (remindAt) wakeAt(remindAt);
+    const row = db.prepare('SELECT * FROM saved_messages WHERE user_id = ? AND message_id = ?').get(user.id, id) as Json;
+    const saved = savedJson(row);
+    sendTo([user.id], { type: 'saved', messageId: id, saved });
+    return { saved };
+  });
+
+  /** Your saved messages, newest first, with where each one is. Messages you can no longer see are left out. */
+  route('GET', '/api/me/saved', ({ user }) => {
+    const rows = db.prepare('SELECT * FROM saved_messages WHERE user_id = ? ORDER BY saved_at DESC').all(user.id) as Json[];
+    const messages = new Map(messagesByIds(rows.map((r) => r.message_id as number)).map((m) => [m.id, m]));
+    return rows.flatMap((r) => {
+      const message = messages.get(r.message_id);
+      const channel = message && channelById(message.channelId as number);
+      if (!message || !channel || !canSee(channel, user.id)) return [];
+      return [{ ...savedJson(r), message, place: placeOf(channel.id, user.id) }];
+    });
+  });
+
+  /** Sends reminders that are due to whoever set them, if they're connected. The rest wait until they are. */
+  const deliverReminders = (userId?: number) => {
+    const rows = db
+      .prepare(`SELECT * FROM saved_messages WHERE remind_at <= ? AND reminded = 0 ${userId ? 'AND user_id = ?' : ''}`)
+      .all(...(userId ? [now(), userId] : [now()])) as Json[];
+    for (const r of rows) {
+      const uid = r.user_id as number;
+      if (!sockets.has(uid)) continue;
+      db.prepare('UPDATE saved_messages SET reminded = 1 WHERE user_id = ? AND message_id = ?').run(uid, r.message_id as number);
+      const message = messageById(r.message_id as number);
+      const channel = message && channelById(message.channelId as number);
+      if (!message || !channel || !canSee(channel, uid)) continue;
+      const saved = savedJson({ ...r, reminded: 1 });
+      sendTo([uid], { type: 'reminder', saved, message, place: placeOf(channel.id, uid) });
+    }
+  };
+
+  // ---- scheduled messages: written now, sent later ----
+
+  const MAX_SCHEDULED = 25;
+  const scheduledOf = (userId: number) =>
+    (db.prepare('SELECT id, channel_id AS channelId, content, reply_to AS replyTo, send_at AS sendAt FROM scheduled_messages WHERE user_id = ? ORDER BY send_at').all(userId) as Json[])
+      .map((s) => ({ ...s, place: placeOf(s.channelId as number, userId) }));
+  const scheduledChanged = (userId: number) => sendTo([userId], { type: 'scheduled', items: scheduledOf(userId) });
+
+  route('POST', '/api/channels/:id/scheduled', ({ user, params, body }) => {
+    const channel = channelById(Number(params[0]));
+    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
+    const content = typeof body.content === 'string' ? body.content : '';
+    if (!content.trim()) throw new HttpError(400, 'Message is empty');
+    if (content.length > MAX_MESSAGE_LENGTH) throw new HttpError(400, 'Message is too long');
+    const sendAt = Math.floor(Number(body.sendAt));
+    if (!(sendAt > now() + 10_000 && sendAt < now() + 366 * 86400_000)) throw new HttpError(400, 'Pick a time in the next year');
+    const count = (db.prepare('SELECT COUNT(*) AS n FROM scheduled_messages WHERE user_id = ?').get(user.id) as { n: number }).n;
+    if (count >= MAX_SCHEDULED) throw new HttpError(400, `You can have up to ${MAX_SCHEDULED} messages waiting to send`);
+    db.prepare('INSERT INTO scheduled_messages (user_id, channel_id, content, reply_to, send_at, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      user.id, channel.id, content, body.replyTo == null ? null : Number(body.replyTo), sendAt, now(),
+    );
+    wakeAt(sendAt);
+    scheduledChanged(user.id);
+    return scheduledOf(user.id);
+  });
+
+  route('GET', '/api/me/scheduled', ({ user }) => scheduledOf(user.id));
+
+  route('DELETE', '/api/scheduled/:id', ({ user, params }) => {
+    db.prepare('DELETE FROM scheduled_messages WHERE id = ? AND user_id = ?').run(Number(params[0]), user.id);
+    scheduledChanged(user.id);
+    return scheduledOf(user.id);
+  });
+
+  /** Sends scheduled messages whose time has come, as the person who wrote them. */
+  const sendScheduled = () => {
+    const due = db.prepare('SELECT * FROM scheduled_messages WHERE send_at <= ? ORDER BY send_at').all(now()) as Json[];
+    for (const s of due) {
+      db.prepare('DELETE FROM scheduled_messages WHERE id = ?').run(s.id as number);
+      const uid = s.user_id as number;
+      const user = db.prepare(`SELECT id, username, ${avatarUrl('avatar')} AS avatar FROM users WHERE id = ?`).get(uid) as User | undefined;
+      if (!user) continue;
+      // The message it answered may be gone by now; it's sent anyway, as a plain message.
+      const replyStill = s.reply_to != null && db.prepare('SELECT 1 FROM messages WHERE id = ? AND channel_id = ?').get(s.reply_to as number, s.channel_id as number);
+      try {
+        postMessage(user, s.channel_id as number, { content: s.content, replyTo: replyStill ? s.reply_to : null });
+      } catch (err) {
+        sendTo([uid], { type: 'scheduled_failed', content: s.content, error: err instanceof Error ? err.message : 'Error' });
+      }
+      scheduledChanged(uid);
+    }
+  };
+
+  // ---- forwarding: a copy of a message in another room, saying where it came from ----
+
+  route('POST', '/api/messages/:id/forward', async ({ user, params, body }) => {
+    const id = Number(params[0]);
+    const { channel: from } = visibleMessage(user, id);
+    const to = channelById(Number(body.channelId));
+    if (!to || !canSee(to, user.id)) throw new HttpError(404, 'Room not found');
+    if (to.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
+    const m = messageById(id)!;
+    const place = placeOf(from.id, user.id)!;
+    // Files are copied, so the forward keeps working if the original is deleted.
+    const attachmentIds: string[] = [];
+    const spoilerIds: string[] = [];
+    if ((m.attachments as Json[]).length) {
+      if (!opts.uploadDir) throw new HttpError(503, 'Uploads are not set up on this server');
+      for (const a of m.attachments as Json[]) {
+        const copy = randomBytes(16).toString('base64url');
+        await copyFile(filePath(a.id as string), filePath(copy)).catch(() => {
+          throw new HttpError(410, 'One of its files is gone');
+        });
+        db.prepare(
+          'INSERT INTO attachments (id, channel_id, uploader_id, name, type, size, created_at, voice_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        ).run(copy, to.id, user.id, a.name as string, a.type as string, a.size as number, now(), (a.voiceSeconds as number) ?? null);
+        attachmentIds.push(copy);
+        if (a.spoiler) spoilerIds.push(copy);
+      }
+    }
+    let content = m.content as string;
+    const poll = m.poll as { question: string; options: { text: string }[] } | null;
+    if (poll) content = `📊 ${poll.question}\n${poll.options.map((o) => `• ${o.text}`).join('\n')}`;
+    const sticker = m.sticker as { id: number; name: string } | null;
+    const stickerServer = sticker?.id && (db.prepare('SELECT server_id FROM custom_emoji WHERE id = ?').get(sticker.id) as { server_id: number } | undefined)?.server_id;
+    const keepSticker = !!stickerServer && isMember(stickerServer, user.id);
+    if (sticker && !keepSticker) content = `${content}${content ? '\n' : ''}[sticker: ${sticker.name ?? 'removed'}]`;
+    const forwarded = {
+      messageId: id,
+      authorId: m.authorId,
+      author: m.author,
+      createdAt: m.createdAt,
+      from: place.kind === 'dm' ? 'a direct message' : place.threadName ? `${place.serverName} › #${place.channelName} › ${place.threadName}` : `${place.serverName} › #${place.channelName}`,
+    };
+    return postMessage(user, to.id, { content: content.slice(0, MAX_MESSAGE_LENGTH), attachmentIds, spoilerIds, stickerId: keepSticker ? sticker!.id : null }, { forwarded });
+  });
+
+  // ---- polls ----
+
+  const MAX_POLL_OPTIONS = 10;
+  const pollFor = (messageId: number) => {
+    const p = db.prepare('SELECT question, options, multi, closes_at FROM polls WHERE message_id = ?').get(messageId) as Json | undefined;
+    if (!p) return null;
+    const votes = db.prepare('SELECT user_id, option FROM poll_votes WHERE message_id = ? ORDER BY rowid').all(messageId) as { user_id: number; option: number }[];
+    const options = (JSON.parse(p.options as string) as string[]).map((text, i) => ({ text, userIds: votes.filter((v) => v.option === i).map((v) => v.user_id) }));
+    const closesAt = (p.closes_at as number | null) ?? null;
+    return { question: p.question, options, multi: !!p.multi, closesAt, closed: closesAt !== null && closesAt <= now() };
+  };
+
+  route('POST', '/api/channels/:id/polls', ({ user, params, body }) => {
+    const question = cleanName(body.question, 'Question', 300);
+    const options = (Array.isArray(body.options) ? body.options : []).map((o) => (typeof o === 'string' ? o.trim() : '')).filter(Boolean);
+    if (options.length < 2) throw new HttpError(400, 'A poll needs at least two answers');
+    if (options.length > MAX_POLL_OPTIONS) throw new HttpError(400, `A poll can have at most ${MAX_POLL_OPTIONS} answers`);
+    if (options.some((o) => o.length > 80)) throw new HttpError(400, 'Answers can be at most 80 characters');
+    if (new Set(options.map((o) => o.toLowerCase())).size !== options.length) throw new HttpError(400, 'Each answer must be different');
+    const hours = Number(body.hours) || 0;
+    if (hours < 0 || hours > 24 * 30) throw new HttpError(400, 'A poll can run for up to 30 days');
+    const poll = { question, options, multi: body.multi === true, closesAt: hours ? now() + hours * 3600_000 : null };
+    return postMessage(user, Number(params[0]), { content: '', replyTo: body.replyTo }, { poll });
+  });
+
+  // Your answer (or answers) to a poll; an empty list takes your vote back.
+  route('POST', '/api/messages/:id/vote', ({ user, params, body }) => {
+    const id = Number(params[0]);
+    const { channel } = visibleMessage(user, id);
+    const poll = pollFor(id);
+    if (!poll) throw new HttpError(404, "That message isn't a poll");
+    if (poll.closed) throw new HttpError(400, 'This poll has closed');
+    const picks = [...new Set((Array.isArray(body.options) ? body.options : []).map(Number))];
+    if (picks.some((i) => !Number.isInteger(i) || i < 0 || i >= poll.options.length)) throw new HttpError(400, "That isn't one of the answers");
+    if (!poll.multi && picks.length > 1) throw new HttpError(400, 'This poll takes one answer');
+    db.prepare('DELETE FROM poll_votes WHERE message_id = ? AND user_id = ?').run(id, user.id);
+    for (const i of picks) db.prepare('INSERT INTO poll_votes (message_id, user_id, option) VALUES (?, ?, ?)').run(id, user.id, i);
+    return messageChanged(id, channel);
+  });
+
+  // Whoever asked (or anyone who can delete messages) can close a poll early.
+  route('POST', '/api/messages/:id/poll/end', ({ user, params }) => {
+    const id = Number(params[0]);
+    const { channel, authorId } = visibleMessage(user, id);
+    if (!pollFor(id)) throw new HttpError(404, "That message isn't a poll");
+    if (authorId !== user.id && !can(channel.serverId, user.id, 'messages')) throw new HttpError(403, 'Only whoever asked can end this poll');
+    db.prepare('UPDATE polls SET closes_at = MIN(COALESCE(closes_at, ?), ?), ended = 1 WHERE message_id = ?').run(now(), now(), id);
+    return messageChanged(id, channel);
+  });
+
+  /** Tells everyone about polls that have just closed, so their results show as final. */
+  const endPolls = () => {
+    const due = db.prepare('SELECT p.message_id, m.channel_id FROM polls p JOIN messages m ON m.id = p.message_id WHERE p.ended = 0 AND p.closes_at <= ?').all(now()) as { message_id: number; channel_id: number }[];
+    for (const p of due) {
+      db.prepare('UPDATE polls SET ended = 1 WHERE message_id = ?').run(p.message_id);
+      const channel = channelById(p.channel_id);
+      if (channel) messageChanged(p.message_id, channel);
+    }
+  };
+
+  // ---- custom emoji and stickers, each burrow's own ----
+
+  const MAX_EMOJI = { emoji: 50, sticker: 20 } as const;
+  const emojiOf = (serverId: number) =>
+    db.prepare("SELECT id, name, kind, '/api/emoji/' || file AS url FROM custom_emoji WHERE server_id = ? ORDER BY kind, name").all(serverId);
+  const stickerJson = (id: number) =>
+    (db.prepare("SELECT id, name, '/api/emoji/' || file AS url FROM custom_emoji WHERE id = ? AND kind = 'sticker'").get(id) as Json | undefined) ?? { id, deleted: true };
+  /** A custom emoji written <:name:id>, from a burrow this person is in. */
+  const isCustomEmoji = (text: string, userId: number) => {
+    const m = /^<:(\w{2,32}):(\d+)>$/.exec(text);
+    if (!m) return false;
+    const row = db.prepare("SELECT server_id, name FROM custom_emoji WHERE id = ? AND kind = 'emoji'").get(Number(m[2])) as { server_id: number; name: string } | undefined;
+    return !!row && row.name === m[1] && isMember(row.server_id, userId);
+  };
+  const emojiName = (value: unknown) => {
+    const name = typeof value === 'string' ? value.trim().replace(/^:|:$/g, '') : '';
+    if (!/^\w{2,32}$/.test(name)) throw new HttpError(400, 'Names use 2 to 32 letters, numbers or underscores');
+    return name;
+  };
+  const removeEmojiFile = (file: string) => {
+    if (opts.uploadDir) unlink(picturePath('emoji', file)).catch(() => {});
+  };
+
+  // The picture is the raw request body; ?name= and ?kind=emoji|sticker say what it is.
+  const handleEmojiUpload = async (req: IncomingMessage, res: ServerResponse, serverId: number, url: URL) => {
+    const user = pictureUploader(req);
+    allowed(serverId, user, 'emoji');
+    const kind = url.searchParams.get('kind') === 'sticker' ? 'sticker' : 'emoji';
+    const name = emojiName(url.searchParams.get('name'));
+    const check = () => {
+      const count = (db.prepare('SELECT COUNT(*) AS n FROM custom_emoji WHERE server_id = ? AND kind = ?').get(serverId, kind) as { n: number }).n;
+      if (count >= MAX_EMOJI[kind]) throw new HttpError(400, `A burrow can have up to ${MAX_EMOJI[kind]} ${kind === 'sticker' ? 'stickers' : 'emoji'}`);
+      if (db.prepare('SELECT 1 FROM custom_emoji WHERE server_id = ? AND kind = ? AND name = ?').get(serverId, kind, name))
+        throw new HttpError(409, `There's already ${kind === 'sticker' ? 'a sticker' : 'an emoji'} called ${name}`);
+    };
+    check();
+    const file = await savePicture(req, 'emoji', kind === 'sticker' ? 'Stickers' : 'Emoji');
+    try {
+      allowed(serverId, user, 'emoji');
+      check();
+    } catch (err) {
+      removeEmojiFile(file);
+      throw err;
+    }
+    db.prepare('INSERT INTO custom_emoji (server_id, name, kind, file, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(serverId, name, kind, file, user.id, now());
+    sendServerUpdate(serverId);
+    send(res, 200, serverSummary(serverId, user.id));
+  };
+
+  const managedEmoji = (id: number, user: User) => {
+    const row = db.prepare('SELECT id, server_id, kind, file FROM custom_emoji WHERE id = ?').get(id) as { id: number; server_id: number; kind: string; file: string } | undefined;
+    if (!row || !isMember(row.server_id, user.id)) throw new HttpError(404, 'Emoji not found');
+    allowed(row.server_id, user, 'emoji');
+    return row;
+  };
+  route('PATCH', '/api/emoji/:id', ({ user, params, body }) => {
+    const row = managedEmoji(Number(params[0]), user);
+    const name = emojiName(body.name);
+    if (db.prepare('SELECT 1 FROM custom_emoji WHERE server_id = ? AND kind = ? AND name = ? AND id != ?').get(row.server_id, row.kind, name, row.id))
+      throw new HttpError(409, `That name is taken`);
+    db.prepare('UPDATE custom_emoji SET name = ? WHERE id = ?').run(name, row.id);
+    sendServerUpdate(row.server_id);
+    return serverSummary(row.server_id, user.id);
+  });
+  route('DELETE', '/api/emoji/:id', ({ user, params }) => {
+    const row = managedEmoji(Number(params[0]), user);
+    db.prepare('DELETE FROM custom_emoji WHERE id = ?').run(row.id);
+    removeEmojiFile(row.file);
+    sendServerUpdate(row.server_id);
+    return serverSummary(row.server_id, user.id);
+  });
+
+  // ---- link previews ----
+
+  const previewOpts = opts.linkPreviews === false ? null : opts.linkPreviews ?? {};
+  const secret = (name: string) => {
+    const row = db.prepare('SELECT value FROM app_secrets WHERE name = ?').get(name) as { value: string } | undefined;
+    if (row) return row.value;
+    const value = randomBytes(32).toString('base64url');
+    db.prepare('INSERT INTO app_secrets (name, value) VALUES (?, ?)').run(name, value);
+    return value;
+  };
+  // Preview pictures load in <img> tags, which can't log in, so their links are signed instead.
+  const embedKey = secret('embed-images');
+  const embedSig = (messageId: number, position: number) =>
+    createHmac('sha256', embedKey).update(`${messageId}:${position}`).digest('base64url').slice(0, 22);
+  const embedsFor = (messageId: number) =>
+    (db.prepare('SELECT position, data FROM message_embeds WHERE message_id = ? ORDER BY position').all(messageId) as { position: number; data: string }[]).map((r) => {
+      const e = JSON.parse(r.data) as Embed;
+      return { ...e, image: e.image ? `/api/embeds/${messageId}/${r.position}/${embedSig(messageId, r.position)}` : null };
+    });
+
+  // The same link is often posted more than once; previews are remembered for an hour.
+  const previewCache = new Map<string, { at: number; embed: Embed | null }>();
+  const cachedPreview = async (link: string) => {
+    const hit = previewCache.get(link);
+    if (hit && now() - hit.at < 3600_000) return hit.embed;
+    const embed = await fetchEmbed(link, previewOpts!).catch(() => null);
+    previewCache.set(link, { at: now(), embed });
+    if (previewCache.size > 500) previewCache.delete(previewCache.keys().next().value!);
+    return embed;
+  };
+
+  /** Fetches previews for a message's links in the background, then shows them to everyone. */
+  const previewLinks = (messageId: number, channel: Channel, content: string) => {
+    const links = previewOpts ? linksIn(content) : [];
+    if (!links.length) return;
+    Promise.all(links.map(cachedPreview)).then((embeds) => {
+      // The message may have been deleted or edited to other links in the meantime.
+      const current = db.prepare('SELECT content, embeds_off FROM messages WHERE id = ?').get(messageId) as { content: string; embeds_off: number } | undefined;
+      if (!current || current.embeds_off || linksIn(current.content).join() !== links.join()) return;
+      const found = embeds.filter((e): e is Embed => !!e);
+      if (!found.length) return;
+      db.prepare('DELETE FROM message_embeds WHERE message_id = ?').run(messageId);
+      found.forEach((e, i) => db.prepare('INSERT INTO message_embeds (message_id, position, data) VALUES (?, ?, ?)').run(messageId, i, JSON.stringify(e)));
+      messageChanged(messageId, channel);
+    }).catch((err) => console.warn(`Link preview failed: ${err.message}`));
+  };
+
+  // Whoever wrote a message can hide its previews.
+  route('POST', '/api/messages/:id/embeds', ({ user, params }) => {
+    const id = Number(params[0]);
+    const { channel, authorId } = visibleMessage(user, id);
+    if (authorId !== user.id) throw new HttpError(403, 'You can only change your own messages');
+    db.prepare('UPDATE messages SET embeds_off = 1 WHERE id = ?').run(id);
+    db.prepare('DELETE FROM message_embeds WHERE message_id = ?').run(id);
+    return messageChanged(id, channel);
+  });
+
+  const imageCache = new Map<string, { type: string; data: Buffer }>();
+  let imageCacheBytes = 0;
+  const serveEmbedImage = async (req: IncomingMessage, res: ServerResponse, messageId: number, position: number, sig: string) => {
+    if (!sameText(sig, embedSig(messageId, position))) throw new HttpError(404, 'Picture not found');
+    const row = db.prepare('SELECT data FROM message_embeds WHERE message_id = ? AND position = ?').get(messageId, position) as { data: string } | undefined;
+    const link = row && (JSON.parse(row.data) as Embed).image;
+    if (!link || !previewOpts) throw new HttpError(404, 'Picture not found');
+    let image = imageCache.get(link);
+    if (!image) {
+      try {
+        image = await fetchImage(link, previewOpts);
+      } catch {
+        throw new HttpError(502, "Couldn't load that picture");
+      }
+      imageCache.set(link, image);
+      imageCacheBytes += image.data.length;
+      for (const [k, v] of imageCache) {
+        if (imageCacheBytes <= 40 * 1024 * 1024) break;
+        imageCache.delete(k);
+        imageCacheBytes -= v.data.length;
+      }
+    }
+    res.writeHead(200, {
+      'content-type': image.type,
+      'content-length': image.data.length,
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; sandbox",
+      'cache-control': 'private, max-age=86400',
+    });
+    res.end(req.method === 'HEAD' ? undefined : image.data);
+  };
+
+  // ---- search ----
+
+  /** The rooms a search looks through: a burrow's (with its threads), your DMs, or everything you can see. */
+  const searchRooms = (user: User, scope: string | null) => {
+    const sql = `SELECT c.id, c.server_id AS serverId, c.name, c.kind, c.private, c.parent_id AS parentId FROM channels c
+                 JOIN members m ON m.server_id = c.server_id AND m.user_id = ? JOIN servers s ON s.id = c.server_id
+                 WHERE c.kind != 'voice' ${scope === 'dms' ? "AND s.kind = 'dm'" : scope ? 'AND s.id = ?' : ''}`;
+    const args = scope && scope !== 'dms' ? [user.id, Number(scope)] : [user.id];
+    return (db.prepare(sql).all(...args) as Channel[]).filter((c) => canSee(c, user.id)).map((c) => c.id);
+  };
+
+  // ?q= words (matching the start of words), and optionally in= a burrow id or "dms", room=, from= a user id,
+  // has=image|video|audio|file|link, before= and after= (times in ms), and offset= for more.
+  route('GET', '/api/search', ({ user, url }) => {
+    const p = url.searchParams;
+    const words = (p.get('q') ?? '').match(/[\p{L}\p{N}_]+/gu) ?? [];
+    const conditions: string[] = [];
+    const args: (string | number)[] = [];
+    let rooms = searchRooms(user, p.get('in'));
+    if (p.get('room')) rooms = rooms.filter((id) => id === Number(p.get('room')));
+    if (words.length) {
+      conditions.push('m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)');
+      args.push(words.slice(0, 12).map((w) => `"${w}"*`).join(' '));
+    }
+    if (p.get('from')) {
+      conditions.push('m.author_id = ?');
+      args.push(Number(p.get('from')));
+    }
+    const has = p.get('has');
+    const attachment = (type: string) => `EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id ${type})`;
+    if (has === 'image') conditions.push(`(${attachment("AND a.type LIKE 'image/%'")} OR m.sticker_id IS NOT NULL)`);
+    else if (has === 'video') conditions.push(attachment("AND a.type LIKE 'video/%'"));
+    else if (has === 'audio') conditions.push(attachment("AND a.type LIKE 'audio/%'"));
+    else if (has === 'file') conditions.push(attachment(''));
+    else if (has === 'link') conditions.push("(m.content LIKE '%http://%' OR m.content LIKE '%https://%')");
+    else if (has === 'poll') conditions.push('EXISTS (SELECT 1 FROM polls WHERE message_id = m.id)');
+    if (!conditions.length) throw new HttpError(400, 'Type something to search for');
+    if (Number(p.get('before'))) {
+      conditions.push('m.created_at < ?');
+      args.push(Number(p.get('before')));
+    }
+    if (Number(p.get('after'))) {
+      conditions.push('m.created_at >= ?');
+      args.push(Number(p.get('after')));
+    }
+    if (!rooms.length) return { results: [], more: false };
+    const PAGE = 25;
+    const offset = Math.max(0, Math.min(Number(p.get('offset')) || 0, 1000));
+    const ids = (
+      db
+        .prepare(`SELECT m.id FROM messages m WHERE m.channel_id IN (${rooms.join(',')}) AND ${conditions.join(' AND ')} ORDER BY m.id DESC LIMIT ? OFFSET ?`)
+        .all(...args, PAGE + 1, offset) as { id: number }[]
+    ).map((r) => r.id);
+    const results = messagesByIds(ids.slice(0, PAGE)).map((message) => ({ message, place: placeOf(message.channelId as number, user.id) }));
+    return { results, more: ids.length > PAGE };
+  });
+
+  // ---- threads: side conversations off one message ----
+
+  const threadOf = (messageId: number) =>
+    (db
+      .prepare(
+        `SELECT c.id, c.name, (SELECT COUNT(*) FROM messages WHERE channel_id = c.id) AS count,
+                (SELECT MAX(created_at) FROM messages WHERE channel_id = c.id) AS lastAt
+         FROM channels c WHERE c.parent_message_id = ? AND c.kind = 'thread'`,
+      )
+      .get(messageId) as Json | undefined) ?? null;
+
+  /** A burrow's threads that someone can see, with how much of each they've read. */
+  const threadsIn = (serverId: number, viewerId: number) => {
+    const rows = db
+      .prepare(
+        `SELECT c.id, c.name, c.parent_id AS parentId, c.parent_message_id AS parentMessageId, c.created_by AS createdBy,
+                c.created_at AS createdAt, (SELECT COUNT(*) FROM messages WHERE channel_id = c.id) AS count,
+                COALESCE((SELECT MAX(created_at) FROM messages WHERE channel_id = c.id), c.created_at) AS lastAt
+         FROM channels c WHERE c.server_id = ? AND c.kind = 'thread' ORDER BY lastAt DESC`,
+      )
+      .all(serverId) as Json[];
+    const seen = new Map<number, boolean>();
+    const parentVisible = (id: number) => {
+      if (!seen.has(id)) {
+        const parent = channelById(id);
+        seen.set(id, !!parent && canSee(parent, viewerId));
+      }
+      return seen.get(id)!;
+    };
+    return rows.filter((t) => parentVisible(t.parentId as number)).map((t) => ({ ...t, ...readInfo(t.id as number, serverId, viewerId) }));
+  };
+
+  /** The thread's message in the room it hangs off shows its reply count, so that message updates. */
+  const threadChanged = (thread: Channel) => {
+    const row = db.prepare('SELECT parent_message_id FROM channels WHERE id = ?').get(thread.id) as { parent_message_id: number | null } | undefined;
+    const parent = thread.parentId === null ? undefined : channelById(thread.parentId);
+    if (row?.parent_message_id && parent) messageChanged(row.parent_message_id, parent);
+  };
+  /** After a thread is deleted, its message loses the reply count. */
+  const threadDeleted = (thread: Channel, parentMessageId: number | null) => {
+    const parent = thread.parentId === null ? undefined : channelById(thread.parentId);
+    if (parent && parentMessageId) messageChanged(parentMessageId, parent);
+  };
+
+  /** Whoever started a thread can rename or delete it, and so can anyone who manages rooms. */
+  const manageableThread = (thread: Channel, user: User) => {
+    const row = db.prepare('SELECT created_by, parent_message_id FROM channels WHERE id = ?').get(thread.id) as { created_by: number | null; parent_message_id: number | null };
+    if (row.created_by !== user.id && !can(thread.serverId, user.id, 'rooms')) throw new HttpError(403, 'Only whoever started this thread can change it');
+    return row.parent_message_id;
+  };
+  const threadName = (value: unknown) => {
+    const name = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+    if (!name) throw new HttpError(400, 'Thread name is required');
+    return name.slice(0, 60);
+  };
+  const renameThread = (thread: Channel, user: User, name: unknown) => {
+    manageableThread(thread, user);
+    db.prepare('UPDATE channels SET name = ? WHERE id = ?').run(threadName(name), thread.id);
+    sendServerUpdate(thread.serverId);
+    threadChanged(thread);
+    return serverSummary(thread.serverId, user.id);
+  };
+
+  // Starts a thread off a message (or opens the one it already has).
+  route('POST', '/api/messages/:id/thread', ({ user, params, body }) => {
+    const id = Number(params[0]);
+    const { channel } = visibleMessage(user, id);
+    if (channel.kind !== 'text') throw new HttpError(400, "Threads can't start inside a thread");
+    let thread = db.prepare("SELECT id FROM channels WHERE parent_message_id = ? AND kind = 'thread'").get(id) as { id: number } | undefined;
+    if (!thread) {
+      const m = db.prepare('SELECT content FROM messages WHERE id = ?').get(id) as { content: string };
+      const firstLine = m.content.split('\n').find((l) => l.trim()) ?? '';
+      const name = body.name ? threadName(body.name) : firstLine.replace(/\s+/g, ' ').trim().slice(0, 40) || 'Thread';
+      const r = db
+        .prepare("INSERT INTO channels (server_id, name, kind, private, created_at, parent_id, parent_message_id, created_by) VALUES (?, ?, 'thread', 0, ?, ?, ?, ?)")
+        .run(channel.serverId, name, now(), channel.id, id, user.id);
+      thread = { id: Number(r.lastInsertRowid) };
+      messageChanged(id, channel);
+      sendServerUpdate(channel.serverId);
+    }
+    return { threadId: thread.id, server: serverSummary(channel.serverId, user.id) };
+  });
+
+  // ---- the clock: scheduled messages, reminders and polls closing ----
+
+  let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+  let wakeTime = Infinity;
+  /** Makes sure the clock goes off by time t. */
+  const wakeAt = (t: number) => {
+    if (t >= wakeTime) return;
+    if (wakeTimer) clearTimeout(wakeTimer);
+    wakeTime = t;
+    // Timers can't wait more than about 24 days; an hourly check is plenty for anything further off.
+    wakeTimer = setTimeout(tick, Math.max(0, Math.min(t - now(), 3600_000)));
+    wakeTimer.unref();
+  };
+  const nextDue = () =>
+    (db
+      .prepare(
+        `SELECT MIN(t) AS t FROM (
+           SELECT MIN(send_at) AS t FROM scheduled_messages
+           UNION ALL SELECT MIN(remind_at) FROM saved_messages WHERE reminded = 0 AND remind_at > ?
+           UNION ALL SELECT MIN(closes_at) FROM polls WHERE ended = 0)`,
+      )
+      .get(now()) as { t: number | null }).t;
+  const tick = () => {
+    wakeTimer = null;
+    wakeTime = Infinity;
+    try {
+      sendScheduled();
+      deliverReminders();
+      endPolls();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      const next = nextDue();
+      if (next !== null) wakeAt(next);
+    }
+  };
+  {
+    const next = nextDue();
+    if (next !== null) wakeAt(next);
+  }
+
   // ---- HTTP plumbing ------------------------------------------------------
 
   const readBody = (req: IncomingMessage) =>
@@ -1297,7 +2097,7 @@ export function createApp(opts: AppOptions): Server {
     if (req.headers['x-forwarded-proto'] === 'https') res.setHeader('strict-transport-security', 'max-age=31536000');
     // The desktop client loads its UI locally and talks to this server cross-origin.
     res.setHeader('access-control-allow-origin', '*');
-    res.setHeader('access-control-allow-headers', 'authorization, content-type, x-filename');
+    res.setHeader('access-control-allow-headers', 'authorization, content-type, x-filename, x-voice-seconds');
     res.setHeader('access-control-allow-methods', 'GET, POST, PATCH, DELETE, OPTIONS');
     if (req.method === 'OPTIONS') return res.writeHead(204).end();
 
@@ -1318,9 +2118,13 @@ export function createApp(opts: AppOptions): Server {
       if (req.method === 'POST' && url.pathname === '/api/me/avatar') return await handleAvatarUpload(req, res);
       const burrowUpload = req.method === 'POST' && url.pathname.match(/^\/api\/servers\/(\d+)\/picture$/);
       if (burrowUpload) return await handleBurrowPictureUpload(req, res, Number(burrowUpload[1]));
+      const emojiUpload = req.method === 'POST' && url.pathname.match(/^\/api\/servers\/(\d+)\/emoji$/);
+      if (emojiUpload) return await handleEmojiUpload(req, res, Number(emojiUpload[1]), url);
       const reading = req.method === 'GET' || req.method === 'HEAD';
-      const picture = reading && url.pathname.match(/^\/api\/(avatars|burrow-pictures)\/([\w-]+\.(?:png|jpg|gif|webp))$/);
+      const picture = reading && url.pathname.match(/^\/api\/(avatars|burrow-pictures|emoji)\/([\w-]+\.(?:png|jpg|gif|webp))$/);
       if (picture) return await servePicture(req, res, picture[1], picture[2]);
+      const embedImage = reading && url.pathname.match(/^\/api\/embeds\/(\d+)\/(\d+)\/([\w-]+)$/);
+      if (embedImage) return await serveEmbedImage(req, res, Number(embedImage[1]), Number(embedImage[2]), embedImage[3]);
       const gifPreview = reading && url.pathname.match(/^\/api\/gifs\/preview\/([\w-]+)$/);
       if (gifPreview) return await serveGifPreview(req, res, gifPreview[1]);
       for (const r of routes) {
@@ -1367,6 +2171,7 @@ export function createApp(opts: AppOptions): Server {
       sendTo(usersSharingServerWith(user.id), { type: 'presence', userId: user.id, online: true });
     }
     ws.send(JSON.stringify({ type: 'ready', user }));
+    deliverReminders(user.id);
 
     let alive = true;
     ws.on('pong', () => (alive = true));
@@ -1385,7 +2190,7 @@ export function createApp(opts: AppOptions): Server {
       }
       try {
         if (msg.type === 'send') {
-          postMessage(user, Number(msg.channelId), msg.content, msg.attachmentIds, msg.replyTo);
+          postMessage(user, Number(msg.channelId), msg);
         } else if (msg.type === 'voice_join') {
           const channel = channelById(Number(msg.channelId));
           if (!channel || channel.kind !== 'voice' || !canSee(channel, user.id))
@@ -1434,6 +2239,11 @@ export function createApp(opts: AppOptions): Server {
     });
   };
 
-  server.on('close', () => wss.close());
+  // Tests set a due time in the past and then check the clock, rather than waiting for it.
+  Object.assign(server, { checkClock: tick });
+  server.on('close', () => {
+    wss.close();
+    if (wakeTimer) clearTimeout(wakeTimer);
+  });
   return server;
 }
