@@ -32,6 +32,7 @@
     </div>
     <div class="auth-side">
       <form id="auth-form" class="auth-card">
+        <div id="invite-card" class="invite-card hidden" aria-live="polite"></div>
         <h1 id="auth-title">Welcome back</h1>
         <p class="muted" id="auth-subtitle">Log in to chat with your friends.</p>
         <label id="server-url-row">Server address
@@ -77,14 +78,25 @@
     </header>
 
     <aside class="sidebar">
+      <div id="burrow-banner" class="burrow-banner hidden"></div>
       <div class="side-head">
-        <h2 id="server-name">No burrow yet</h2>
+        <div class="side-title">
+          <h2 id="server-name">No burrow yet</h2>
+          <p id="server-desc" class="server-desc hidden"></p>
+        </div>
         <button class="icon-btn" id="server-menu-btn" title="Burrow settings and invite">
           <svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm8.9 3-1.6-.4a7.4 7.4 0 0 0-.7-1.7l.9-1.4-1.9-1.9-1.4.9a7.4 7.4 0 0 0-1.7-.7L13 3.1h-2l-.4 1.7a7.4 7.4 0 0 0-1.7.7l-1.4-.9-1.9 1.9.9 1.4a7.4 7.4 0 0 0-.7 1.7l-1.7.4v2l1.7.4c.2.6.4 1.2.7 1.7l-.9 1.4 1.9 1.9 1.4-.9c.5.3 1.1.5 1.7.7l.4 1.7h2l.4-1.7c.6-.2 1.2-.4 1.7-.7l1.4.9 1.9-1.9-.9-1.4c.3-.5.5-1.1.7-1.7l1.6-.4v-2Z"/></svg>
         </button>
       </div>
       <div class="side-scroll">
         <ul id="fire-main"></ul>
+        <div id="events-section" class="hidden">
+          <div class="section-title">
+            <span>Events</span>
+            <button class="icon-btn small-btn" id="add-event" title="Plan an event" aria-label="Plan an event">+</button>
+          </div>
+          <ul id="event-list" class="event-list"></ul>
+        </div>
         <div class="section-title">
           <span id="rooms-title">Rooms</span>
           <button class="icon-btn small-btn hidden" id="add-channel" title="New room">+</button>
@@ -93,6 +105,10 @@
         <div id="voice-section" class="hidden">
           <div class="section-title"><span>Other fires</span></div>
           <ul id="voice-list"></ul>
+        </div>
+        <div id="archived-section" class="hidden">
+          <button class="section-title fold-btn" id="archived-toggle" aria-expanded="false"><span id="archived-title">Archived</span></button>
+          <ul id="archived-list" class="hidden"></ul>
         </div>
       </div>
 
@@ -147,6 +163,7 @@
           <svg viewBox="0 0 24 24"><path d="M15 3l6 6-2 1-3 3 .5 5.5L15 20l-4-4-5.5 5.5-1-1L10 15l-4-4 1.5-1.5L13 10l3-3 1-2-2-2Z"/></svg>
         </button>
         <button class="icon-btn hidden" id="thread-btn" title="Thread settings" aria-label="Thread settings"></button>
+        <button class="icon-btn hidden" id="notify-btn" title="Notifications" aria-label="Notifications" aria-haspopup="menu"></button>
         <button class="icon-btn" id="members-toggle" title="Show who's here" aria-label="Show who's here">
           <svg viewBox="0 0 24 24"><path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-6 9c0-3.3 2.7-6 6-6s6 2.7 6 6H3Zm13.5-9a3 3 0 1 0 0-6M17 14c2.5.4 4 2.6 4 6h-3"/></svg>
         </button>
@@ -163,6 +180,8 @@
       <div class="composer-wrap">
         <div id="typing" class="typing"></div>
         <button type="button" id="scheduled-note" class="scheduled-note hidden"></button>
+        <div id="slow-note" class="slow-note hidden" aria-live="polite"></div>
+        <div id="composer-lock" class="composer-lock hidden"></div>
         <div id="pending-files" class="pending-files hidden"></div>
         <div id="reply-bar" class="reply-bar hidden">
           <span>Replying to <b id="reply-name"></b></span>

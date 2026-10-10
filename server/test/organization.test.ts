@@ -154,6 +154,11 @@ test('invite links that run out, the invite page and a new code', async () => {
   assert.notEqual(fresh.inviteCode, server.inviteCode);
   assert.equal((await call('/api/join', { body: { inviteCode: server.inviteCode }, token: eve.token })).status, 404);
   assert.equal((await call('/api/join', { body: { inviteCode: fresh.inviteCode }, token: eve.token })).status, 200);
+
+  // Invite links open the app with the code, which shows the burrow before joining.
+  const link = await fetch(`${base}/invite/${made.code}`, { redirect: 'manual' });
+  assert.equal(link.status, 302);
+  assert.equal(link.headers.get('location'), `/?invite=${made.code}`);
 });
 
 test('burrow details, rules, welcome room and handing it over', async () => {

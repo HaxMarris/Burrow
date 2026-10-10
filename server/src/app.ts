@@ -2675,6 +2675,9 @@ export function createApp(opts: AppOptions): Server {
       res.setHeader('content-security-policy', APP_CSP);
       res.setHeader('x-frame-options', 'DENY');
       res.setHeader('permissions-policy', 'camera=(self), display-capture=(self), geolocation=(), microphone=(self)');
+      // Invite links open the app, which shows the burrow before joining.
+      const invite = url.pathname.match(/^\/invite\/([\w-]{1,32})\/?$/);
+      if (invite) return res.writeHead(302, { location: `/?invite=${invite[1]}` }).end();
       return serveStatic(req, res, url.pathname);
     }
 
