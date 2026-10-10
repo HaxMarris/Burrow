@@ -137,7 +137,10 @@ label input:focus, .modal-card input:focus, .gif-picker input:focus { border-col
 .get-desktop { margin-top: 14px; padding-top: 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
 .get-desktop p { margin: 0; }
 .get-desktop-row { display: flex; gap: 8px; }
-.auth-card .get-desktop-row .btn { flex: 1; margin: 0; padding: 10px 8px; text-align: center; text-decoration: none; font-size: 14px; }
+.auth-card .get-desktop-row .btn { flex: 1; margin: 0; padding: 10px 8px; display: flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; font-size: 14px; }
+.get-desktop-row svg { width: 16px; height: 16px; flex: none; fill: currentColor; }
+/* The apple's weight sits low (leaf on top), so lift it to line up with the word. */
+.get-desktop-row [data-os="mac"] svg { transform: translateY(-1.5px); }
 .auth-card .get-desktop-row .btn.mine { background: var(--accent); color: var(--accent-ink); }
 
 /* ---------- layout ----------
