@@ -18,8 +18,12 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Profile pictures and password changes (changing your password logs out your other devices)
 - Real-time messaging over WebSockets, with typing indicators and online/offline presence
 - Full message history with infinite scroll back, edit and delete your own messages (↑ edits your last one)
-- Light formatting: `**bold**`, `*italic*`, `` `code` ``, code blocks, clickable links, `@mentions` (highlighted, and they trigger a desktop notification)
-- Unread markers on channels and servers
+- Formatting: `**bold**`, `*italic*`, `__underline__`, `~~strikethrough~~`, `||spoilers||`, `` `code` ``, coloured code blocks, `# headings`, `> quotes`, lists, clickable links with previews, and `@mentions` (highlighted, and they trigger a desktop notification)
+- Unread counts that remember where you stopped reading on every device, a "New" line, and a jump to the first unread message; mark a message unread to come back to it
+- Search across your burrows and direct messages, by words, person, room, date or kind (pictures, links, polls…)
+- Pinned messages, threads off any message, polls, forwarding, saved messages with reminders, and messages scheduled to send later
+- An emoji picker, each burrow's own custom emoji and stickers, and voice messages
+- Drafts kept per room, edit history on edited messages, long pastes sent as a text file you can read inline, and "Seen" in direct messages (you can turn it off)
 - Desktop app for Windows, macOS and Linux (Electron), plus the same UI in any browser
 - Scandinavian-forest look with light and dark themes
 
@@ -227,6 +231,10 @@ Burrow has its own names for things: a **burrow** is a shared space for one grou
 - The speech-bubble tile above your burrows holds your direct messages. Start one with its **+**, or click someone in a burrow's member list.
 - Click your name in the bottom corner to set a profile picture or change your password.
 - The **GIF** button next to the message box opens trending GIFs; type to search, and tap one to send it.
+- The **+** in the message box uploads files, makes a poll, sends a sticker, or sends what you've typed later. The smiley opens every emoji (and your burrows' own), and the microphone records a voice message.
+- Each message's **⋯** menu pins it, starts a thread, forwards it, saves it (or reminds you about it later), marks it unread, or shows its edit history. Your saved and scheduled messages are in your menu, top right.
+- The magnifier at the top of a room searches messages; **Ctrl+K** (⌘K on a Mac) opens it from anywhere. The pin next to it lists the room's pinned messages.
+- People whose role lets them *manage emoji* add a burrow's own emoji and stickers in its settings; type `:name:` to use one.
 - The moon button in your profile card switches between the light "birch" theme and the dark "pine night" theme. By default it follows your system setting.
 - Your account also has a **theme color** wheel: pick any color (nearer the middle is softer) or one of the presets, and Burrow's backgrounds and accents follow it in both light and dark. *Back to forest green* undoes it.
 
@@ -244,7 +252,7 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, and burrow pictures.
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, and the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more).
 
 Ideas for later: text message encryption, sharing one program's sound on macOS.
 

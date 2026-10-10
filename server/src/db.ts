@@ -145,7 +145,129 @@ export function openDb(file: string): Db {
       db.prepare("INSERT INTO member_roles (server_id, user_id, role_id) SELECT server_id, user_id, ? FROM members WHERE server_id = ? AND role = 'mod'").run(roleId, id);
     }
   }
+  addChatExtras(db);
   return db;
+}
+
+const hasColumn = (db: Db, table: string, column: string) =>
+  (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((c) => c.name === column);
+const addColumn = (db: Db, table: string, column: string, type: string) => {
+  if (!hasColumn(db, table, column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+};
+
+/** Added with the chat and messages update: pins, saved messages, threads, polls, search and the rest. */
+function addChatExtras(db: Db) {
+  // Pinned messages, forwarded messages (a JSON note of where it came from), stickers,
+  // and whether the author hid its link previews.
+  addColumn(db, 'messages', 'pinned_at', 'INTEGER');
+  addColumn(db, 'messages', 'pinned_by', 'INTEGER');
+  addColumn(db, 'messages', 'forwarded', 'TEXT');
+  addColumn(db, 'messages', 'sticker_id', 'INTEGER');
+  addColumn(db, 'messages', 'embeds_off', 'INTEGER NOT NULL DEFAULT 0');
+  // Pictures hidden until tapped, and recorded voice messages (their length).
+  addColumn(db, 'attachments', 'spoiler', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'attachments', 'voice_seconds', 'REAL');
+  // A thread is a room of kind 'thread' that hangs off one message in another room.
+  addColumn(db, 'channels', 'parent_id', 'INTEGER REFERENCES channels(id) ON DELETE CASCADE');
+  addColumn(db, 'channels', 'parent_message_id', 'INTEGER REFERENCES messages(id) ON DELETE SET NULL');
+  addColumn(db, 'channels', 'created_by', 'INTEGER');
+  // "Seen" in direct messages: shown only when both people leave it on.
+  addColumn(db, 'users', 'read_receipts', 'INTEGER NOT NULL DEFAULT 1');
+  const hadReadState = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'read_state'").get();
+  const hadSearch = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'").get();
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS threads_by_message ON channels(parent_message_id);
+    CREATE INDEX IF NOT EXISTS channels_by_parent ON channels(parent_id);
+    CREATE TABLE IF NOT EXISTS message_edits (
+      message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      content    TEXT NOT NULL,
+      edited_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS message_edits_by_message ON message_edits(message_id);
+    CREATE TABLE IF NOT EXISTS saved_messages (
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      saved_at   INTEGER NOT NULL,
+      remind_at  INTEGER,
+      reminded   INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (user_id, message_id)
+    );
+    CREATE INDEX IF NOT EXISTS saved_by_reminder ON saved_messages(remind_at) WHERE remind_at IS NOT NULL AND reminded = 0;
+    -- The newest message each person has read in each room.
+    CREATE TABLE IF NOT EXISTS read_state (
+      user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      channel_id   INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      last_read_id INTEGER NOT NULL,
+      PRIMARY KEY (user_id, channel_id)
+    );
+    CREATE TABLE IF NOT EXISTS scheduled_messages (
+      id         INTEGER PRIMARY KEY,
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      content    TEXT NOT NULL,
+      reply_to   INTEGER,
+      send_at    INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS scheduled_by_time ON scheduled_messages(send_at);
+    CREATE TABLE IF NOT EXISTS polls (
+      message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+      question   TEXT NOT NULL,
+      options    TEXT NOT NULL, -- JSON list of answers
+      multi      INTEGER NOT NULL DEFAULT 0,
+      closes_at  INTEGER,
+      ended      INTEGER NOT NULL DEFAULT 0 -- everyone has been told it closed
+    );
+    CREATE TABLE IF NOT EXISTS poll_votes (
+      message_id INTEGER NOT NULL REFERENCES polls(message_id) ON DELETE CASCADE,
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      option     INTEGER NOT NULL,
+      PRIMARY KEY (message_id, user_id, option)
+    );
+    -- Each burrow's own emoji and stickers. The picture lives in uploads/emoji.
+    CREATE TABLE IF NOT EXISTS custom_emoji (
+      id         INTEGER PRIMARY KEY,
+      server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      name       TEXT NOT NULL,
+      kind       TEXT NOT NULL, -- 'emoji' or 'sticker'
+      file       TEXT NOT NULL,
+      created_by INTEGER,
+      created_at INTEGER NOT NULL,
+      UNIQUE (server_id, kind, name)
+    );
+    -- Link previews worked out for a message, in the order the links appear.
+    CREATE TABLE IF NOT EXISTS message_embeds (
+      message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      position   INTEGER NOT NULL,
+      data       TEXT NOT NULL,
+      PRIMARY KEY (message_id, position)
+    );
+    -- Secrets the server makes for itself once, like the key that signs link preview picture links.
+    CREATE TABLE IF NOT EXISTS app_secrets (
+      name  TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+    -- Word search over messages, kept in step with the messages table.
+    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+      content, content='messages', content_rowid='id', tokenize='unicode61 remove_diacritics 2'
+    );
+    CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+      INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+    END;
+    CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+    END;
+    CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE OF content ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+      INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+    END;
+  `);
+  if (!hadSearch) db.exec("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')");
+  // Everything already in the database counts as read, so nobody starts with a wall of unread rooms.
+  if (!hadReadState)
+    db.exec(`INSERT OR IGNORE INTO read_state (user_id, channel_id, last_read_id)
+             SELECT m.user_id, c.id, COALESCE((SELECT MAX(id) FROM messages WHERE channel_id = c.id), 0)
+             FROM members m JOIN channels c ON c.server_id = m.server_id`);
 }
 
 /** Every new burrow starts with a Moderator role, which the host can change or delete. */

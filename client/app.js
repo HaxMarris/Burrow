@@ -24,8 +24,15 @@ const state = {
   lastChannel: JSON.parse(store.get('lastChannel') || '{}'), // serverId -> channelId
   messages: [],             // messages in the open channel, oldest first
   reachedStart: false,
+  reachedEnd: true,         // the newest message is loaded (false after jumping back to an old one)
   loadingOlder: false,
-  unread: new Set(),        // channel ids
+  loadingNewer: false,
+  newFrom: null,            // the "New" line goes after this message id (where you'd read up to when you opened the room)
+  unreadAtOpen: null,       // { count, mentions } unread when you opened the room, for the bar at the top
+  holdUnread: null,         // a room you marked unread: it stays unread while you're still in it
+  threadParent: null,       // the message an open thread started from
+  saved: new Map(),         // message id -> { savedAt, remindAt, reminded }: your saved messages
+  scheduled: [],            // your messages waiting to be sent
   typing: new Map(),        // channelId -> Map(username -> timer)
   ws: null,
   wsRetry: 0,
@@ -203,11 +210,12 @@ async function enterApp() {
   const config = await api('/api/config').catch(() => ({}));
   state.voiceEnabled = !!config.voice;
   state.maxUploadBytes = config.maxUploadBytes || 0;
-  $('#attach-btn').classList.toggle('hidden', !state.maxUploadBytes);
+  $('#mic-btn').classList.toggle('hidden', !state.maxUploadBytes || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined');
   state.gifsEnabled = !!config.gifs;
   $('#gif-btn').classList.toggle('hidden', !state.gifsEnabled);
   await loadServers();
   connect();
+  loadSavedAndScheduled();
 }
 
 async function loadServers() {
@@ -266,12 +274,28 @@ function handleEvent(ev) {
         state.dmOrder = [dm, ...state.dmOrder.filter((id) => id !== dm)];
         if (state.inDms) renderChannels();
       }
+      const mine = m.authorId === state.me.id;
+      const where = roomById(m.channelId);
+      if (where) {
+        const c = where.c;
+        if (mine) Object.assign(c, { lastReadId: Math.max(c.lastReadId ?? 0, m.id), unread: 0, mentions: 0 });
+        else if (m.id > (c.lastReadId ?? 0)) {
+          c.unread = (c.unread ?? 0) + 1;
+          if (isDm(where.s) || mentionsMe(m)) c.mentions = (c.mentions ?? 0) + 1;
+        }
+        if (where.thread) Object.assign(c, { count: (c.count ?? 0) + 1, lastAt: m.createdAt });
+      }
       if (m.channelId === state.channelId) {
-        state.messages.push(m);
         clearTyping(m.channelId, m.author);
-        appendMessage(m, { stick: m.authorId === state.me.id });
-      } else {
-        state.unread.add(m.channelId);
+        if (state.reachedEnd) {
+          state.messages.push(m);
+          appendMessage(m, { stick: mine });
+          renderSeen();
+        } else if (mine) loadPresent();
+        if (mine) { state.holdUnread = null; state.newFrom = null; state.unreadAtOpen = null; updateUnreadBar(); }
+        markReadSoon();
+      }
+      if (m.channelId !== state.channelId || where?.thread) {
         renderServers();
         renderChannels();
       }
@@ -284,12 +308,14 @@ function handleEvent(ev) {
     case 'message_updated': {
       const i = state.messages.findIndex((x) => x.id === ev.message.id);
       if (i >= 0) state.messages[i] = ev.message;
+      if (state.threadParent?.id === ev.message.id) { state.threadParent = ev.message; renderMessages(); }
       refreshLine(ev.message.id);
       for (const x of state.messages)
         if (x.replyTo?.id === ev.message.id) { x.replyTo.content = ev.message.content.slice(0, 160); refreshLine(x.id); }
       break;
     }
     case 'message_deleted':
+      if (state.threadParent?.id === ev.id) state.threadParent = { deleted: true };
       state.messages = state.messages.filter((x) => x.id !== ev.id);
       for (const x of state.messages) if (x.replyTo?.id === ev.id) x.replyTo = { deleted: true };
       if (state.replyTo?.id === ev.id) setReply(null);
@@ -306,7 +332,7 @@ function handleEvent(ev) {
         addDm(ev.server);
         renderServers();
         if (state.inDms) renderChannels();
-        if (ev.server.id === state.serverId) renderMembers();
+        if (ev.server.id === state.serverId) { renderMembers(); renderSeen(); }
         break;
       }
       const isNew = !state.servers.has(ev.server.id);
@@ -319,8 +345,9 @@ function handleEvent(ev) {
         && [...state.voice.crypto.pubs.keys()].some((id) => !ev.server.members.some((m) => String(m.id) === id))) keysChanged(state.voice);
       if (ev.server.id === state.serverId) {
         // The room we're in was deleted or made private without us.
-        if (!state.inDms && !ev.server.channels.some((c) => c.id === state.channelId)) selectServer(ev.server.id);
-        else { renderChannels(); renderMembers(); renderMessages(); }
+        if (!state.inDms && !ev.server.channels.some((c) => c.id === state.channelId) && !ev.server.threads?.some((t) => t.id === state.channelId))
+          selectServer(ev.server.id);
+        else { renderChannels(); renderMembers(); renderMessages(); renderChatHeader(); }
       }
       break;
     }
@@ -367,6 +394,35 @@ function handleEvent(ev) {
       if (ev.message.userId !== state.me.id && !firesideVisible()) state.fireside.unread++;
       renderFireside({ added: ev.message });
       break;
+    case 'read': {
+      const where = roomById(ev.channelId);
+      if (!where) break;
+      Object.assign(where.c, { lastReadId: ev.lastReadId, unread: ev.unread, mentions: ev.mentions });
+      renderServers();
+      renderChannels();
+      break;
+    }
+    case 'dm_seen': {
+      const s = state.servers.get(ev.serverId);
+      if (s) s.seen = { userId: ev.userId, lastReadId: ev.lastReadId };
+      if (ev.channelId === state.channelId) renderSeen();
+      break;
+    }
+    case 'saved':
+      if (ev.saved) state.saved.set(ev.messageId, ev.saved);
+      else state.saved.delete(ev.messageId);
+      break;
+    case 'reminder':
+      state.saved.set(ev.saved.messageId, ev.saved);
+      showReminder(ev);
+      break;
+    case 'scheduled':
+      state.scheduled = ev.items;
+      renderScheduledNote();
+      break;
+    case 'scheduled_failed':
+      toast(`A scheduled message couldn't be sent: ${ev.error}`, { timeout: 0 });
+      break;
     case 'error':
       console.warn('Server error:', ev.error);
       break;
@@ -374,15 +430,17 @@ function handleEvent(ev) {
 }
 
 function notify(m) {
-  const server = [...state.servers.values()].find((s) => s.channels.some((c) => c.id === m.channelId));
-  const channel = server?.channels.find((c) => c.id === m.channelId);
+  const where = roomById(m.channelId);
+  const server = where?.s;
+  const channel = where?.c;
   // A direct message is always for you, like a mention.
-  const mentioned = isDm(server) || new RegExp('@' + escapeRegex(state.me.username) + '\\b', 'i').test(m.content) || m.replyTo?.authorId === state.me.id;
+  const mentioned = isDm(server) || mentionsMe(m);
   if (!mentioned && !document.hidden) return;
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   const title = isDm(server) ? `${m.author} (direct message)` : `${m.author} in ${channel?.name ?? 'Burrow'}`;
-  const n = new Notification(title, { body: m.content.slice(0, 200) || 'Sent a file', silent: !mentioned });
-  n.onclick = () => { window.focus(); if (server) selectServer(server.id).then(() => { selectChannel(m.channelId); showView('chat'); }); };
+  const body = plainText(m.content).slice(0, 200) || (m.poll ? `Poll: ${m.poll.question}` : m.sticker ? 'Sent a sticker' : 'Sent a file');
+  const n = new Notification(title, { body, silent: !mentioned });
+  n.onclick = () => { window.focus(); jumpTo(m.channelId, m.id); };
 }
 
 // ---------------------------------------------------------------- servers & channels
@@ -391,7 +449,7 @@ function notify(m) {
 // Phones get one button with the current burrow's name instead, which opens the full list.
 function renderServers() {
   const s = state.servers.get(state.serverId);
-  const hasUnread = (srv) => srv.channels.some((c) => state.unread.has(c.id));
+  const hasUnread = serverUnread;
   const dmUnread = state.dmOrder.some((id) => hasUnread(state.servers.get(id)));
 
   const dmPill = document.createElement('button');
@@ -418,6 +476,8 @@ function renderServers() {
     name.className = 'pill-name';
     name.textContent = srv.name;
     b.append(name);
+    const pings = serverMentions(srv);
+    if (pings && !on) b.insertAdjacentHTML('beforeend', `<span class="ping-count" title="${pings} for you">${pings > 99 ? '99+' : pings}</span>`);
     if (on) b.setAttribute('aria-current', 'true');
     if (favs.includes(id)) b.classList.add('fav');
     b.onclick = () => selectServer(id);
@@ -513,7 +573,7 @@ function fitPills() {
 }
 function markMoreUnread() {
   const hidden = [...overflowIds, ...notInBar];
-  $('#burrow-more').classList.toggle('unread', hidden.some((id) => state.servers.get(id)?.channels.some((c) => state.unread.has(c.id))));
+  $('#burrow-more').classList.toggle('unread', hidden.some((id) => serverUnread(state.servers.get(id))));
 }
 
 // ---- favorites: up to 5 burrows kept in the top bar, saved on the server so every device shows the same ones
@@ -542,7 +602,7 @@ new ResizeObserver(() => fitPills()).observe($('#burrow-nav'));
 function burrowStatus(s) {
   const fire = s.channels.reduce((n, c) => n + (c.kind === 'voice' ? c.voiceUsers?.length ?? 0 : 0), 0);
   if (fire) return { text: `${fire} by the fire`, cls: 'ember' };
-  if (s.channels.some((c) => state.unread.has(c.id))) return { text: 'New messages', cls: 'news' };
+  if (serverUnread(s)) return { text: 'New messages', cls: 'news' };
   return { text: s.channels.some((c) => c.kind === 'voice') ? "Fire's out" : 'All caught up', cls: '' };
 }
 
@@ -582,7 +642,7 @@ function renderSwitcher() {
     const b = document.createElement('button');
     b.className = 'switch-main';
     const tile = burrowTile(s);
-    if (!on && s.channels.some((c) => state.unread.has(c.id))) tile.classList.add('unread');
+    if (!on && serverUnread(s)) tile.classList.add('unread');
     const status = burrowStatus(s);
     const text = document.createElement('span');
     text.className = 'switch-text';
@@ -649,7 +709,7 @@ document.addEventListener('click', closeSwitcher);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSwitcher(); });
 window.addEventListener('resize', placeSwitcher);
 
-async function selectServer(id, initial = false) {
+async function selectServer(id, initial = false, open = null) {
   const s = state.servers.get(id);
   if (!initial) showView('rooms');
   if (s) state.inDms = isDm(s);
@@ -658,9 +718,10 @@ async function selectServer(id, initial = false) {
   renderServers();
   renderMembers();
   if (!s) { state.channelId = null; renderChannels(); state.messages = []; renderMessages(); return; }
+  if (open) return selectChannel(open.channelId, open);
   const remembered = state.lastChannel[id];
   const textRooms = s.channels.filter((c) => c.kind !== 'voice');
-  const ch = textRooms.find((c) => c.id === remembered) ?? textRooms[0];
+  const ch = textRooms.find((c) => c.id === remembered) ?? s.threads?.find((t) => t.id === remembered) ?? textRooms[0];
   if (initial && ch && ch.id === state.channelId) return renderChannels();
   await selectChannel(ch?.id ?? null);
 }
@@ -683,12 +744,13 @@ function renderChannels() {
     li.append(name);
     if (c.private) li.insertAdjacentHTML('beforeend', LOCK_ICON);
     if (c.id === state.channelId) li.className = 'active';
-    else if (state.unread.has(c.id)) li.className = 'unread';
+    else if (isUnread(c)) li.className = 'unread';
     li.prepend(roomIcon());
+    if (c.id !== state.channelId && c.mentions) li.append(pingCount(c.mentions));
     li.onclick = () => { selectChannel(c.id); showView('chat'); };
     if (can(s, 'rooms')) li.append(roomSettingsButton(c));
-    return li;
-  });
+    return [li, ...threadRows(s, c)];
+  }).flat();
   // The first voice room is the burrow's Campfire, shown as a card above the rooms. Any others are "other fires".
   const voiceRooms = channels.filter((c) => c.kind === 'voice').map((c, i) => {
     const li = document.createElement('li');
@@ -751,39 +813,81 @@ function renderChannels() {
   renderFire();
 }
 
-async function selectChannel(id) {
+// Opens a room or thread. With `around`, it opens at that message instead of the newest;
+// with `present`, at the newest even if there's a lot you haven't read.
+async function selectChannel(id, { around = null, present = false } = {}) {
   closeStage();
-  // Files upload into a specific room, so switching rooms drops any not yet sent.
-  if (id !== state.channelId && state.pending.length) {
-    state.pending.forEach((p) => { p.xhr?.abort(); if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
-    state.pending = [];
-    renderPending();
+  const changing = id !== state.channelId;
+  if (changing) {
+    saveDraft();
+    // Files upload into a specific room, so switching rooms drops any not yet sent.
+    if (state.pending.length) {
+      state.pending.forEach((p) => { p.xhr?.abort(); if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
+      state.pending = [];
+      renderPending();
+    }
+    setReply(null);
+    cancelRecording();
+    state.holdUnread = null;
   }
-  if (id !== state.channelId) setReply(null);
   state.channelId = id;
-  state.unread.delete(id);
   state.lastChannel[state.serverId] = id;
   store.set('lastChannel', JSON.stringify(state.lastChannel));
+  const where = roomById(id);
+  const ch = where?.c;
+  // Where you'd read up to, for the "New" line. It stays put while you're in the room.
+  if (changing || present) {
+    state.newFrom = ch?.unread ? ch.lastReadId ?? 0 : null;
+    state.unreadAtOpen = ch?.unread ? { count: ch.unread, mentions: ch.mentions ?? 0 } : null;
+  }
   renderChannels();
   renderServers();
-  const server = state.servers.get(state.serverId);
-  const ch = server?.channels.find((c) => c.id === id);
-  const title = isDm(server) ? partner(server).username : ch?.name ?? '';
-  $('#channel-name').textContent = title;
-  renderChannelSub();
-  $('#composer-input').placeholder = !ch ? '' : isDm(server) ? `Message ${title}` : `Say something in ${title}`;
+  renderChatHeader();
   $('#composer-input').disabled = !ch;
   $('#send-btn').disabled = !ch;
+  if (changing) loadDraft();
+  renderScheduledNote();
   state.messages = [];
   state.reachedStart = false;
+  state.reachedEnd = true;
+  state.threadParent = null;
   renderTyping();
+  updateUnreadBar();
+  renderPresentBar();
   if (!ch) return renderMessages();
-  const msgs = await api(`/api/channels/${id}/messages?limit=50`);
+  // Lots unread: start where you left off rather than at the bottom.
+  let target = around;
+  if (target == null && !present && (ch.unread ?? 0) > 40) target = (ch.lastReadId ?? 0) + 1;
+  const parentLoad = where.thread ? loadThreadParent(ch) : null;
+  let msgs;
+  try {
+    msgs = await api(`/api/channels/${id}/messages?limit=50${target != null ? `&around=${target}` : ''}`);
+  } catch (err) {
+    if (state.channelId === id) alertError(err);
+    return;
+  }
+  if (parentLoad) await parentLoad;
   if (state.channelId !== id) return;
   state.messages = msgs;
-  state.reachedStart = msgs.length < 50;
-  renderMessages({ stick: true });
-  $('#composer-input').focus();
+  if (target != null) {
+    state.reachedStart = msgs.filter((m) => m.id <= target).length < 25;
+    state.reachedEnd = msgs.filter((m) => m.id > target).length < 25;
+  } else {
+    state.reachedStart = msgs.length < 50;
+    state.reachedEnd = true;
+  }
+  renderMessages({ stick: target == null });
+  if (around != null) flashMessage(msgs.find((m) => m.id >= around)?.id ?? around);
+  else if (target != null) scrollToNewLine();
+  else {
+    // A few unread: show them from the "New" line down, if they don't all fit.
+    const line = messagesEl.querySelector('.new-divider');
+    if (line && line.getBoundingClientRect().top < messagesEl.getBoundingClientRect().top) scrollToNewLine();
+  }
+  renderPresentBar();
+  updateUnreadBar();
+  markReadSoon();
+  if (!isPhone()) $('#composer-input').focus();
 }
 
 function renderMembers() {
@@ -848,6 +952,19 @@ function renderMembers() {
 function renderChannelSub() {
   const s = state.servers.get(state.serverId);
   if (!s || !state.channelId) return ($('#channel-sub').textContent = '');
+  const where = roomById(state.channelId);
+  if (where?.thread) {
+    const parent = roomById(where.c.parentId)?.c;
+    const sub = $('#channel-sub');
+    sub.replaceChildren('Thread in ');
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'link-btn';
+    back.textContent = `#${parent?.name ?? 'a room'}`;
+    back.onclick = () => parent && selectChannel(parent.id);
+    sub.append(back);
+    return;
+  }
   if (isDm(s)) return ($('#channel-sub').textContent = `Direct message · ${partner(s).online ? 'around' : 'away'}`);
   const here = s.members.filter((m) => m.online).length;
   $('#channel-sub').textContent = `${s.name} · ${here} of ${s.members.length} around`;
@@ -860,13 +977,20 @@ const GROUP_WINDOW = 7 * 60 * 1000;
 
 function renderMessages({ stick = false } = {}) {
   const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+  const scrollTop = messagesEl.scrollTop;
   const frag = document.createDocumentFragment();
-  const server = state.servers.get(state.serverId);
-  const ch = server?.channels.find((c) => c.id === state.channelId);
+  const where = roomById(state.channelId);
+  const server = where?.s;
+  const ch = where?.c;
   if (ch && state.reachedStart) {
     const start = document.createElement('div');
     start.className = 'history-start';
-    start.innerHTML = isDm(server)
+    if (where.thread) {
+      start.innerHTML = `<h2>${escapeHtml(ch.name)}</h2><div class="muted">A thread in #${escapeHtml(roomById(ch.parentId)?.c.name ?? 'a room')}</div>`;
+      const p = state.threadParent;
+      if (p?.deleted) start.insertAdjacentHTML('beforeend', '<p class="muted small">The message this thread started from was deleted.</p>');
+      else if (p) start.append(messageCard(p, null, { onOpen: () => jumpTo(ch.parentId, p.id) }));
+    } else start.innerHTML = isDm(server)
       ? `<h2>This is the beginning of your conversation with ${escapeHtml(partner(server).username)}</h2>`
       : `<h2>This is the beginning of ${escapeHtml(ch.name)}</h2><div class="muted">Pull up a stump and say hello.</div>`;
     frag.append(start);
@@ -879,7 +1003,9 @@ function renderMessages({ stick = false } = {}) {
   }
   messagesEl.replaceChildren(frag);
   tailBody = body;
-  if (stick || nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+  if (stick || (nearBottom && state.reachedEnd)) messagesEl.scrollTop = messagesEl.scrollHeight;
+  else messagesEl.scrollTop = scrollTop;
+  renderSeen();
 }
 
 // The last author group's message column, so a new message can join it without a redraw.
@@ -888,6 +1014,7 @@ let tailBody = null;
 // Adds message m (and a day divider or a new author group when it needs one) after prev.
 // body is prev's group column; returns m's.
 function addMessageNodes(parent, m, prev, body) {
+  let newGroup = false;
   if (!prev || new Date(prev.createdAt).toDateString() !== new Date(m.createdAt).toDateString()) {
     const d = document.createElement('div');
     d.className = 'day-divider';
@@ -895,9 +1022,16 @@ function addMessageNodes(parent, m, prev, body) {
     label.textContent = new Date(m.createdAt).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
     d.append(label);
     parent.append(d);
-    prev = null;
+    newGroup = true;
   }
-  const grouped = prev && !m.replyTo && prev.authorId === m.authorId && m.createdAt - prev.createdAt < GROUP_WINDOW;
+  if (state.newFrom != null && m.id > state.newFrom && (prev ? prev.id <= state.newFrom : state.reachedStart)) {
+    const d = document.createElement('div');
+    d.className = 'new-divider';
+    d.innerHTML = '<span>New</span>';
+    parent.append(d);
+    newGroup = true;
+  }
+  const grouped = !newGroup && prev && !m.replyTo && !m.forwarded && prev.authorId === m.authorId && m.createdAt - prev.createdAt < GROUP_WINDOW;
   if (!grouped) {
     const group = document.createElement('div');
     group.className = 'group' + (m.authorId === state.me.id ? ' mine' : '');
@@ -948,18 +1082,32 @@ function refreshLine(id) {
 
 function renderLine(m) {
   const el = document.createElement('div');
-  el.className = 'line';
+  el.className = 'line' + (m.pinnedAt ? ' pinned' : '');
   el.dataset.id = m.id;
   el.title = new Date(m.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  if (m.authorId !== state.me.id && (new RegExp('@' + escapeRegex(state.me.username) + '\\b', 'i').test(m.content) || m.replyTo?.authorId === state.me.id))
-    el.classList.add('mentions-me');
+  if (m.authorId !== state.me.id && mentionsMe(m)) el.classList.add('mentions-me');
+  if (m.pinnedAt) el.insertAdjacentHTML('beforeend', `<span class="pin-mark" title="Pinned">${PIN_ICON}</span>`);
+  if (m.forwarded) el.append(renderForwarded(m.forwarded));
   if (m.replyTo) el.append(renderReplyQuote(m.replyTo));
   const content = document.createElement('div');
-  content.className = 'content';
-  content.innerHTML = formatContent(m.content) + (m.editedAt ? ' <span class="edited">(edited)</span>' : '');
+  content.className = 'content' + (isJumbo(m.content) ? ' jumbo' : '');
+  content.innerHTML = formatContent(m.content);
+  if (m.editedAt) {
+    const edited = document.createElement('button');
+    edited.type = 'button';
+    edited.className = 'edited';
+    edited.textContent = '(edited)';
+    edited.title = `Edited ${new Date(m.editedAt).toLocaleString()}. See earlier versions.`;
+    edited.onclick = () => openEditHistory(m);
+    content.append(' ', edited);
+  }
   if (!m.content && !m.editedAt) content.classList.add('hidden');
   el.append(content);
+  if (m.sticker) el.append(renderSticker(m.sticker));
+  if (m.poll) el.append(renderPoll(m));
   if (m.attachments?.length) el.append(renderAttachments(m.attachments));
+  if (m.embeds?.length) el.append(renderEmbeds(m));
+  if (m.thread) el.append(renderThreadChip(m.thread));
   if (m.reactions?.length) el.append(renderReactions(m));
 
   const actions = document.createElement('div');
@@ -969,9 +1117,11 @@ function renderLine(m) {
   const replyBtn = iconButton('', 'Reply', () => setReply(m));
   replyBtn.innerHTML = REPLY_ICON;
   actions.append(reactBtn, replyBtn);
-  if (m.authorId === state.me.id) actions.append(iconButton('Edit', 'Edit message', () => startEdit(m, content)));
-  if (m.authorId === state.me.id || can(state.servers.get(state.serverId), 'messages'))
-    actions.append(iconButton('Delete', 'Delete message', () => confirmDelete(m)));
+  if (m.authorId === state.me.id && !m.poll && !m.forwarded) actions.append(iconButton('Edit', 'Edit message', () => startEdit(m, content)));
+  const more = iconButton('', 'More', (e) => openMessageMenu(e.currentTarget, m));
+  more.innerHTML = MORE_ICON;
+  more.setAttribute('aria-haspopup', 'menu');
+  actions.append(more);
   el.append(actions);
   return el;
 }
@@ -979,7 +1129,7 @@ function renderLine(m) {
 function startEdit(m, contentEl) {
   const ta = document.createElement('textarea');
   ta.className = 'edit';
-  ta.value = m.content;
+  ta.value = emojiToNames(m.content);
   ta.rows = Math.min(10, m.content.split('\n').length);
   const hint = document.createElement('div');
   hint.className = 'small muted';
@@ -992,8 +1142,8 @@ function startEdit(m, contentEl) {
     if (e.key === 'Escape') return done();
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      const content = ta.value.trim();
-      if (!content) return confirmDelete(m);
+      const content = namesToEmoji(ta.value.trim());
+      if (!content && !m.attachments?.length && !m.sticker) return confirmDelete(m);
       if (content !== m.content) await api(`/api/messages/${m.id}`, { method: 'PATCH', body: { content } }).catch(alertError);
       done();
     }
@@ -1011,12 +1161,16 @@ function confirmDelete(m) {
 
 // Phones can't hover, so tapping a message shows its buttons.
 messagesEl.addEventListener('click', (e) => {
-  if (!isPhone() || e.target.closest('button, a, textarea, .att-image')) return;
+  if (!isPhone() || e.target.closest('button, a, textarea, input, .att-image, .spoiler, .att-spoiler')) return;
   const line = e.target.closest('.line');
   messagesEl.querySelectorAll('.line.touched').forEach((l) => l !== line && l.classList.remove('touched'));
   line?.classList.toggle('touched');
 });
 
+messagesEl.addEventListener('scroll', () => {
+  updateUnreadBar();
+  if (messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 200) loadNewer();
+});
 messagesEl.addEventListener('scroll', async () => {
   if (messagesEl.scrollTop > 100 || state.reachedStart || state.loadingOlder || !state.messages.length) return;
   state.loadingOlder = true;
@@ -1040,28 +1194,28 @@ const input = $('#composer-input');
 let lastTypingSent = 0;
 
 async function sendComposer() {
-  const content = input.value.trim();
+  const content = namesToEmoji(input.value.trim());
   const channelId = state.channelId;
   const files = state.pending;
   const replyTo = state.replyTo;
   if ((!content && !files.length) || !channelId) return;
   if (files.some((p) => p.error)) return alert('Remove the files that failed to upload first.');
+  if (content.length > 4000) return alert('Messages can be at most 4000 characters. Paste long text and it goes up as a file instead.');
   input.value = '';
   autosize();
+  clearDraft(channelId);
   state.pending = [];
   renderPending();
   setReply(null);
   try {
-    const attachmentIds = (await Promise.all(files.map((p) => p.done))).map((a) => a.id);
+    const uploaded = await Promise.all(files.map((p) => p.done));
+    const attachmentIds = uploaded.map((a) => a.id);
+    const spoilerIds = uploaded.filter((a, i) => files[i].spoiler).map((a) => a.id);
     files.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl));
-    if (state.ws?.readyState === WebSocket.OPEN) {
-      state.ws.send(JSON.stringify({ type: 'send', channelId, content, attachmentIds, replyTo: replyTo?.id }));
-    } else {
-      await api(`/api/channels/${channelId}/messages`, { method: 'POST', body: { content, attachmentIds, replyTo: replyTo?.id } });
-    }
+    await sendMessage(channelId, { content, attachmentIds, spoilerIds, replyTo: replyTo?.id });
   } catch (err) {
     // Put everything back so nothing is lost.
-    if (!input.value) input.value = content;
+    if (!input.value) input.value = emojiToNames(content);
     state.pending = files.concat(state.pending);
     renderPending();
     if (replyTo && !state.replyTo) setReply(replyTo);
@@ -1142,7 +1296,7 @@ function mentionKey(e) {
 input.addEventListener('click', updateMentions);
 input.addEventListener('blur', closeMentions);
 
-$('#composer').addEventListener('submit', (e) => { e.preventDefault(); sendComposer(); });
+$('#composer').addEventListener('submit', (e) => { e.preventDefault(); if (recording) finishRecording(true); else sendComposer(); });
 
 input.addEventListener('keydown', (e) => {
   if (mentionKey(e)) return;
@@ -1161,6 +1315,7 @@ input.addEventListener('keydown', (e) => {
 input.addEventListener('input', () => {
   autosize();
   updateMentions();
+  saveDraftSoon();
   if (Date.now() - lastTypingSent > 3000 && input.value && state.ws?.readyState === WebSocket.OPEN) {
     lastTypingSent = Date.now();
     state.ws.send(JSON.stringify({ type: 'typing', channelId: state.channelId }));
@@ -1276,6 +1431,7 @@ $('#server-menu-btn').onclick = () => {
     </div>
     <div class="error" id="burrow-picture-error"></div>` : ''}
     ${can(s, 'roles') ? `<button class="btn secondary" id="open-roles">Roles${s.roles.length ? ` · ${s.roles.length}` : ''}</button>` : ''}
+    ${can(s, 'emoji') && state.maxUploadBytes ? `<button class="btn secondary" id="open-emoji">Emoji and stickers${s.emoji?.length ? ` · ${s.emoji.length}` : ''}</button>` : ''}
     ${can(s, 'ban') ? '<div id="ban-list"></div>' : ''}
     <div class="modal-row">
       <button class="btn danger" id="leave-server">${owner ? 'Delete burrow' : 'Leave burrow'}</button>
@@ -1284,6 +1440,7 @@ $('#server-menu-btn').onclick = () => {
   if (can(s, 'ban')) renderBans(s);
   if ($('#burrow-picture-tile')) wireBurrowPicture(s);
   $('#open-roles')?.addEventListener('click', () => openRoles(s.id));
+  $('#open-emoji')?.addEventListener('click', () => openEmojiManager(s.id));
   $('#copy-invite').onclick = () => { navigator.clipboard?.writeText(s.inviteCode); $('#copy-invite').textContent = 'Copied!'; };
   $('#leave-server').onclick = async () => {
     if (owner && !confirm(`Delete "${s.name}" and all its messages for everyone?`)) return;
@@ -1375,6 +1532,7 @@ const PERMS = [
   ['ban', 'Ban people', "Remove people for good, and see and lift bans"],
   ['roles', 'Manage roles', 'Make, change and hand out the roles below their own'],
   ['burrow', 'Edit the burrow', "Change the burrow's picture"],
+  ['emoji', 'Manage emoji', "Add, rename and remove the burrow's own emoji and stickers"],
 ];
 const ROLE_COLORS = ['#4f8a5b', '#2f7d74', '#3f6fa8', '#7a5aa6', '#b0527a', '#c2553d', '#c98a2b', '#8a8f87'];
 
@@ -1452,7 +1610,7 @@ function openRoomSettings(c) {
       state.servers.set(updated.id, updated);
       closeModal();
       renderChannels();
-      if (c.id === state.channelId) $('#channel-name').textContent = updated.channels.find((x) => x.id === c.id)?.name ?? '';
+      if (c.id === state.channelId) renderChatHeader();
     } catch (err) { $('#modal-error').textContent = err.message; }
   };
   $('#room-delete').onclick = async () => {
@@ -1639,13 +1797,15 @@ function renderDmList() {
     const s = state.servers.get(id);
     const p = partner(s);
     const li = document.createElement('li');
-    li.className = 'dm' + (id === state.serverId ? ' active' : s.channels.some((c) => state.unread.has(c.id)) ? ' unread' : '');
+    li.className = 'dm' + (id === state.serverId ? ' active' : serverUnread(s) ? ' unread' : '');
     const av = document.createElement('span');
     av.className = 'avatar xs';
     setAvatar(av, p.username, avatarOf(p.id, p.avatar));
     const name = document.createElement('span');
     name.textContent = p.username;
     li.append(av, name);
+    const n = id === state.serverId ? 0 : s.channels.reduce((sum, c) => sum + (c.unread ?? 0), 0);
+    if (n) li.insertAdjacentHTML('beforeend', `<span class="ping-count">${n > 99 ? '99+' : n}</span>`);
     li.onclick = () => { store.set('lastDm', id); selectServer(id); showView('chat'); };
     return li;
   });
@@ -1708,6 +1868,9 @@ function openAccount() {
     </div>
     <div class="error" id="avatar-error"></div>` : ''}
     ${themeSettings()}
+    <h3>Direct messages</h3>
+    <label class="check"><input type="checkbox" id="read-receipts" ${state.me.readReceipts !== false ? 'checked' : ''} /> Show when I've read a message</label>
+    <span class="small muted">Shows "Seen" under messages in direct messages. You only see it for others while yours is on too.</span>
     ${voiceSettings()}
     ${soundSettings()}
     <h3>Change password</h3>
@@ -1721,6 +1884,10 @@ function openAccount() {
       <div class="modal-row"><button type="button" class="btn secondary" data-close>Close</button><button type="submit" class="btn">Change password</button></div>
     </form>`);
   wireThemeSettings();
+  $('#read-receipts').onchange = async (e) => {
+    try { state.me.readReceipts = (await api('/api/me', { method: 'PATCH', body: { readReceipts: e.target.checked } })).readReceipts; }
+    catch (err) { e.target.checked = !e.target.checked; alertError(err); }
+  };
   wireVoiceSettings();
   wireSoundSettings();
   if (state.maxUploadBytes) {
@@ -1830,7 +1997,7 @@ function renderReactions(m) {
     b.className = 'reaction' + (r.userIds.includes(state.me.id) ? ' mine' : '');
     const server = state.servers.get(state.serverId);
     b.title = r.userIds.map((id) => server?.members.find((x) => x.id === id)?.username ?? 'someone').join(', ');
-    b.innerHTML = `<span class="r-emoji">${escapeHtml(r.emoji)}</span><span class="r-count">${r.userIds.length}</span>`;
+    b.innerHTML = `<span class="r-emoji">${emojiHtml(r.emoji)}</span><span class="r-count">${r.userIds.length}</span>`;
     b.onclick = () => toggleReaction(m, r.emoji);
     row.append(b);
   }
@@ -1857,9 +2024,15 @@ function openEmojiPicker(anchor, m) {
   for (const e of EMOJI_CHOICES) {
     const b = document.createElement('button');
     b.textContent = e;
-    b.onclick = () => { closeEmojiPicker(); toggleReaction(m, e); };
+    b.onclick = () => { closeEmojiPicker(); toggleReaction(m, e); rememberEmoji(e); };
     picker.append(b);
   }
+  const all = document.createElement('button');
+  all.className = 'more-emoji';
+  all.title = 'All emoji, and this burrow\'s own';
+  all.textContent = '+';
+  all.onclick = () => { closeEmojiPicker(); openEmojiPanel(anchor, (text) => toggleReaction(m, text)); };
+  picker.append(all);
   document.body.append(picker);
   const r = anchor.getBoundingClientRect();
   const w = picker.offsetWidth, h = picker.offsetHeight;
@@ -2037,6 +2210,7 @@ function uploadFile(channelId, p) {
     xhr.setRequestHeader('authorization', 'Bearer ' + state.token);
     xhr.setRequestHeader('content-type', p.file.type || 'application/octet-stream');
     xhr.setRequestHeader('x-filename', encodeURIComponent(p.file.name || 'pasted-image.png'));
+    if (p.voiceSeconds) xhr.setRequestHeader('x-voice-seconds', String(p.voiceSeconds));
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) { p.progress = e.loaded / e.total; renderPending(); } };
     xhr.onload = () => {
       let data = {};
@@ -2062,6 +2236,16 @@ function renderPending() {
       + `<span class="pending-name">${escapeHtml(p.file.name || 'image')}</span>`
       + `<span class="pending-meta">${p.error ? 'Failed' : p.progress < 1 ? Math.round(p.progress * 100) + '%' : formatSize(p.file.size)}</span>`
       + `<span class="bar" style="width:${p.error ? 0 : Math.round(p.progress * 100)}%"></span>`;
+    if (!p.error) {
+      const sp = document.createElement('button');
+      sp.type = 'button';
+      sp.className = 'pending-spoiler' + (p.spoiler ? ' on' : '');
+      sp.textContent = p.spoiler ? 'Spoiler' : 'Mark spoiler';
+      sp.title = p.spoiler ? 'Hidden until someone clicks it. Click to show it normally.' : 'Hide it until someone clicks it';
+      sp.onclick = () => { p.spoiler = !p.spoiler; renderPending(); };
+      chip.append(sp);
+      if (p.spoiler) chip.classList.add('spoilered');
+    }
     const x = document.createElement('button');
     x.type = 'button';
     x.className = 'pending-remove';
@@ -2083,36 +2267,44 @@ function renderAttachments(list) {
   wrap.className = 'attachments';
   for (const a of list) {
     const url = state.serverUrl + a.url;
+    let el;
     if (IMAGE_TYPES.test(a.type)) {
-      const img = document.createElement('img');
-      img.className = 'att-image';
-      img.src = url;
-      img.alt = a.name;
-      img.loading = 'lazy';
-      img.onload = () => { if (messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 400) messagesEl.scrollTop = messagesEl.scrollHeight; };
-      img.onclick = () => openImage(a, url);
-      wrap.append(img);
-    } else if (/^video\/(mp4|webm)$/.test(a.type)) {
-      const v = document.createElement('video');
-      v.className = 'att-video';
-      v.src = url;
-      v.controls = true;
-      v.preload = 'metadata';
-      wrap.append(v);
+      el = document.createElement('img');
+      el.className = 'att-image';
+      el.src = url;
+      el.alt = a.name;
+      el.loading = 'lazy';
+      el.onload = () => { if (state.reachedEnd && messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 400) messagesEl.scrollTop = messagesEl.scrollHeight; };
+      el.onclick = () => openImage(a, url);
+    } else if (VIDEO_TYPES.test(a.type)) {
+      el = document.createElement('video');
+      el.className = 'att-video';
+      el.src = url;
+      el.controls = true;
+      el.preload = 'metadata';
+      el.playsInline = true;
+    } else if (/^audio\//.test(a.type) && a.voiceSeconds != null) {
+      el = voicePlayer(a, url);
     } else if (/^audio\//.test(a.type)) {
+      el = document.createElement('div');
+      el.className = 'att-audio';
+      el.innerHTML = `<span class="att-audio-name">${escapeHtml(a.name)}</span>`;
       const au = document.createElement('audio');
       au.src = url;
       au.controls = true;
-      wrap.append(au);
+      au.preload = 'metadata';
+      el.append(au);
+    } else if (TEXT_TYPES.test(a.type) && a.size <= 512 * 1024) {
+      el = textPreview(a, url);
     } else {
-      const card = document.createElement('a');
-      card.className = 'att-file';
-      card.href = url;
-      card.target = '_blank';
-      card.rel = 'noopener';
-      card.innerHTML = `<span class="file-icon">${FILE_ICON}</span><span class="att-file-text"><span class="att-file-name">${escapeHtml(a.name)}</span><span class="muted small">${formatSize(a.size)}</span></span>`;
-      wrap.append(card);
+      el = document.createElement('a');
+      el.className = 'att-file';
+      el.href = url;
+      el.target = '_blank';
+      el.rel = 'noopener';
+      el.innerHTML = `<span class="file-icon">${FILE_ICON}</span><span class="att-file-text"><span class="att-file-name">${escapeHtml(a.name)}</span><span class="muted small">${formatSize(a.size)}</span></span>`;
     }
+    wrap.append(a.spoiler ? spoilerWrap(el) : el);
   }
   return wrap;
 }
@@ -2131,11 +2323,22 @@ function formatSize(n) {
 
 const FILE_ICON = '<svg viewBox="0 0 24 24"><path d="M6 2h8l6 6v14H6V2Zm8 1.5V9h5.5L14 3.5Z"/></svg>';
 
-$('#attach-btn').onclick = () => $('#file-input').click();
 $('#file-input').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; };
 input.addEventListener('paste', (e) => {
   const files = [...(e.clipboardData?.files ?? [])];
-  if (files.length) { e.preventDefault(); addFiles(files); }
+  if (files.length) { e.preventDefault(); addFiles(files); return; }
+  // Long text goes up as a file, so it doesn't take over the room (and isn't cut off at 4000 characters).
+  const text = e.clipboardData?.getData('text/plain') ?? '';
+  const total = input.value.length - (input.selectionEnd - input.selectionStart) + text.length;
+  if (text.length > LONG_PASTE || total > 4000) {
+    if (!state.maxUploadBytes) {
+      if (total > 4000) { e.preventDefault(); alert('That text is too long for one message (at most 4000 characters).'); }
+      return;
+    }
+    e.preventDefault();
+    addFiles([new File([text], 'message.txt', { type: 'text/plain' })]);
+    toast('Long text was added as a file, message.txt. Remove it from the tray to paste it as a message instead.', { timeout: 6000 });
+  }
 });
 const chatEl = $('.chat');
 let dragDepth = 0;
@@ -3742,28 +3945,1495 @@ function wireSoundSettings() {
   $('#sound-test').onclick = () => playSound('message', true);
 }
 
+// ---------------------------------------------------------------- rooms, threads and what you've read
+
+const PIN_ICON = '<svg viewBox="0 0 24 24"><path d="M15 3l6 6-2 1-3 3 .5 5.5L15 20l-4-4-5.5 5.5-1-1L10 15l-4-4 1.5-1.5L13 10l3-3 1-2-2-2Z"/></svg>';
+const MORE_ICON = '<svg viewBox="0 0 24 24"><path d="M6 10.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Zm6 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Zm6 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z"/></svg>';
+const THREAD_ICON = '<svg viewBox="0 0 24 24" class="thread-icon" aria-hidden="true"><path d="M6 3v9a4 4 0 0 0 4 4h8.2l-3 3 1.4 1.4L22 15l-5.4-5.4-1.4 1.4 3 3H10a2 2 0 0 1-2-2V3H6Z"/></svg>';
+const FORWARD_ICON = '<svg viewBox="0 0 24 24"><path d="M14 5v4C7 10 4 15 3 20c2.5-3.5 6-5.1 11-5.1V19l7-7-7-7Z"/></svg>';
+
+/** A room or thread by id, with the burrow (or DM) it's in. */
+function roomById(id) {
+  if (id == null) return null;
+  for (const s of state.servers.values()) {
+    const c = s.channels.find((x) => x.id === id);
+    if (c) return { s, c, thread: false };
+    const t = s.threads?.find((x) => x.id === id);
+    if (t) return { s, c: t, thread: true };
+  }
+  return null;
+}
+const isUnread = (c) => !!c && c.kind !== 'voice' && (c.unread ?? 0) > 0 && c.id !== state.channelId;
+const serverUnread = (s) => !!s && (s.channels.some(isUnread) || (s.threads ?? []).some(isUnread));
+const serverMentions = (s) => [...s.channels, ...(s.threads ?? [])].reduce((n, c) => n + (c.id === state.channelId ? 0 : c.mentions ?? 0), 0);
+function pingCount(n) {
+  const b = document.createElement('span');
+  b.className = 'ping-count';
+  b.title = `${n} for you`;
+  b.textContent = n > 99 ? '99+' : n;
+  return b;
+}
+const mentionsMe = (m) => new RegExp('@' + escapeRegex(state.me.username) + '\\b', 'i').test(m.content) || m.replyTo?.authorId === state.me.id;
+
+/** Message text without markup, for notifications and previews. */
+function plainText(text) {
+  return emojiToNames(text ?? '').replace(/\|\|(.+?)\|\|/g, '(spoiler)').replace(/[*_~`>#]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// Threads show under the room they hang off: the open one, unread ones, and ones active in the last few days.
+function threadRows(s, c) {
+  const recent = Date.now() - 3 * 864e5;
+  return (s.threads ?? [])
+    .filter((t) => t.parentId === c.id && (t.id === state.channelId || isUnread(t) || t.lastAt > recent))
+    .slice(0, 6)
+    .map((t) => {
+      const li = document.createElement('li');
+      li.className = 'thread-row' + (t.id === state.channelId ? ' active' : isUnread(t) ? ' unread' : '');
+      li.insertAdjacentHTML('beforeend', THREAD_ICON);
+      const name = document.createElement('span');
+      name.className = 'room-name';
+      name.textContent = t.name;
+      li.append(name);
+      if (t.id !== state.channelId && t.mentions) li.append(pingCount(t.mentions));
+      li.title = `${t.name}: thread in #${c.name}`;
+      li.onclick = () => { selectChannel(t.id); showView('chat'); };
+      return li;
+    });
+}
+
+// The header's title, subtitle and buttons for the open room.
+function renderChatHeader() {
+  const where = roomById(state.channelId);
+  const s = where?.s ?? state.servers.get(state.serverId);
+  const ch = where?.c;
+  const title = !ch ? '' : isDm(s) ? partner(s).username : ch.name;
+  $('#channel-name').textContent = title;
+  renderChannelSub();
+  input.placeholder = !ch ? '' : isDm(s) ? `Message ${title}` : where.thread ? `Reply in ${title}` : `Say something in ${title}`;
+  $('#pins-btn').classList.toggle('hidden', !ch);
+  const manage = where?.thread && (ch.createdBy === state.me.id || can(s, 'rooms'));
+  $('#thread-btn').classList.toggle('hidden', !manage);
+  $('#thread-btn').innerHTML = GEAR_ICON;
+}
+
+// ---- reading: the room you're looking at is read up to its newest message
+
+let readTimer = 0;
+function markReadSoon() {
+  clearTimeout(readTimer);
+  readTimer = setTimeout(markReadNow, 300);
+}
+function markReadNow() {
+  const id = state.channelId;
+  const where = roomById(id);
+  const newest = state.messages.at(-1);
+  if (!where || !newest || !state.reachedEnd || document.hidden || state.holdUnread === id || state.stageOpen) return;
+  if (isPhone() && $('#app').dataset.view !== 'chat') return;
+  const c = where.c;
+  if (newest.id <= (c.lastReadId ?? 0) && !c.unread) return;
+  Object.assign(c, { lastReadId: Math.max(c.lastReadId ?? 0, newest.id), unread: 0, mentions: 0 });
+  renderServers();
+  renderChannels();
+  api(`/api/channels/${id}/read`, { method: 'POST', body: { lastReadId: newest.id } }).catch(() => {});
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) markReadSoon(); });
+
+// "Mark unread": this message and everything after it count as new again, until you leave the room.
+async function markUnreadFrom(m) {
+  state.holdUnread = state.channelId;
+  state.newFrom = m.id - 1;
+  const after = state.messages.filter((x) => x.id >= m.id && x.authorId !== state.me.id).length;
+  state.unreadAtOpen = { count: Math.max(1, after), mentions: 0 };
+  renderMessages();
+  updateUnreadBar();
+  try {
+    const info = await api(`/api/channels/${m.channelId}/read`, { method: 'POST', body: { lastReadId: m.id - 1, unread: true } });
+    const where = roomById(m.channelId);
+    if (where) Object.assign(where.c, info);
+    if (state.unreadAtOpen) state.unreadAtOpen.count = info.unread || state.unreadAtOpen.count;
+    updateUnreadBar();
+    renderServers();
+    renderChannels();
+  } catch (err) { alertError(err); }
+}
+
+// The bar at the top says how much is new since you were last here, while the "New" line is out of view.
+function updateUnreadBar() {
+  const bar = $('#unread-bar');
+  const info = state.unreadAtOpen;
+  if (!info) return bar.classList.add('hidden');
+  const line = messagesEl.querySelector('.new-divider');
+  const above = !line || line.getBoundingClientRect().bottom < messagesEl.getBoundingClientRect().top + 4;
+  bar.classList.toggle('hidden', !above);
+  const first = state.messages.find((m) => m.id > state.newFrom);
+  const since = first && line ? ` since ${new Date(first.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : '';
+  $('#unread-jump').textContent = `${info.count}${info.count >= 99 ? '+' : ''} new message${info.count === 1 ? '' : 's'}${since}${info.mentions ? `, ${info.mentions} for you` : ''} · Jump`;
+}
+$('#unread-jump').onclick = () => {
+  if (messagesEl.querySelector('.new-divider')) scrollToNewLine(true);
+  else if (state.newFrom != null) selectChannel(state.channelId, { around: state.newFrom + 1 });
+};
+$('#unread-clear').onclick = () => {
+  state.unreadAtOpen = null;
+  state.newFrom = null;
+  state.holdUnread = null;
+  renderMessages();
+  updateUnreadBar();
+  if (state.reachedEnd) markReadNow();
+  else {
+    const where = roomById(state.channelId);
+    api(`/api/channels/${state.channelId}/read`, { method: 'POST', body: { lastReadId: Number.MAX_SAFE_INTEGER } })
+      .then((info) => { if (where) Object.assign(where.c, info); renderServers(); renderChannels(); })
+      .catch(() => {});
+  }
+};
+
+function scrollToNewLine(smooth = false) {
+  const line = messagesEl.querySelector('.new-divider');
+  if (!line) return;
+  const top = messagesEl.scrollTop + line.getBoundingClientRect().top - messagesEl.getBoundingClientRect().top - 12;
+  messagesEl.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
+}
+
+function flashMessage(id) {
+  const target = messagesEl.querySelector(`.line[data-id="${id}"]`);
+  if (!target) return;
+  target.scrollIntoView({ block: 'center' });
+  target.classList.remove('flash');
+  void target.offsetWidth;
+  target.classList.add('flash');
+}
+
+// ---- jumping to a message anywhere: search results, pins, saved messages, notifications
+
+async function jumpTo(channelId, messageId) {
+  closeModal();
+  const where = roomById(channelId);
+  if (!where) return alert("That message is in a room you can't see any more.");
+  showView('chat');
+  if (where.s.id !== state.serverId) {
+    if (isDm(where.s)) store.set('lastDm', where.s.id);
+    return selectServer(where.s.id, false, { channelId, around: messageId }).then(() => showView('chat'));
+  }
+  if (channelId === state.channelId && state.messages.some((m) => m.id === messageId)) return flashMessage(messageId);
+  await selectChannel(channelId, { around: messageId });
+}
+
+// After jumping back in time, newer messages load as you scroll down, and the bar takes you back to the present.
+function renderPresentBar() {
+  $('#present-bar').classList.toggle('hidden', state.reachedEnd || !state.channelId);
+}
+function loadPresent() {
+  if (state.channelId) selectChannel(state.channelId, { present: true });
+}
+$('#present-bar').onclick = loadPresent;
+
+async function loadNewer() {
+  if (state.reachedEnd || state.loadingNewer || !state.messages.length) return;
+  state.loadingNewer = true;
+  const channelId = state.channelId;
+  try {
+    const newer = await api(`/api/channels/${channelId}/messages?limit=50&after=${state.messages.at(-1).id}`);
+    if (channelId !== state.channelId) return;
+    state.messages.push(...newer);
+    state.reachedEnd = newer.length < 50;
+    renderMessages();
+    renderPresentBar();
+    if (state.reachedEnd) markReadSoon();
+  } catch {} finally {
+    state.loadingNewer = false;
+  }
+}
+
+async function loadThreadParent(t) {
+  try {
+    const list = await api(`/api/channels/${t.parentId}/messages?limit=1&around=${t.parentMessageId}`);
+    state.threadParent = list.find((m) => m.id === t.parentMessageId) ?? { deleted: true };
+  } catch { state.threadParent = { deleted: true }; }
+}
+
+// ---- read receipts in direct messages: "Seen" under your last message they've read
+
+function renderSeen() {
+  messagesEl.querySelector('.seen-mark')?.remove();
+  const where = roomById(state.channelId);
+  const seen = where && isDm(where.s) ? where.s.seen : null;
+  if (!seen || !state.reachedEnd) return;
+  const last = state.messages.findLast((m) => m.authorId === state.me.id);
+  if (!last || last.id > seen.lastReadId) return;
+  const line = messagesEl.querySelector(`.line[data-id="${last.id}"]`);
+  if (!line) return;
+  const mark = document.createElement('div');
+  mark.className = 'seen-mark';
+  mark.textContent = `Seen by ${partner(where.s).username}`;
+  line.after(mark);
+}
+
+// ---- drafts: what you'd typed stays with each room until you send it
+
+const draftKey = (id) => `draft:${id}`;
+let draftTimer = 0;
+function saveDraft() {
+  clearTimeout(draftTimer);
+  if (state.channelId) store.set(draftKey(state.channelId), input.value.trim() ? input.value : null);
+}
+function saveDraftSoon() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(saveDraft, 400);
+}
+function loadDraft() {
+  input.value = (state.channelId && store.get(draftKey(state.channelId))) || '';
+  autosize();
+}
+function clearDraft(id) {
+  clearTimeout(draftTimer);
+  store.set(draftKey(id), null);
+}
+window.addEventListener('beforeunload', saveDraft);
+
+// ---- sending
+
+/** Sends a message over the live connection, or the slower way if it's down. */
+async function sendMessage(channelId, body) {
+  if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: 'send', channelId, ...body }));
+  else await api(`/api/channels/${channelId}/messages`, { method: 'POST', body });
+}
+
+// ---- small pop-up menus and notes
+
+function openMenu(anchor, items) {
+  closeMenu();
+  const menu = document.createElement('div');
+  menu.id = 'pop-menu';
+  menu.className = 'pop-menu';
+  menu.setAttribute('role', 'menu');
+  for (const item of items.filter(Boolean)) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('role', 'menuitem');
+    b.textContent = item.label;
+    if (item.danger) b.classList.add('danger-item');
+    b.onclick = () => { closeMenu(); item.run(); };
+    menu.append(b);
+  }
+  document.body.append(menu);
+  const r = anchor.getBoundingClientRect();
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w)) + 'px';
+  menu.style.top = (r.bottom + 6 + h < window.innerHeight - 8 ? r.bottom + 6 : Math.max(8, r.top - h - 6)) + 'px';
+  menu.querySelector('button')?.focus({ preventScroll: true });
+  setTimeout(() => document.addEventListener('mousedown', outsideMenu), 0);
+}
+function outsideMenu(e) { if (!e.target.closest('#pop-menu')) closeMenu(); }
+function closeMenu() {
+  $('#pop-menu')?.remove();
+  document.removeEventListener('mousedown', outsideMenu);
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
+messagesEl.addEventListener('scroll', closeMenu);
+
+function toast(text, { action, onAction, timeout = 5000 } = {}) {
+  const t = document.createElement('div');
+  t.className = 'toast';
+  const span = document.createElement('span');
+  span.textContent = text;
+  t.append(span);
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'btn secondary';
+    b.textContent = action;
+    b.onclick = () => { t.remove(); onAction(); };
+    t.append(b);
+  }
+  const x = document.createElement('button');
+  x.className = 'icon-btn';
+  x.title = 'Dismiss';
+  x.textContent = '×';
+  x.onclick = () => t.remove();
+  t.append(x);
+  $('#toasts').append(t);
+  if (timeout) setTimeout(() => t.remove(), timeout);
+}
+
+/** Where a message is, in words: "Burrow › #room" or "Direct message with Sam". */
+function placeLabel(place) {
+  if (!place) return '';
+  if (place.kind === 'dm') return `Direct message with ${place.serverName}`;
+  return `${place.serverName} › #${place.channelName}${place.threadName ? ` › ${place.threadName}` : ''}`;
+}
+
+// A compact copy of a message, for lists like pins, search results and saved messages.
+function messageCard(m, place, { onOpen, buttons = [], note = '' } = {}) {
+  const card = document.createElement('div');
+  card.className = 'msg-card';
+  const head = document.createElement('div');
+  head.className = 'msg-card-head';
+  const av = document.createElement('span');
+  av.className = 'avatar xs';
+  setAvatar(av, m.author, avatarOf(m.authorId, m.authorAvatar));
+  const who = document.createElement('b');
+  who.textContent = m.author;
+  const when = document.createElement('span');
+  when.className = 'muted small';
+  when.textContent = formatTime(new Date(m.createdAt)) + (place ? ` · ${placeLabel(place)}` : '');
+  head.append(av, who, when);
+  card.append(head);
+  if (note) card.insertAdjacentHTML('beforeend', `<div class="small msg-card-note">${escapeHtml(note)}</div>`);
+  if (m.content) {
+    const body = document.createElement('div');
+    body.className = 'content';
+    body.innerHTML = formatContent(m.content.length > 600 ? m.content.slice(0, 600) + '…' : m.content);
+    card.append(body);
+  }
+  const extras = [
+    m.attachments?.length && `${m.attachments.length} file${m.attachments.length === 1 ? '' : 's'}`,
+    m.poll && `Poll: ${m.poll.question}`,
+    m.sticker && !m.sticker.deleted && `Sticker: ${m.sticker.name}`,
+  ].filter(Boolean);
+  if (extras.length) card.insertAdjacentHTML('beforeend', `<div class="muted small">${escapeHtml(extras.join(' · '))}</div>`);
+  if (buttons.length || onOpen) {
+    const row = document.createElement('div');
+    row.className = 'msg-card-actions';
+    if (onOpen) {
+      const jump = document.createElement('button');
+      jump.className = 'btn secondary';
+      jump.textContent = 'Jump';
+      jump.onclick = (e) => { e.stopPropagation(); onOpen(); };
+      row.append(jump);
+      card.classList.add('openable');
+      card.onclick = (e) => { if (!e.target.closest('button, a, .spoiler')) onOpen(); };
+    }
+    for (const [label, run, cls = 'secondary'] of buttons) {
+      const b = document.createElement('button');
+      b.className = `btn ${cls}`;
+      b.textContent = label;
+      b.onclick = (e) => { e.stopPropagation(); run(b); };
+      row.append(b);
+    }
+    card.append(row);
+  }
+  return card;
+}
+
+// ---- the ⋯ menu on a message
+
+function openMessageMenu(anchor, m) {
+  const where = roomById(m.channelId);
+  const s = where?.s;
+  const mine = m.authorId === state.me.id;
+  const saved = state.saved.get(m.id);
+  openMenu(anchor, [
+    { label: m.pinnedAt ? 'Unpin' : 'Pin to this room', run: () => api(`/api/messages/${m.id}/pin`, { method: 'POST', body: { pinned: !m.pinnedAt } }).catch(alertError) },
+    where && !where.thread && !isDm(s) && { label: m.thread ? 'Open thread' : 'Start a thread', run: () => startThread(m) },
+    { label: 'Forward', run: () => openForward(m) },
+    { label: saved ? 'Remove from saved' : 'Save for later', run: () => toggleSaved(m) },
+    { label: saved?.remindAt && !saved.reminded ? 'Change reminder' : 'Remind me about this', run: () => openRemind(m) },
+    { label: 'Mark unread from here', run: () => markUnreadFrom(m) },
+    m.content && navigator.clipboard && { label: 'Copy text', run: () => navigator.clipboard.writeText(emojiToNames(m.content)) },
+    m.editedAt && { label: 'Edit history', run: () => openEditHistory(m) },
+    mine && m.embeds?.length && { label: 'Remove link previews', run: () => api(`/api/messages/${m.id}/embeds`, { method: 'POST' }).catch(alertError) },
+    mine && m.poll && !m.poll.closed && { label: 'End poll now', run: () => api(`/api/messages/${m.id}/poll/end`, { method: 'POST' }).catch(alertError) },
+    (mine || can(s, 'messages')) && { label: 'Delete', danger: true, run: () => confirmDelete(m) },
+  ]);
+}
+
+// ---- pinned messages
+
+$('#pins-btn').onclick = async () => {
+  const channelId = state.channelId;
+  if (!channelId) return;
+  modal(`<h2>Pinned messages</h2><div id="pin-list" class="card-list"><p class="muted">Loading…</p></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
+  try {
+    const pins = await api(`/api/channels/${channelId}/pins`);
+    const list = $('#pin-list');
+    if (!list) return;
+    if (!pins.length) return (list.innerHTML = '<p class="muted">Nothing pinned yet. Pin a message from its ⋯ menu so everyone can find it again.</p>');
+    list.replaceChildren(...pins.map((m) => messageCard(m, null, {
+      onOpen: () => jumpTo(channelId, m.id),
+      buttons: [['Unpin', (b) => { b.disabled = true; api(`/api/messages/${m.id}/pin`, { method: 'POST', body: { pinned: false } }).then(() => b.closest('.msg-card').remove()).catch(alertError); }]],
+    })));
+  } catch (err) { $('#pin-list') && ($('#pin-list').textContent = err.message); }
+};
+
+// ---- edit history
+
+async function openEditHistory(m) {
+  modal(`<h2>Edit history</h2><div id="edit-list" class="card-list"><p class="muted">Loading…</p></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
+  try {
+    const edits = await api(`/api/messages/${m.id}/edits`);
+    const list = $('#edit-list');
+    if (!list) return;
+    const versions = [...edits.map((e) => ({ ...e, label: 'Earlier' })), { content: m.content, writtenAt: m.editedAt, label: 'Now' }];
+    if (edits.length) versions[0].writtenAt = m.createdAt;
+    list.replaceChildren(...versions.reverse().map((v) => {
+      const el = document.createElement('div');
+      el.className = 'msg-card';
+      el.innerHTML = `<div class="msg-card-head"><b>${v.label}</b><span class="muted small">${escapeHtml(v.writtenAt ? new Date(v.writtenAt).toLocaleString() : '')}</span></div>
+        <div class="content">${formatContent(v.content) || '<span class="muted">(empty)</span>'}</div>`;
+      return el;
+    }));
+    if (!edits.length) list.insertAdjacentHTML('beforeend', '<p class="muted small">Earlier versions are kept from now on.</p>');
+  } catch (err) { $('#edit-list') && ($('#edit-list').textContent = err.message); }
+}
+
+// ---- forwarding
+
+function forwardTargets() {
+  const out = [];
+  for (const id of state.serverOrder) {
+    const s = state.servers.get(id);
+    for (const c of s.channels) if (c.kind !== 'voice') out.push({ id: c.id, label: `${s.name} › #${c.name}` });
+  }
+  for (const id of state.dmOrder) {
+    const s = state.servers.get(id);
+    const c = s.channels[0];
+    if (c) out.push({ id: c.id, label: `Direct message with ${partner(s).username}` });
+  }
+  return out;
+}
+function openForward(m) {
+  const targets = forwardTargets();
+  modal(`<h2>Forward message</h2>
+    <p class="muted small">A copy goes to the room you pick, saying who wrote it and where.</p>
+    <input id="fwd-filter" placeholder="Find a room or person" />
+    <ul class="people-picker" id="fwd-list"></ul>
+    <div class="error" id="modal-error"></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Cancel</button></div>`);
+  const render = (q = '') => {
+    $('#fwd-list').replaceChildren(...targets.filter((t) => t.label.toLowerCase().includes(q.toLowerCase())).slice(0, 60).map((t) => {
+      const li = document.createElement('li');
+      li.textContent = t.label;
+      li.onclick = async () => {
+        try {
+          await api(`/api/messages/${m.id}/forward`, { method: 'POST', body: { channelId: t.id } });
+          closeModal();
+          toast(`Forwarded to ${t.label}`, { action: 'Go there', onAction: () => { const w = roomById(t.id); if (w) selectServer(w.s.id, false, { channelId: t.id }).then(() => showView('chat')); } });
+        } catch (err) { $('#modal-error').textContent = err.message; }
+      };
+      return li;
+    }));
+  };
+  render();
+  $('#fwd-filter').oninput = (e) => render(e.target.value);
+}
+function renderForwarded(f) {
+  const el = document.createElement('div');
+  el.className = 'forwarded';
+  el.innerHTML = `${FORWARD_ICON}<span>Forwarded · <b></b> wrote this ${f.from ? 'in ' : ''}<span class="fwd-from"></span></span>`;
+  el.querySelector('b').textContent = f.author;
+  el.querySelector('.fwd-from').textContent = f.from ?? '';
+  el.title = `Originally sent ${new Date(f.createdAt).toLocaleString()}`;
+  return el;
+}
+
+// ---- saved messages and reminders
+
+async function loadSavedAndScheduled() {
+  try {
+    const [saved, scheduled] = await Promise.all([api('/api/me/saved'), api('/api/me/scheduled')]);
+    state.saved = new Map(saved.map((x) => [x.messageId, x]));
+    state.scheduled = scheduled;
+    renderScheduledNote();
+  } catch {}
+}
+
+function toggleSaved(m) {
+  const saved = state.saved.has(m.id);
+  api(`/api/messages/${m.id}/save`, { method: 'POST', body: saved ? { saved: false } : {} })
+    .then(() => toast(saved ? 'Removed from saved messages' : 'Saved. Find it under your menu, in Saved messages.'))
+    .catch(alertError);
+}
+
+/** Times people usually want: soon, later today, tomorrow morning, next week. */
+function quickTimes() {
+  const at = (days, hour) => { const d = new Date(); d.setDate(d.getDate() + days); d.setHours(hour, 0, 0, 0); return d.getTime(); };
+  const times = [['In 20 minutes', Date.now() + 20 * 60e3], ['In 1 hour', Date.now() + 3600e3], ['In 3 hours', Date.now() + 3 * 3600e3]];
+  if (new Date().getHours() < 18) times.push(['This evening', at(0, 19)]);
+  times.push(['Tomorrow morning', at(1, 9)]);
+  const toMonday = ((8 - new Date().getDay()) % 7) || 7;
+  times.push(['Next week', at(toMonday, 9)]);
+  return times;
+}
+const localInputValue = (t) => { const d = new Date(t - new Date(t).getTimezoneOffset() * 60e3); return d.toISOString().slice(0, 16); };
+
+/** A modal with quick times and a date and time box. `pick(time)` does the work and may throw. */
+function timeModal(title, intro, pick, extra = '') {
+  modal(`<h2>${escapeHtml(title)}</h2>
+    ${intro ? `<p class="muted small">${escapeHtml(intro)}</p>` : ''}
+    ${extra}
+    <div class="quick-times">${quickTimes().map(([label, t]) => `<button type="button" class="btn secondary" data-t="${t}" title="${escapeHtml(new Date(t).toLocaleString())}">${label}</button>`).join('')}</div>
+    <form id="time-form"><label>Or pick a time<input type="datetime-local" id="time-pick" required value="${localInputValue(Date.now() + 3600e3)}" min="${localInputValue(Date.now())}" /></label>
+      <div class="error" id="modal-error"></div>
+      <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">Set</button></div>
+    </form>`);
+  const go = async (t) => {
+    try { await pick(t); closeModal(); } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+  $('#modal-card').querySelectorAll('[data-t]').forEach((b) => (b.onclick = () => go(Number(b.dataset.t))));
+  $('#time-form').onsubmit = (e) => { e.preventDefault(); go(new Date($('#time-pick').value).getTime()); };
+}
+
+function openRemind(m) {
+  timeModal('Remind me', "It's saved, and Burrow brings it back at the time you pick.", async (remindAt) => {
+    await api(`/api/messages/${m.id}/save`, { method: 'POST', body: { remindAt } });
+    toast(`I'll remind you ${formatTime(new Date(remindAt)).replace(/^(Today|Yesterday)/, (w) => w.toLowerCase())}.`);
+  });
+}
+
+function showReminder(ev) {
+  const m = ev.message;
+  const text = `Reminder: ${m.author}${ev.place ? ` in ${placeLabel(ev.place)}` : ''}: ${plainText(m.content).slice(0, 120) || 'a message'}`;
+  toast(text, { action: 'Jump', onAction: () => jumpTo(m.channelId, m.id), timeout: 0 });
+  playSound('message');
+  if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
+    const n = new Notification('Reminder', { body: text });
+    n.onclick = () => { window.focus(); jumpTo(m.channelId, m.id); };
+  }
+}
+
+async function openSaved() {
+  modal(`<h2>Saved messages</h2><p class="muted small">Only you see these. Save a message from its ⋯ menu.</p>
+    <div id="saved-list" class="card-list"><p class="muted">Loading…</p></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
+  try {
+    const items = await api('/api/me/saved');
+    const list = $('#saved-list');
+    if (!list) return;
+    if (!items.length) return (list.innerHTML = '<p class="muted">Nothing saved yet.</p>');
+    list.replaceChildren(...items.map((it) => messageCard(it.message, it.place, {
+      note: it.remindAt ? (it.reminded ? `Reminded ${new Date(it.remindAt).toLocaleString()}` : `Reminder ${new Date(it.remindAt).toLocaleString()}`) : '',
+      onOpen: () => jumpTo(it.message.channelId, it.message.id),
+      buttons: [
+        ['Remind me', () => openRemind(it.message)],
+        ['Remove', (b) => { b.disabled = true; api(`/api/messages/${it.messageId}/save`, { method: 'POST', body: { saved: false } }).then(() => b.closest('.msg-card').remove()).catch(alertError); }],
+      ],
+    })));
+  } catch (err) { $('#saved-list') && ($('#saved-list').textContent = err.message); }
+}
+
+// ---- scheduled messages: written now, sent later (text only)
+
+function openSchedule() {
+  const channelId = state.channelId;
+  const content = namesToEmoji(input.value.trim());
+  if (!channelId) return;
+  if (!content) return toast('Type the message first, then pick Send later.');
+  if (state.pending.length) return toast("Scheduled messages are text only. Send the files now, or remove them first.");
+  const replyTo = state.replyTo;
+  timeModal('Send later', '', async (sendAt) => {
+    await api(`/api/channels/${channelId}/scheduled`, { method: 'POST', body: { content, sendAt, replyTo: replyTo?.id } });
+    if (state.channelId === channelId) { input.value = ''; autosize(); setReply(null); }
+    clearDraft(channelId);
+    toast(`Scheduled for ${new Date(sendAt).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' })}.`);
+  }, `<div class="msg-card"><div class="content">${formatContent(content.length > 300 ? content.slice(0, 300) + '…' : content)}</div></div>`);
+}
+
+function renderScheduledNote() {
+  const here = state.scheduled.filter((s) => s.channelId === state.channelId);
+  const note = $('#scheduled-note');
+  note.classList.toggle('hidden', !here.length);
+  if (here.length) note.textContent = here.length === 1
+    ? `1 message scheduled here for ${new Date(here[0].sendAt).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · See it`
+    : `${here.length} messages scheduled here · See them`;
+}
+$('#scheduled-note').onclick = () => openScheduledList();
+
+function openScheduledList() {
+  const render = () => {
+    const list = $('#sched-list');
+    if (!list) return;
+    if (!state.scheduled.length) return (list.innerHTML = '<p class="muted">Nothing waiting to send. Type a message and pick Send later from the + menu.</p>');
+    list.replaceChildren(...state.scheduled.map((item) => {
+      const el = document.createElement('div');
+      el.className = 'msg-card';
+      el.innerHTML = `<div class="msg-card-head"><b>${escapeHtml(new Date(item.sendAt).toLocaleString())}</b><span class="muted small">${escapeHtml(placeLabel(item.place))}</span></div>
+        <div class="content">${formatContent(item.content)}</div><div class="msg-card-actions"><button class="btn secondary">Don't send</button></div>`;
+      el.querySelector('button').onclick = async () => {
+        try { state.scheduled = await api(`/api/scheduled/${item.id}`, { method: 'DELETE' }); renderScheduledNote(); render(); }
+        catch (err) { alertError(err); }
+      };
+      return el;
+    }));
+  };
+  modal(`<h2>Scheduled messages</h2><div id="sched-list" class="card-list"></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
+  render();
+}
+
+// ---------------------------------------------------------------- formatting
+//
+// Markdown-ish: **bold**, *italic*, __underline__, ~~strikethrough~~, ||spoilers||, `code`, ```code blocks```
+// (coloured when they name a language), # headings, > quotes, - and 1. lists, links, @mentions and :custom: emoji.
+
+const LONG_PASTE = 2000; // pasting more than this many characters attaches it as a file
+const VIDEO_TYPES = /^video\/(mp4|webm|quicktime)$/;
+const TEXT_TYPES = /^(text\/(plain|markdown|csv|x-log)|application\/(json|x-ndjson))(;|$)/;
+const LINK_RE = /\bhttps?:\/\/(?:(?!&(?:lt|gt|quot|#39);)[^\s<])*[^\s<.,;:!?)'"&]/g;
+
+const CODE_KEYWORDS = new Set(`abstract and as async await break case catch char class const continue def default defer del delete do elif else enum
+  export extends false final finally fn for from func function global go if impl import in instanceof interface is lambda let loop match
+  mod mut new nil none None not null of or package pass private protected pub public raise return self Self static struct super switch
+  this throw throws true True False try type typeof undefined use var void where while with yield int long float double bool boolean
+  string str echo then fi done esac local SELECT FROM WHERE INSERT INTO UPDATE DELETE CREATE TABLE JOIN ON AND OR NOT NULL ORDER BY GROUP
+  LIMIT VALUES SET AS select from where insert into update delete create table join on order by group limit values`.split(/\s+/));
+const HASH_COMMENTS = /^(py|python|sh|bash|zsh|shell|console|rb|ruby|ya?ml|toml|r|pl|perl|ps1|powershell|ini|conf|dockerfile|make(file)?|nix|ex|elixir|gd|gdscript)$/i;
+
+/** Colours code that's already HTML-escaped: strings, comments, numbers and keywords. */
+function highlight(code, lang) {
+  if (!lang) return code;
+  const comment = HASH_COMMENTS.test(lang) ? '#.*' : /^(sql|lua|hs|haskell)$/i.test(lang) ? '--.*' : String.raw`\/\/.*|\/\*[\s\S]*?\*\/`;
+  const re = new RegExp([
+    String.raw`(&quot;(?:\\.|(?!&quot;)[^\\\n])*&quot;|&#39;(?:\\.|(?!&#39;)[^\\\n])*&#39;)`,
+    String.raw`(&(?:#\d+|\w+);)`,
+    `(${comment})`,
+    String.raw`(\b(?:0x[\da-fA-F]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)\b)`,
+    String.raw`([A-Za-z_$][\w$]*)`,
+  ].join('|'), 'g');
+  return code.replace(re, (t, str, entity, com, num) =>
+    str ? `<span class="tok-s">${t}</span>`
+      : entity ? t
+      : com ? `<span class="tok-c">${t}</span>`
+      : num ? `<span class="tok-n">${t}</span>`
+      : CODE_KEYWORDS.has(t) ? `<span class="tok-k">${t}</span>` : t);
+}
+
+function formatContent(text) {
+  if (!text) return '';
+  const keep = [];
+  const stash = (html) => `\u0000${keep.push(html) - 1}\u0001`;
+  const link = (u) => stash(`<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`);
+  const inline = (t) => t
+    .replace(/&lt;:(\w{2,32}):(\d+)&gt;/g, (_, name, id) => stash(customEmojiImg(name, Number(id))))
+    .replace(/&lt;(https?:\/\/[^\s<]+?)&gt;/g, (_, u) => link(u))
+    .replace(LINK_RE, link)
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/__(.+?)__/g, '<u>$1</u>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>')
+    .replace(/~~(.+?)~~/g, '<s>$1</s>')
+    .replace(/\|\|(.+?)\|\|/g, '<span class="spoiler" tabindex="0" title="Spoiler: click to show">$1</span>')
+    .replace(/(^|\s)@([\w.-]+)/g, '$1<span class="mention">@$2</span>');
+  const escaped = escapeHtml(text)
+    .replace(/```(?:([\w+#.-]{1,20})\n|\n)?([\s\S]*?)```/g, (_, lang, code) => stash(`<pre><code>${highlight(code.replace(/\n$/, ''), lang)}</code></pre>`))
+    .replace(/`([^`\n]+)`/g, (_, code) => stash(`<code>${code}</code>`));
+  const lines = escaped.split('\n');
+  const out = []; // [html, isBlock]
+  const listItems = (re) => {
+    const items = [];
+    while (lines.length && re.test(lines[0])) items.push(`<li>${inline(lines.shift().replace(re, ''))}</li>`);
+    return items.join('');
+  };
+  while (lines.length) {
+    const line = lines[0];
+    let m;
+    if ((m = /^(#{1,3}) (.+)$/.exec(line))) { lines.shift(); out.push([`<div class="md-h md-h${m[1].length}">${inline(m[2])}</div>`, true]); }
+    else if (/^&gt; ?/.test(line)) {
+      const quote = [];
+      while (lines.length && /^&gt; ?/.test(lines[0])) quote.push(inline(lines.shift().replace(/^&gt; ?/, '')));
+      out.push([`<blockquote>${quote.join('\n')}</blockquote>`, true]);
+    } else if (/^ {0,3}[-*•] \S/.test(line)) out.push([`<ul>${listItems(/^ {0,3}[-*•] /)}</ul>`, true]);
+    else if ((m = /^ {0,3}(\d{1,3})[.)] \S/.exec(line))) out.push([`<ol start="${Number(m[1])}">${listItems(/^ {0,3}\d{1,3}[.)] /)}</ol>`, true]);
+    else { lines.shift(); out.push([inline(line), /^\u0000\d+\u0001$/.test(line) && keep[line.slice(1, -1)].startsWith('<pre')]); }
+  }
+  let html = '';
+  out.forEach(([h, block], i) => { if (i && !block && !out[i - 1][1]) html += '\n'; html += h; });
+  return html.replace(/\u0000(\d+)\u0001/g, (_, i) => keep[i]);
+}
+
+/** A message that's only a few emoji shows them big. */
+function isJumbo(text) {
+  if (!text || text.length > 200) return false;
+  const rest = text
+    .replace(/<:\w{2,32}:\d+>/g, 'E')
+    .replace(/\p{Extended_Pictographic}(?:\u{FE0F}|\u{20E3}|[\u{1F3FB}-\u{1F3FF}]|\u{200D}\p{Extended_Pictographic})*/gu, 'E')
+    .replace(/[\u{1F1E6}-\u{1F1FF}]{2}/gu, 'E')
+    .replace(/\s+/g, '');
+  return /^E{1,10}$/.test(rest);
+}
+
+// Spoilers stay hidden until clicked (links inside them don't open on that first click).
+document.addEventListener('click', (e) => {
+  const sp = e.target.closest?.('.spoiler');
+  if (sp && !sp.classList.contains('shown')) { e.preventDefault(); e.stopPropagation(); sp.classList.add('shown'); }
+}, true);
+document.addEventListener('keydown', (e) => {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.classList?.contains('spoiler')) { e.preventDefault(); e.target.classList.add('shown'); }
+});
+
+function spoilerWrap(el) {
+  const w = document.createElement('div');
+  w.className = 'att-spoiler';
+  const cover = document.createElement('button');
+  cover.type = 'button';
+  cover.className = 'spoiler-cover';
+  cover.textContent = 'Spoiler';
+  cover.onclick = (e) => { e.stopPropagation(); w.classList.add('shown'); cover.remove(); };
+  w.append(el, cover);
+  return w;
+}
+
+// ---------------------------------------------------------------- emoji: the full picker, and each burrow's own
+
+function customEmojiById(id) {
+  for (const s of state.servers.values()) {
+    const e = s.emoji?.find((x) => x.id === id && x.kind === 'emoji');
+    if (e) return e;
+  }
+  return null;
+}
+function findEmojiByName(name) {
+  const here = state.servers.get(state.serverId)?.emoji?.find((e) => e.kind === 'emoji' && e.name === name);
+  if (here) return here;
+  for (const id of state.serverOrder) {
+    const e = state.servers.get(id)?.emoji?.find((x) => x.kind === 'emoji' && x.name === name);
+    if (e) return e;
+  }
+  return null;
+}
+function customEmojiImg(name, id) {
+  const e = customEmojiById(id);
+  return e ? `<img class="cemoji" src="${escapeHtml(state.serverUrl + e.url)}" alt=":${name}:" title=":${name}:" draggable="false" />` : `:${name}:`;
+}
+/** A reaction or recent emoji: a plain emoji, or a custom one written <:name:id>. */
+function emojiHtml(text) {
+  const m = /^<:(\w{2,32}):(\d+)>$/.exec(text);
+  return m ? customEmojiImg(m[1], Number(m[2])) : escapeHtml(text);
+}
+// In the message box, custom emoji are written :name:, and turned into <:name:id> when sent.
+const emojiToNames = (text) => text.replace(/<:(\w{2,32}):\d+>/g, ':$1:');
+const namesToEmoji = (text) => text.replace(/(?<![\w<]):(\w{2,32}):(?!\w)/g, (all, name) => {
+  const e = findEmojiByName(name);
+  return e ? `<:${name}:${e.id}>` : all;
+});
+
+let emojiData = null;
+function loadEmojiData() {
+  emojiData ??= new Promise((resolve, reject) => {
+    const tag = document.createElement('script');
+    tag.src = 'vendor/emoji.js';
+    tag.onload = () => resolve(window.BURROW_EMOJI.map(([group, list]) => [group, list.split('|').map((x) => {
+      const i = x.indexOf(' ');
+      return [x.slice(0, i), x.slice(i + 1)];
+    })]));
+    tag.onerror = () => { emojiData = null; reject(new Error("Couldn't load the emoji.")); };
+    document.head.append(tag);
+  });
+  return emojiData;
+}
+const recentEmoji = () => { try { return JSON.parse(store.get('recentEmoji')) ?? []; } catch { return []; } };
+function rememberEmoji(text) {
+  store.set('recentEmoji', JSON.stringify([text, ...recentEmoji().filter((x) => x !== text)].slice(0, 24)));
+}
+
+// The full emoji picker, for the message box and for reactions. onPick gets the emoji, or <:name:id> for a custom one.
+async function openEmojiPanel(anchor, onPick) {
+  closeEmojiPanel();
+  const panel = document.createElement('div');
+  panel.id = 'emoji-panel';
+  panel.className = 'emoji-panel';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', 'Emoji');
+  panel.innerHTML = '<input type="search" placeholder="Find an emoji" autocomplete="off" /><div class="emoji-tabs"></div><div class="emoji-scroll"><p class="muted small">Loading…</p></div>';
+  panel.anchor = anchor;
+  document.body.append(panel);
+  const r = anchor.getBoundingClientRect();
+  if (isPhone()) { panel.style.left = '8px'; panel.style.right = '8px'; panel.style.width = 'auto'; }
+  else panel.style.left = Math.max(8, Math.min(window.innerWidth - panel.offsetWidth - 8, r.right - panel.offsetWidth)) + 'px';
+  const h = panel.offsetHeight;
+  panel.style.top = (r.top - h - 8 > 8 ? r.top - h - 8 : Math.min(window.innerHeight - h - 8, r.bottom + 8)) + 'px';
+  anchor.setAttribute?.('aria-expanded', 'true');
+  setTimeout(() => document.addEventListener('mousedown', outsideEmojiPanel), 0);
+  const search = panel.querySelector('input');
+  const scroll = panel.querySelector('.emoji-scroll');
+  if (!isPhone()) search.focus();
+  let data;
+  try { data = await loadEmojiData(); } catch (err) { scroll.textContent = err.message; return; }
+  if (!panel.isConnected) return;
+
+  const customGroups = [state.serverId, ...state.serverOrder.filter((id) => id !== state.serverId)]
+    .map((id) => state.servers.get(id))
+    .filter((s) => s && !isDm(s) && s.emoji?.some((e) => e.kind === 'emoji'))
+    .map((s) => [s.name, s.emoji.filter((e) => e.kind === 'emoji').map((e) => [`<:${e.name}:${e.id}>`, e.name, e])]);
+  const recent = recentEmoji().filter((t) => !t.startsWith('<:') || customEmojiById(Number(/:(\d+)>$/.exec(t)?.[1]))).map((t) => [t, '']);
+  const button = ([text, name, custom]) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.title = name ? `:${name.replace(/ /g, '_')}:` : '';
+    if (custom || text.startsWith('<:')) b.innerHTML = emojiHtml(text);
+    else b.textContent = text;
+    b.onclick = (e) => {
+      rememberEmoji(text);
+      onPick(text);
+      if (!e.shiftKey) closeEmojiPanel();
+    };
+    return b;
+  };
+  const sections = [
+    ...(recent.length ? [['Recent', recent]] : []),
+    ...customGroups,
+    ...data,
+  ];
+  const render = (q) => {
+    if (q) {
+      const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+      const hits = sections.slice(recent.length ? 1 : 0).flatMap(([, list]) => list).filter(([, name]) => words.every((w) => name.toLowerCase().includes(w))).slice(0, 240);
+      const grid = document.createElement('div');
+      grid.className = 'emoji-grid';
+      grid.append(...hits.map(button));
+      scroll.replaceChildren(hits.length ? grid : Object.assign(document.createElement('p'), { className: 'muted small', textContent: 'No emoji found' }));
+      return;
+    }
+    scroll.replaceChildren(...sections.flatMap(([title, list], i) => {
+      const h = document.createElement('h4');
+      h.textContent = title;
+      h.id = `emoji-sec-${i}`;
+      const grid = document.createElement('div');
+      grid.className = 'emoji-grid';
+      grid.append(...list.map(button));
+      return [h, grid];
+    }));
+  };
+  const tabs = panel.querySelector('.emoji-tabs');
+  tabs.replaceChildren(...sections.map(([title, list], i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.title = title;
+    const first = list[0];
+    if (title === 'Recent') b.textContent = '🕘';
+    else if (first?.[2]) b.innerHTML = emojiHtml(first[0]);
+    else b.textContent = first?.[0] ?? '?';
+    b.onclick = () => { search.value = ''; render(''); panel.querySelector(`#emoji-sec-${i}`)?.scrollIntoView(); };
+    return b;
+  }));
+  render('');
+  search.oninput = () => render(search.value.trim());
+  search.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); scroll.querySelector('button')?.click(); } };
+}
+function outsideEmojiPanel(e) {
+  const panel = $('#emoji-panel');
+  if (panel && !e.target.closest('#emoji-panel') && !panel.anchor?.contains(e.target)) closeEmojiPanel();
+}
+function closeEmojiPanel() {
+  const panel = $('#emoji-panel');
+  panel?.anchor?.setAttribute?.('aria-expanded', 'false');
+  panel?.remove();
+  document.removeEventListener('mousedown', outsideEmojiPanel);
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeEmojiPanel(); });
+
+function insertAtCursor(text) {
+  const a = input.selectionStart ?? input.value.length;
+  const b = input.selectionEnd ?? a;
+  const before = input.value.slice(0, a);
+  const pad = text.startsWith(':') && before && !/\s$/.test(before) ? ' ' : '';
+  input.setRangeText(pad + text, a, b, 'end');
+  autosize();
+  saveDraftSoon();
+  if (!isPhone()) input.focus();
+}
+$('#emoji-btn').onclick = () => {
+  if ($('#emoji-panel')?.anchor === $('#emoji-btn')) return closeEmojiPanel();
+  closeGifPicker();
+  openEmojiPanel($('#emoji-btn'), (text) => insertAtCursor(text.startsWith('<:') ? emojiToNames(text) + ' ' : text));
+};
+
+// ---- managing a burrow's emoji and stickers
+
+/** Scales a picture down to fit max px on its long side. Small GIFs stay as they are, to keep moving. */
+async function fitPicture(file, max) {
+  if (file.type === 'image/gif' && file.size <= MAX_AVATAR_BYTES) return file;
+  let img;
+  try { img = await createImageBitmap(file); } catch { throw new Error("That file doesn't look like a picture"); }
+  const scale = Math.min(1, max / Math.max(img.width, img.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(img.width * scale));
+  canvas.height = Math.max(1, Math.round(img.height * scale));
+  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+  const encode = (type) => new Promise((resolve) => canvas.toBlob(resolve, type, 0.92));
+  const webp = await encode('image/webp');
+  return webp?.type === 'image/webp' ? webp : encode('image/png');
+}
+
+function openEmojiManager(serverId) {
+  const s = state.servers.get(serverId);
+  if (!s) return closeModal();
+  const list = (kind) => (s.emoji ?? []).filter((e) => e.kind === kind);
+  const rows = (kind) => list(kind).map((e) => `<li data-id="${e.id}"><img src="${escapeHtml(state.serverUrl + e.url)}" alt="" class="${kind === 'sticker' ? 'em-sticker' : 'cemoji'}" />
+      <span class="em-name">:${escapeHtml(e.name)}:</span><span class="spacer"></span>
+      <button type="button" class="btn secondary" data-rename="${e.id}">Rename</button><button type="button" class="btn danger" data-delete="${e.id}">Delete</button></li>`).join('');
+  modal(`<h2>Emoji and stickers</h2>
+    <p class="small muted">Everyone in ${escapeHtml(s.name)} can use these. Emoji go in messages and reactions as :name:; stickers are sent on their own, big.</p>
+    <form id="emoji-form">
+      <div class="emoji-add">
+        <label>Name<input id="emoji-name" placeholder="e.g. partyfox" maxlength="32" required /></label>
+        <label>Kind<select id="emoji-kind"><option value="emoji">Emoji</option><option value="sticker">Sticker</option></select></label>
+      </div>
+      <input type="file" id="emoji-file" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+      <button type="submit" class="btn" id="emoji-add-btn">Choose a picture and add it</button>
+      <span class="small muted">PNG, JPEG, GIF or WebP. Emoji are shrunk to 128 px and stickers to 320 px; small GIFs keep moving.</span>
+    </form>
+    <div class="error" id="modal-error"></div>
+    <h3>Emoji · ${list('emoji').length} of 50</h3>
+    ${list('emoji').length ? `<ul class="emoji-manage">${rows('emoji')}</ul>` : '<p class="muted small">None yet.</p>'}
+    <h3>Stickers · ${list('sticker').length} of 20</h3>
+    ${list('sticker').length ? `<ul class="emoji-manage">${rows('sticker')}</ul>` : '<p class="muted small">None yet.</p>'}
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
+  const fail = (err) => { $('#modal-error').textContent = err.message; };
+  const done = (updated) => { state.servers.set(updated.id, updated); openEmojiManager(serverId); };
+  $('#emoji-name').oninput = (e) => (e.target.value = e.target.value.replace(/[^\w]/g, ''));
+  $('#emoji-form').onsubmit = (e) => {
+    e.preventDefault();
+    if (!/^\w{2,32}$/.test($('#emoji-name').value)) return fail(new Error('Names use 2 to 32 letters, numbers or underscores'));
+    $('#emoji-file').click();
+  };
+  $('#emoji-file').onchange = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    const kind = $('#emoji-kind').value;
+    $('#emoji-add-btn').disabled = true;
+    $('#emoji-add-btn').textContent = 'Adding…';
+    try {
+      const blob = await fitPicture(file, kind === 'sticker' ? 320 : 128);
+      done(await uploadPicture(`/api/servers/${serverId}/emoji?${new URLSearchParams({ name: $('#emoji-name').value, kind })}`, blob));
+    } catch (err) {
+      fail(err);
+      $('#emoji-add-btn').disabled = false;
+      $('#emoji-add-btn').textContent = 'Choose a picture and add it';
+    }
+  };
+  $('#modal-card').querySelectorAll('[data-rename]').forEach((b) => (b.onclick = async () => {
+    const e = s.emoji.find((x) => x.id === Number(b.dataset.rename));
+    const name = prompt('New name', e.name);
+    if (!name || name === e.name) return;
+    try { done(await api(`/api/emoji/${e.id}`, { method: 'PATCH', body: { name } })); } catch (err) { fail(err); }
+  }));
+  $('#modal-card').querySelectorAll('[data-delete]').forEach((b) => (b.onclick = async () => {
+    const e = s.emoji.find((x) => x.id === Number(b.dataset.delete));
+    if (!confirm(`Delete :${e.name}:? Messages that used it show its name instead.`)) return;
+    try { done(await api(`/api/emoji/${e.id}`, { method: 'DELETE' })); } catch (err) { fail(err); }
+  }));
+}
+
+// ---- stickers
+
+function stickerGroups() {
+  return [state.serverId, ...state.serverOrder.filter((id) => id !== state.serverId)]
+    .map((id) => state.servers.get(id))
+    .filter((s) => s && !isDm(s) && s.emoji?.some((e) => e.kind === 'sticker'));
+}
+function openStickers() {
+  const channelId = state.channelId;
+  const groups = stickerGroups();
+  modal(`<h2>Stickers</h2>
+    ${groups.length ? '' : `<p class="muted">No stickers yet. People who can manage emoji add them in a burrow's settings.</p>`}
+    <div id="sticker-groups"></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
+  $('#sticker-groups').replaceChildren(...groups.flatMap((s) => {
+    const h = document.createElement('h4');
+    h.textContent = s.name;
+    const grid = document.createElement('div');
+    grid.className = 'sticker-grid';
+    grid.append(...s.emoji.filter((e) => e.kind === 'sticker').map((st) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.title = st.name;
+      b.innerHTML = `<img src="${escapeHtml(state.serverUrl + st.url)}" alt="${escapeHtml(st.name)}" loading="lazy" />`;
+      b.onclick = async () => {
+        const replyTo = state.replyTo;
+        closeModal();
+        setReply(null);
+        try { await sendMessage(channelId, { content: '', stickerId: st.id, replyTo: replyTo?.id }); }
+        catch (err) { alertError(err); }
+      };
+      return b;
+    }));
+    return [h, grid];
+  }));
+}
+function renderSticker(st) {
+  if (st.deleted) {
+    const el = document.createElement('div');
+    el.className = 'muted small';
+    el.textContent = 'Sent a sticker that has since been removed';
+    return el;
+  }
+  const img = document.createElement('img');
+  img.className = 'sticker';
+  img.src = state.serverUrl + st.url;
+  img.alt = st.name;
+  img.title = st.name;
+  img.loading = 'lazy';
+  return img;
+}
+
+// ---------------------------------------------------------------- polls
+
+function openPollCreator() {
+  const channelId = state.channelId;
+  if (!channelId) return;
+  modal(`<h2>New poll</h2>
+    <form id="poll-form">
+      <label>Question<input id="poll-q" maxlength="300" required placeholder="e.g. Game night on Friday or Saturday?" /></label>
+      <div class="poll-edit" id="poll-opts"></div>
+      <button type="button" class="btn secondary" id="poll-add">Add an answer</button>
+      <label class="check"><input type="checkbox" id="poll-multi" /> People can pick more than one</label>
+      <label>Voting closes<select id="poll-hours">
+        <option value="1">In an hour</option><option value="4">In 4 hours</option><option value="24" selected>In a day</option>
+        <option value="72">In 3 days</option><option value="168">In a week</option><option value="0">When I end it</option></select></label>
+      <div class="error" id="modal-error"></div>
+      <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">Post poll</button></div>
+    </form>`);
+  const box = $('#poll-opts');
+  const addOption = (value = '') => {
+    if (box.children.length >= 10) return;
+    const row = document.createElement('div');
+    row.className = 'poll-edit-row';
+    row.innerHTML = `<input maxlength="80" placeholder="Answer ${box.children.length + 1}" /><button type="button" class="icon-btn" title="Remove">×</button>`;
+    row.querySelector('input').value = value;
+    row.querySelector('button').onclick = () => { if (box.children.length > 2) row.remove(); };
+    box.append(row);
+    $('#poll-add').disabled = box.children.length >= 10;
+  };
+  addOption();
+  addOption();
+  $('#poll-add').onclick = () => { addOption(); box.lastChild.querySelector('input').focus(); };
+  $('#poll-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const options = [...box.querySelectorAll('input')].map((i) => i.value.trim()).filter(Boolean);
+    const replyTo = state.replyTo;
+    try {
+      await api(`/api/channels/${channelId}/polls`, { method: 'POST', body: {
+        question: $('#poll-q').value, options, multi: $('#poll-multi').checked, hours: Number($('#poll-hours').value), replyTo: replyTo?.id,
+      } });
+      closeModal();
+      setReply(null);
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+}
+
+function renderPoll(m) {
+  const p = m.poll;
+  const server = roomById(m.channelId)?.s;
+  const voters = new Set(p.options.flatMap((o) => o.userIds)).size;
+  const mine = p.options.flatMap((o, i) => (o.userIds.includes(state.me.id) ? [i] : []));
+  const most = Math.max(1, ...p.options.map((o) => o.userIds.length));
+  const box = document.createElement('div');
+  box.className = 'poll' + (p.closed ? ' closed' : '');
+  const q = document.createElement('div');
+  q.className = 'poll-q';
+  q.textContent = p.question;
+  box.append(q);
+  box.insertAdjacentHTML('beforeend', `<div class="muted small">${p.closed ? 'Voting has closed' : p.multi ? 'Pick as many as you like' : 'Pick one'}</div>`);
+  p.options.forEach((o, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    const n = o.userIds.length;
+    const pct = voters ? Math.round((n / voters) * 100) : 0;
+    b.className = 'poll-option' + (mine.includes(i) ? ' mine' : '') + (p.closed && n === most && n ? ' winner' : '');
+    b.disabled = p.closed;
+    b.title = n ? o.userIds.map((id) => server?.members.find((x) => x.id === id)?.username ?? 'someone').join(', ') : 'No votes yet';
+    b.innerHTML = `<span class="poll-fill" style="width:${voters ? (n / voters) * 100 : 0}%"></span><span class="poll-text"></span><span class="poll-count">${n} · ${pct}%</span>`;
+    b.querySelector('.poll-text').textContent = o.text;
+    b.onclick = () => {
+      const next = p.multi ? (mine.includes(i) ? mine.filter((x) => x !== i) : [...mine, i]) : mine.includes(i) ? [] : [i];
+      api(`/api/messages/${m.id}/vote`, { method: 'POST', body: { options: next } }).catch(alertError);
+    };
+    box.append(b);
+  });
+  const foot = document.createElement('div');
+  foot.className = 'muted small';
+  foot.textContent = `${voters} ${voters === 1 ? 'person' : 'people'} voted · ` + (p.closed ? 'Final results' : p.closesAt ? `Closes ${new Date(p.closesAt).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : 'Open until ended');
+  box.append(foot);
+  return box;
+}
+
+// ---------------------------------------------------------------- link previews
+
+function renderEmbeds(m) {
+  const wrap = document.createElement('div');
+  wrap.className = 'embeds';
+  for (const e of m.embeds) {
+    const card = document.createElement('div');
+    card.className = 'embed' + (e.kind !== 'link' ? ' big' : '');
+    const text = document.createElement('div');
+    text.className = 'embed-text';
+    if (e.siteName) text.insertAdjacentHTML('beforeend', `<div class="embed-site">${escapeHtml(e.siteName)}</div>`);
+    if (e.title || e.kind === 'link') {
+      const a = document.createElement('a');
+      a.className = 'embed-title';
+      a.href = e.url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = e.title || e.url;
+      text.append(a);
+    }
+    if (e.description) {
+      const d = document.createElement('div');
+      d.className = 'embed-desc';
+      d.textContent = e.description;
+      text.append(d);
+    }
+    if (text.childElementCount) card.append(text);
+    if (e.image) {
+      const a = document.createElement('a');
+      a.className = 'embed-image' + (e.kind === 'video' ? ' video' : '');
+      a.href = e.url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.title = e.kind === 'video' ? 'Play (opens the video)' : e.title || e.url;
+      const img = document.createElement('img');
+      img.src = state.serverUrl + e.image;
+      img.alt = '';
+      img.loading = 'lazy';
+      img.onerror = () => a.remove();
+      a.append(img);
+      card.append(a);
+    }
+    if (m.authorId === state.me.id) {
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'embed-remove';
+      x.title = 'Remove link previews from this message';
+      x.textContent = '×';
+      x.onclick = () => api(`/api/messages/${m.id}/embeds`, { method: 'POST' }).catch(alertError);
+      card.append(x);
+    }
+    wrap.append(card);
+  }
+  return wrap;
+}
+
+// ---------------------------------------------------------------- threads
+
+function renderThreadChip(t) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'thread-chip';
+  const where = roomById(t.id);
+  const unread = where && isUnread(where.c);
+  b.innerHTML = `${THREAD_ICON}<b></b><span class="muted">${t.count} ${t.count === 1 ? 'reply' : 'replies'}${t.lastAt ? ` · ${escapeHtml(formatTime(new Date(t.lastAt)))}` : ''}</span>${unread ? '<span class="dot"></span>' : ''}`;
+  b.querySelector('b').textContent = t.name;
+  b.onclick = () => selectChannel(t.id);
+  return b;
+}
+
+async function startThread(m) {
+  if (m.thread) return selectChannel(m.thread.id);
+  try {
+    const { threadId, server } = await api(`/api/messages/${m.id}/thread`, { method: 'POST', body: {} });
+    rememberAvatars(server);
+    state.servers.set(server.id, server);
+    await selectChannel(threadId);
+    showView('chat');
+  } catch (err) { alertError(err); }
+}
+
+$('#thread-btn').onclick = () => {
+  const where = roomById(state.channelId);
+  if (!where?.thread) return;
+  const t = where.c;
+  modal(`<h2>Thread settings</h2>
+    <form id="thread-form">
+      <label>Thread name<input id="thread-name" maxlength="60" required value="${escapeHtml(t.name)}" /></label>
+      <div class="error" id="modal-error"></div>
+      <div class="modal-row">
+        <button type="button" class="btn danger" id="thread-delete">Delete thread</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn secondary" data-close>Cancel</button>
+        <button type="submit" class="btn">Save</button>
+      </div>
+    </form>`);
+  $('#thread-form').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const updated = await api(`/api/channels/${t.id}`, { method: 'PATCH', body: { name: $('#thread-name').value } });
+      state.servers.set(updated.id, updated);
+      closeModal();
+      renderChannels();
+      renderChatHeader();
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+  $('#thread-delete').onclick = async () => {
+    if (!confirm(`Delete the thread "${t.name}" and everything said in it?`)) return;
+    try {
+      await api(`/api/channels/${t.id}`, { method: 'DELETE' });
+      closeModal();
+      if (state.channelId === t.id) selectChannel(t.parentId);
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+};
+
+// ---------------------------------------------------------------- voice messages
+
+let recording = null; // { rec, stream, chunks, started, channelId, timer }
+const MAX_RECORDING_SECONDS = 300;
+const clock = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
+
+async function startRecording() {
+  if (recording || !state.channelId) return;
+  const channelId = state.channelId;
+  let stream;
+  try {
+    const deviceId = await deviceIdFor('audioinput').catch(() => undefined);
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, ...(deviceId ? { deviceId: { ideal: deviceId } } : {}) } });
+  } catch (err) { return alert(mediaError(err, 'microphone')); }
+  if (state.channelId !== channelId) return stream.getTracks().forEach((t) => t.stop());
+  const mimeType = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4'].find((t) => MediaRecorder.isTypeSupported?.(t));
+  const rec = new MediaRecorder(stream, mimeType ? { mimeType, audioBitsPerSecond: 48000 } : undefined);
+  const chunks = [];
+  rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+  const tick = () => {
+    const sec = (Date.now() - recording.started) / 1000;
+    $('#rec-time').textContent = clock(sec);
+    if (sec >= MAX_RECORDING_SECONDS) finishRecording(true);
+  };
+  recording = { rec, stream, chunks, started: Date.now(), channelId, timer: setInterval(() => recording && tick(), 250) };
+  rec.start(1000);
+  closeEmojiPanel();
+  closeGifPicker();
+  $('#composer').classList.add('recording');
+  $('#recorder').classList.remove('hidden');
+  $('#rec-time').textContent = '0:00';
+  $('#send-btn').title = 'Send voice message';
+}
+
+function finishRecording(send) {
+  const r = recording;
+  if (!r) return;
+  recording = null;
+  clearInterval(r.timer);
+  $('#composer').classList.remove('recording');
+  $('#recorder').classList.add('hidden');
+  $('#send-btn').title = 'Send';
+  const seconds = (Date.now() - r.started) / 1000;
+  r.rec.onstop = () => {
+    r.stream.getTracks().forEach((t) => t.stop());
+    if (send && seconds >= 0.8) sendVoice(r, seconds);
+  };
+  r.rec.stop();
+}
+function cancelRecording() { finishRecording(false); }
+
+async function sendVoice(r, seconds) {
+  const type = (r.rec.mimeType || r.chunks[0]?.type || 'audio/webm').split(';')[0];
+  const ext = { 'audio/webm': 'webm', 'audio/ogg': 'ogg', 'audio/mp4': 'm4a' }[type] ?? 'webm';
+  const file = new File(r.chunks, `voice-message.${ext}`, { type });
+  if (file.size > state.maxUploadBytes) return alert('That recording is too big to send.');
+  const replyTo = state.channelId === r.channelId ? state.replyTo : null;
+  if (replyTo) setReply(null);
+  try {
+    const att = await uploadFile(r.channelId, { file, voiceSeconds: Math.round(seconds * 10) / 10, progress: 0 });
+    await sendMessage(r.channelId, { content: '', attachmentIds: [att.id], replyTo: replyTo?.id });
+  } catch (err) { alertError(err); }
+}
+
+$('#mic-btn').onclick = startRecording;
+$('#rec-cancel').onclick = cancelRecording;
+
+let playingVoice = null;
+function voicePlayer(a, url) {
+  const box = document.createElement('div');
+  box.className = 'voice-msg';
+  box.innerHTML = `<button type="button" class="voice-play" title="Play">${PLAY_ICON}</button>
+    <div class="voice-track"><div class="voice-fill"></div></div><span class="voice-time">${clock(a.voiceSeconds)}</span>`;
+  const audio = new Audio();
+  audio.preload = 'none';
+  audio.src = url;
+  const play = box.querySelector('.voice-play');
+  const fill = box.querySelector('.voice-fill');
+  const time = box.querySelector('.voice-time');
+  const length = () => (Number.isFinite(audio.duration) ? audio.duration : a.voiceSeconds);
+  const show = () => {
+    fill.style.width = `${Math.min(100, (audio.currentTime / length()) * 100)}%`;
+    time.textContent = audio.paused && !audio.currentTime ? clock(a.voiceSeconds) : clock(audio.currentTime);
+  };
+  play.onclick = () => {
+    if (audio.paused) {
+      if (playingVoice && playingVoice !== audio) playingVoice.pause();
+      playingVoice = audio;
+      audio.play().catch(alertError);
+    } else audio.pause();
+  };
+  audio.onplay = () => { play.innerHTML = PAUSE_ICON; play.title = 'Pause'; };
+  audio.onpause = () => { play.innerHTML = PLAY_ICON; play.title = 'Play'; };
+  audio.ontimeupdate = show;
+  audio.onended = () => { audio.currentTime = 0; show(); };
+  box.querySelector('.voice-track').onclick = (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const at = ((e.clientX - r.left) / r.width) * length();
+    audio.currentTime = at;
+    if (audio.paused) play.click();
+  };
+  return box;
+}
+const PLAY_ICON = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7L8 5Z"/></svg>';
+const PAUSE_ICON = '<svg viewBox="0 0 24 24"><path d="M7 5h4v14H7V5Zm6 0h4v14h-4V5Z"/></svg>';
+
+// ---------------------------------------------------------------- text files show what's in them
+
+const textCache = new Map(); // url -> Promise<string>
+function textPreview(a, url) {
+  const box = document.createElement('div');
+  box.className = 'att-text collapsed';
+  box.innerHTML = `<div class="att-text-head"><span class="file-icon">${FILE_ICON}</span><span class="att-file-name"></span>
+    <span class="muted small">${formatSize(a.size)}</span><span class="spacer"></span><a class="btn secondary" target="_blank" rel="noopener">Open</a></div>
+    <pre class="att-text-body muted">Loading…</pre><button type="button" class="att-text-more hidden">Show all</button>`;
+  box.querySelector('.att-file-name').textContent = a.name;
+  box.querySelector('a').href = url;
+  const body = box.querySelector('pre');
+  const more = box.querySelector('.att-text-more');
+  if (!textCache.has(url)) textCache.set(url, fetch(url).then((r) => (r.ok ? r.text() : Promise.reject(new Error()))));
+  textCache.get(url).then((text) => {
+    body.classList.remove('muted');
+    body.textContent = text.length > 100000 ? text.slice(0, 100000) + '\n…' : text;
+    const long = text.split('\n').length > 14 || text.length > 1400;
+    more.classList.toggle('hidden', !long);
+    if (!long) box.classList.remove('collapsed');
+  }).catch(() => { textCache.delete(url); body.textContent = "Couldn't load a preview. Open the file to see it."; });
+  more.onclick = () => {
+    const open = box.classList.toggle('collapsed');
+    more.textContent = open ? 'Show all' : 'Show less';
+  };
+  return box;
+}
+
+// ---------------------------------------------------------------- search
+
+function openSearch() {
+  const here = state.servers.get(state.serverId);
+  modal(`<h2>Search</h2>
+    <form id="search-form" class="search-form">
+      <input type="search" id="search-q" placeholder="Words to find" autocomplete="off" enterkeyhint="search" />
+      <div class="search-filters">
+        <select id="search-in" aria-label="Where">
+          ${here ? `<option value="${here.id}">${isDm(here) ? 'This conversation' : `In ${escapeHtml(here.name)}`}</option>` : ''}
+          <option value="dms">Direct messages</option><option value="">Everywhere</option>
+        </select>
+        <select id="search-room" aria-label="Room"></select>
+        <select id="search-from" aria-label="From"></select>
+        <select id="search-has" aria-label="Kind">
+          <option value="">Any kind</option><option value="image">Pictures</option><option value="video">Videos</option>
+          <option value="audio">Audio and voice</option><option value="file">Files</option><option value="link">Links</option><option value="poll">Polls</option>
+        </select>
+        <label class="search-date">After<input type="date" id="search-after" /></label>
+        <label class="search-date">Before<input type="date" id="search-before" /></label>
+      </div>
+    </form>
+    <div id="search-status" class="muted small">Type a word, or pick a person or a kind of message.</div>
+    <div id="search-results" class="card-list"></div>
+    <div class="modal-row"><button class="btn secondary hidden" id="search-more">More results</button><span class="spacer"></span><button class="btn secondary" data-close>Close</button></div>`, 'search-modal');
+  const scope = () => $('#search-in').value;
+  const fillFilters = () => {
+    const s = state.servers.get(Number(scope()));
+    const rooms = s && !isDm(s) ? [...s.channels.filter((c) => c.kind !== 'voice'), ...(s.threads ?? [])] : [];
+    $('#search-room').innerHTML = '<option value="">Any room</option>' + rooms.map((c) => `<option value="${c.id}">${c.parentId ? '↳ ' : '#'}${escapeHtml(c.name)}</option>`).join('');
+    $('#search-room').classList.toggle('hidden', !rooms.length);
+    const people = new Map();
+    const sources = s ? [s] : scope() === 'dms' ? state.dmOrder.map((id) => state.servers.get(id)) : [...state.servers.values()];
+    for (const src of sources) for (const m of src?.members ?? []) people.set(m.id, m.username);
+    $('#search-from').innerHTML = '<option value="">From anyone</option>' + [...people].sort((a, b) => a[1].localeCompare(b[1]))
+      .map(([id, name]) => `<option value="${id}">From ${escapeHtml(name)}${id === state.me.id ? ' (you)' : ''}</option>`).join('');
+  };
+  fillFilters();
+  let offset = 0;
+  let seq = 0;
+  const run = async (more = false) => {
+    offset = more ? offset + 25 : 0;
+    const q = $('#search-q').value.trim();
+    const params = new URLSearchParams({ q });
+    if (scope()) params.set('in', scope());
+    for (const [key, sel] of [['room', '#search-room'], ['from', '#search-from'], ['has', '#search-has']]) if ($(sel).value) params.set(key, $(sel).value);
+    if ($('#search-after').value) params.set('after', new Date($('#search-after').value + 'T00:00').getTime());
+    if ($('#search-before').value) params.set('before', new Date($('#search-before').value + 'T00:00').getTime());
+    if (offset) params.set('offset', offset);
+    const list = $('#search-results');
+    if (!q && !params.has('from') && !params.has('has')) {
+      list.replaceChildren();
+      $('#search-more').classList.add('hidden');
+      $('#search-status').textContent = 'Type a word, or pick a person or a kind of message.';
+      return;
+    }
+    const mine = ++seq;
+    $('#search-status').textContent = 'Searching…';
+    try {
+      const { results, more: hasMore } = await api(`/api/search?${params}`);
+      if (mine !== seq || !list.isConnected) return;
+      const words = q.match(/[\p{L}\p{N}_]+/gu) ?? [];
+      const cards = results.map(({ message, place }) => {
+        const card = messageCard(message, place, { onOpen: () => jumpTo(message.channelId, message.id) });
+        markWords(card.querySelector('.content'), words);
+        return card;
+      });
+      if (more) list.append(...cards);
+      else list.replaceChildren(...cards);
+      $('#search-more').classList.toggle('hidden', !hasMore);
+      const count = list.children.length;
+      $('#search-status').textContent = count ? `${count}${hasMore ? '+' : ''} message${count === 1 ? '' : 's'}, newest first` : 'Nothing found.';
+    } catch (err) {
+      if (mine === seq) $('#search-status').textContent = err.message;
+    }
+  };
+  let timer = 0;
+  $('#search-q').oninput = () => { clearTimeout(timer); timer = setTimeout(() => run(), 300); };
+  $('#search-form').onsubmit = (e) => { e.preventDefault(); clearTimeout(timer); run(); };
+  $('#search-in').onchange = () => { fillFilters(); run(); };
+  for (const sel of ['#search-room', '#search-from', '#search-has', '#search-after', '#search-before']) $(sel).onchange = () => run();
+  $('#search-more').onclick = () => run(true);
+  $('#search-q').focus();
+}
+
+/** Highlights where the searched words start, in a message's text. */
+function markWords(el, words) {
+  if (!el || !words.length) return;
+  const re = new RegExp(`(?<![\\p{L}\\p{N}_])(${words.map(escapeRegex).join('|')})`, 'giu');
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    if (!re.test(node.data)) continue;
+    re.lastIndex = 0;
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    for (const m of node.data.matchAll(re)) {
+      frag.append(node.data.slice(last, m.index));
+      const mark = document.createElement('mark');
+      mark.textContent = m[0];
+      frag.append(mark);
+      last = m.index + m[0].length;
+    }
+    frag.append(node.data.slice(last));
+    node.replaceWith(frag);
+  }
+}
+
+$('#search-btn').onclick = openSearch;
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && state.me && !$('#app').classList.contains('hidden')) {
+    e.preventDefault();
+    openSearch();
+  }
+});
+
+// ---------------------------------------------------------------- the + menu in the message box
+
+$('#plus-btn').onclick = (e) => {
+  if (!state.channelId) return;
+  openMenu(e.currentTarget, [
+    state.maxUploadBytes && { label: 'Upload files', run: () => $('#file-input').click() },
+    { label: 'Create a poll', run: openPollCreator },
+    stickerGroups().length && { label: 'Send a sticker', run: openStickers },
+    { label: 'Send later…', run: openSchedule },
+  ]);
+};
+
 // ---------------------------------------------------------------- helpers
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
 function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-
-// Light markdown: ```code blocks```, `inline code`, **bold**, *italic*, links, @mentions.
-function formatContent(text) {
-  const parts = escapeHtml(text).split(/(```[\s\S]*?```|`[^`\n]+`)/g);
-  return parts
-    .map((p) => {
-      if (p.startsWith('```') && p.endsWith('```') && p.length >= 6) return `<pre><code>${p.slice(3, -3).replace(/^\w*\n/, '')}</code></pre>`;
-      if (p.startsWith('`') && p.endsWith('`') && p.length >= 2) return `<code>${p.slice(1, -1)}</code>`;
-      return p
-        .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-        .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>')
-        .replace(/\bhttps?:\/\/[^\s<]+[^\s<.,;:!?)'"]/g, (u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`)
-        .replace(/(^|\s)@([\w.-]+)/g, '$1<span class="mention">@$2</span>');
-    })
-    .join('');
-}
 
 function formatTime(d) {
   const today = new Date();
@@ -3867,6 +5537,7 @@ const isPhone = () => matchMedia('(max-width: 760px)').matches;
 function showView(view) {
   $('#app').dataset.view = view;
   if (view === 'rooms') memberPane.classList.remove('open');
+  if (view === 'chat') markReadSoon();
 }
 $('#chat-back').onclick = () => showView('rooms');
 $('#tab-burrows').onclick = () => {
@@ -3898,6 +5569,8 @@ $('#me-btn').onclick = (e) => { e.stopPropagation(); toggleMeMenu($('#me-btn'));
 $('#tab-you').onclick = (e) => { e.stopPropagation(); toggleMeMenu($('#tab-you')); };
 $('#me-menu').onclick = (e) => { if (e.target.closest('button')) closeMeMenu(); else e.stopPropagation(); };
 $('#account-btn').onclick = () => openAccount();
+$('#saved-btn').onclick = () => openSaved();
+$('#scheduled-btn').onclick = () => openScheduledList();
 document.addEventListener('click', closeMeMenu);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMeMenu(); });
 
