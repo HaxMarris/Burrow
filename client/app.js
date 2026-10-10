@@ -91,7 +91,32 @@ async function showAuth() {
   $('#auth').classList.remove('hidden');
   $('#server-url-row').classList.toggle('hidden', !isDesktop);
   $('#server-url').value = state.serverUrl;
+  if (!isDesktop && !/Android|iPhone|iPad/.test(navigator.userAgent)) showDesktopDownloads();
   renderAuthMode();
+}
+
+// Download buttons for the desktop app, on the web only. They open the latest release page,
+// and point straight at each installer once GitHub says what the files are called.
+let desktopLinksLoaded = false;
+function showDesktopDownloads() {
+  const box = $('#get-desktop');
+  box.classList.remove('hidden');
+  const ua = navigator.userAgent;
+  const mine = /Windows/.test(ua) ? 'win' : /Mac/.test(ua) && !/iPhone|iPad/.test(ua) && navigator.maxTouchPoints < 2 ? 'mac'
+    : /Linux/.test(ua) && !/Android/.test(ua) ? 'linux' : null;
+  for (const a of box.querySelectorAll('a')) a.classList.toggle('mine', a.dataset.os === mine);
+  if (desktopLinksLoaded) return;
+  desktopLinksLoaded = true;
+  fetch('https://api.github.com/repos/HaxMarris/Burrow/releases/latest')
+    .then((r) => (r.ok ? r.json() : null))
+    .then((release) => {
+      const ends = { win: '.exe', mac: '.dmg', linux: '.AppImage' };
+      for (const a of box.querySelectorAll('a')) {
+        const file = release?.assets?.find((f) => f.name.endsWith(ends[a.dataset.os]));
+        if (file) a.href = file.browser_download_url;
+      }
+    })
+    .catch(() => {});
 }
 
 async function renderAuthMode() {
