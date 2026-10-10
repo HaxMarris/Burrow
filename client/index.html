@@ -140,14 +140,29 @@
           <h1 id="channel-name"></h1>
           <div id="channel-sub" class="muted small"></div>
         </div>
+        <button class="icon-btn" id="search-btn" title="Search messages (Ctrl+K)" aria-label="Search messages">
+          <svg viewBox="0 0 24 24"><path d="M10 3a7 7 0 0 1 5.6 11.2l5.1 5.1-1.4 1.4-5.1-5.1A7 7 0 1 1 10 3Zm0 2a5 5 0 1 0 0 10 5 5 0 0 0 0-10Z"/></svg>
+        </button>
+        <button class="icon-btn hidden" id="pins-btn" title="Pinned messages" aria-label="Pinned messages">
+          <svg viewBox="0 0 24 24"><path d="M15 3l6 6-2 1-3 3 .5 5.5L15 20l-4-4-5.5 5.5-1-1L10 15l-4-4 1.5-1.5L13 10l3-3 1-2-2-2Z"/></svg>
+        </button>
+        <button class="icon-btn hidden" id="thread-btn" title="Thread settings" aria-label="Thread settings"></button>
         <button class="icon-btn" id="members-toggle" title="Show who's here" aria-label="Show who's here">
           <svg viewBox="0 0 24 24"><path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-6 9c0-3.3 2.7-6 6-6s6 2.7 6 6H3Zm13.5-9a3 3 0 1 0 0-6M17 14c2.5.4 4 2.6 4 6h-3"/></svg>
         </button>
       </header>
       <button class="voice-pill hidden" id="voice-pill"><span class="dot"></span><span id="voice-pill-label"></span><b>Open</b></button>
-      <div id="messages" class="messages"></div>
+      <div class="messages-wrap">
+        <div id="unread-bar" class="unread-bar hidden">
+          <button type="button" id="unread-jump" class="unread-jump"></button>
+          <button type="button" id="unread-clear" class="unread-clear">Mark as read</button>
+        </div>
+        <div id="messages" class="messages"></div>
+        <button type="button" id="present-bar" class="present-bar hidden">You're looking at older messages <b>Jump to present</b></button>
+      </div>
       <div class="composer-wrap">
         <div id="typing" class="typing"></div>
+        <button type="button" id="scheduled-note" class="scheduled-note hidden"></button>
         <div id="pending-files" class="pending-files hidden"></div>
         <div id="reply-bar" class="reply-bar hidden">
           <span>Replying to <b id="reply-name"></b></span>
@@ -160,12 +175,22 @@
           <div class="gif-foot"><span id="gif-status" class="muted small"></span><span class="gif-credit">Powered by <b>KLIPY</b></span></div>
         </div>
         <form id="composer" class="composer">
-          <button type="button" class="icon-btn attach hidden" id="attach-btn" title="Attach files (or paste / drop them)">
-            <svg viewBox="0 0 24 24"><path d="M16.5 6.5 8.4 14.6a1.5 1.5 0 0 0 2.1 2.1l8.2-8.2a3.5 3.5 0 0 0-5-5L5.4 11.9a5.5 5.5 0 0 0 7.8 7.8l7.3-7.3-1.4-1.4-7.3 7.3a3.5 3.5 0 0 1-5-5l8.3-8.4a1.5 1.5 0 0 1 2.1 2.1l-8.2 8.2-.1.1 1.4 1.4Z"/></svg>
+          <button type="button" class="icon-btn attach" id="plus-btn" title="Files, polls, stickers and more" aria-label="Files, polls, stickers and more" aria-haspopup="menu">
+            <svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z"/></svg>
           </button>
           <input type="file" id="file-input" multiple hidden />
           <button type="button" class="icon-btn gif-btn hidden" id="gif-btn" title="Send a GIF" aria-haspopup="dialog" aria-expanded="false">GIF</button>
           <textarea id="composer-input" rows="1" placeholder="Say something" maxlength="4000"></textarea>
+          <div id="recorder" class="recorder hidden" aria-live="polite">
+            <span class="rec-dot"></span><span id="rec-time">0:00</span><span class="rec-label">Recording a voice message</span>
+            <button type="button" class="btn secondary" id="rec-cancel">Cancel</button>
+          </div>
+          <button type="button" class="icon-btn" id="emoji-btn" title="Emoji" aria-label="Emoji" aria-haspopup="dialog">
+            <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16Zm-3.5-9a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm7 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM12 17.5c2.3 0 4.3-1.4 5.1-3.5H6.9c.8 2.1 2.8 3.5 5.1 3.5Z"/></svg>
+          </button>
+          <button type="button" class="icon-btn hidden" id="mic-btn" title="Record a voice message" aria-label="Record a voice message">
+            <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1a7 7 0 0 0 6-6.9h-2Z"/></svg>
+          </button>
           <button type="submit" class="send" id="send-btn" title="Send">
             <svg viewBox="0 0 24 24"><path d="M4 12 20 4l-4 16-4-6-8-2Z"/></svg>
           </button>
@@ -270,12 +295,16 @@
       <span id="conn-status" class="conn">Connecting…</span>
     </div>
     <button role="menuitem" id="account-btn">Your account</button>
+    <button role="menuitem" id="saved-btn">Saved messages</button>
+    <button role="menuitem" id="scheduled-btn">Scheduled messages</button>
     <button role="menuitem" id="theme-toggle">Switch to dark</button>
     <button role="menuitem" id="logout" class="danger-item">Log out</button>
   </div>
 
   <!-- Burrow switcher: the phone's burrow list, and the desktop's "more" list -->
   <div id="switcher" class="switcher hidden" role="dialog" aria-label="Switch burrow"></div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
 
   <!-- Modal -->
   <div id="modal" class="modal hidden">

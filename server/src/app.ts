@@ -2000,7 +2000,9 @@ export function createApp(opts: AppOptions): Server {
     if (!thread) {
       const m = db.prepare('SELECT content FROM messages WHERE id = ?').get(id) as { content: string };
       const firstLine = m.content.split('\n').find((l) => l.trim()) ?? '';
-      const name = body.name ? threadName(body.name) : firstLine.replace(/\s+/g, ' ').trim().slice(0, 40) || 'Thread';
+      // The first line, without its formatting marks (headings, quotes, bold and so on) or custom emoji codes.
+      const plain = firstLine.replace(/<:(\w+):\d+>/g, ':$1:').replace(/^\s*(#{1,3}|>|[-*]|\d+[.)])\s+/, '').replace(/[*_~`|]/g, '');
+      const name = body.name ? threadName(body.name) : plain.replace(/\s+/g, ' ').trim().slice(0, 40) || 'Thread';
       const r = db
         .prepare("INSERT INTO channels (server_id, name, kind, private, created_at, parent_id, parent_message_id, created_by) VALUES (?, ?, 'thread', 0, ?, ?, ?, ?)")
         .run(channel.serverId, name, now(), channel.id, id, user.id);
