@@ -134,6 +134,11 @@ label input:focus, .modal-card input:focus, .gif-picker input:focus { border-col
 .auth-card h1 { margin: 0; font-size: 32px; }
 .auth-card > p { margin: 0 0 8px; }
 .auth-card .btn { padding: 12px; margin-top: 4px; }
+.get-desktop { margin-top: 14px; padding-top: 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+.get-desktop p { margin: 0; }
+.get-desktop-row { display: flex; gap: 8px; }
+.auth-card .get-desktop-row .btn { flex: 1; margin: 0; padding: 10px 8px; text-align: center; text-decoration: none; font-size: 14px; }
+.auth-card .get-desktop-row .btn.mine { background: var(--accent); color: var(--accent-ink); }
 
 /* ---------- layout ----------
    A computer shows the top bar (burrows), the burrow's rooms, the chat and who's here.
