@@ -6175,7 +6175,7 @@ async function openAudit(serverId) {
         const row = document.createElement('div');
         row.className = 'audit-row';
         const label = AUDIT_LABELS[e.action]?.({ ...e, target: e.target ?? 'someone' }) ?? e.action;
-        row.innerHTML = `<b>${escapeHtml(e.actor ?? 'Someone')}</b> ${escapeHtml(label)}<span class="muted small">${escapeHtml(formatTime(new Date(e.createdAt)))}</span>`;
+        row.innerHTML = `<span><b>${escapeHtml(e.actor ?? 'Someone')}</b> ${escapeHtml(label)}</span><span class="muted small">${escapeHtml(formatTime(new Date(e.createdAt)))}</span>`;
         list.append(row);
       }
       const btn = $('#audit-more');
