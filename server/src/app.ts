@@ -10,6 +10,8 @@ import { closeRoom, removeFromRoom, setCanSpeak, voiceToken, type VoiceOptions }
 import { staticFiles } from './static.ts';
 import { gifSearch, download, type GifOptions } from './gifs.ts';
 import { fetchEmbed, fetchImage, linksIn, type Embed, type EmbedOptions } from './embeds.ts';
+import { newVapidKeys, sendPush, vapidKeysWork, type VapidKeys } from './push.ts';
+import { looksLikeEmail, sendMail, type MailConfig } from './mail.ts';
 
 export interface AppOptions {
   db: Db;
@@ -26,10 +28,20 @@ export interface AppOptions {
   gifs?: GifOptions;
   /** Link previews are on unless this is false. */
   linkPreviews?: EmbedOptions | false;
+  /** Where to send email (missed mentions, confirming an address); email is off without it. */
+  mail?: MailConfig;
+  /** The address people open Burrow at, for links in emails. */
+  publicUrl?: string;
+  /** Who push services can contact about this server's pushes (a mailto: or https: address). */
+  pushContact?: string;
+  /** Push services Burrow will send to. Tests add their own. */
+  pushHosts?: string[];
+  /** How long a mention waits unread before it's emailed (default 15 minutes). */
+  mentionEmailDelayMs?: number;
 }
 
 type User = { id: number; username: string; avatar: string | null };
-const PERMS = ['rooms', 'messages', 'remove', 'ban', 'roles', 'burrow', 'emoji', 'voice'] as const;
+const PERMS = ['rooms', 'messages', 'remove', 'ban', 'roles', 'burrow', 'emoji', 'voice', 'everyone'] as const;
 type Perm = (typeof PERMS)[number];
 type Standing = { host: boolean; rank: number; perms: Set<Perm>; roleIds: number[] };
 const parsePerms = (text: string) => text.split(',').filter((p): p is Perm => (PERMS as readonly string[]).includes(p));
@@ -138,6 +150,7 @@ const MIME: Record<string, string> = {
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
   '.wasm': 'application/wasm',
+  '.webmanifest': 'application/manifest+json',
 };
 
 export function createApp(opts: AppOptions): Server {
@@ -283,8 +296,9 @@ export function createApp(opts: AppOptions): Server {
   /** Adds attachments, reactions, reply previews, polls, link previews and threads to a list of message rows. */
   const withAttachments = (rows: Json[]): Json[] => {
     if (!rows.length) return rows;
-    rows = rows.map(({ replyToId, stickerId, embedsOff, forwarded, ...r }) => ({
+    rows = rows.map(({ replyToId, stickerId, embedsOff, forwarded, pings, ...r }) => ({
       ...r,
+      pings: pings ? JSON.parse(pings as string) : null,
       pinnedAt: r.pinnedAt ?? null,
       replyTo: replyPreview(replyToId),
       reactions: reactionsFor(r.id as number),
@@ -306,7 +320,7 @@ export function createApp(opts: AppOptions): Server {
 
   // Every message is read with these columns, then filled in by withAttachments.
   const MESSAGE_SELECT = `SELECT m.id, m.channel_id AS channelId, m.content, m.created_at AS createdAt, m.edited_at AS editedAt,
-      m.reply_to AS replyToId, m.pinned_at AS pinnedAt, m.forwarded, m.sticker_id AS stickerId, m.embeds_off AS embedsOff,
+      m.reply_to AS replyToId, m.pinned_at AS pinnedAt, m.forwarded, m.sticker_id AS stickerId, m.embeds_off AS embedsOff, m.pings,
       u.id AS authorId, u.username AS author, ${avatarUrl('u.avatar')} AS authorAvatar
     FROM messages m JOIN users u ON u.id = m.author_id`;
 
@@ -399,7 +413,7 @@ export function createApp(opts: AppOptions): Server {
         const roleIds = memberRoles.filter((r) => r.user_id === m.id).map((r) => r.role_id);
         const host = server.kind === 'burrow' && m.id === server.ownerId;
         const powers = roleIds.some((id) => (roles.find((r) => r.id === id)?.perms.length ?? 0) > 0);
-        return { ...m, voiceMuted: !!m.voiceMuted, roleIds, role: host ? 'host' : powers ? 'mod' : 'member', online: online.has(m.id) };
+        return { ...m, voiceMuted: !!m.voiceMuted, roleIds, role: host ? 'host' : powers ? 'mod' : 'member', online: online.has(m.id), ...presenceOf(m.id) };
       }),
     };
   };
@@ -603,6 +617,7 @@ export function createApp(opts: AppOptions): Server {
       .prepare('INSERT INTO messages (channel_id, author_id, content, created_at, reply_to, sticker_id, forwarded) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(channelId, user.id, content, now(), replyId, stickerId, extras.forwarded ? JSON.stringify(extras.forwarded) : null);
     const messageId = Number(r.lastInsertRowid);
+    const forWhom = recordMentions(channel, messageId, user.id, content, replyId);
     usable.forEach((id, position) =>
       db.prepare('UPDATE attachments SET message_id = ?, position = ?, spoiler = ? WHERE id = ?').run(messageId, position, spoilers.has(id) ? 1 : 0, id),
     );
@@ -615,6 +630,7 @@ export function createApp(opts: AppOptions): Server {
     }
     const message = messageById(messageId)!;
     broadcastToChannel(channel, { type: 'message', message });
+    alertAway(channel, message, forWhom);
     // Writing in a room means you've read it.
     markRead(user.id, channel, messageId);
     if (channel.kind === 'thread') threadChanged(channel);
@@ -638,6 +654,7 @@ export function createApp(opts: AppOptions): Server {
       voice: !!opts.voice,
       maxUploadBytes: opts.uploadDir ? maxUpload : 0,
       gifs: !!gifs,
+      email: !!opts.mail,
     }),
     false,
   );
@@ -691,7 +708,7 @@ export function createApp(opts: AppOptions): Server {
     return { ok: true };
   });
 
-  route('GET', '/api/me', ({ user }) => ({ ...user, readReceipts: readReceiptsOn(user.id), folders: foldersOf(user.id) }));
+  route('GET', '/api/me', ({ user }) => ({ ...meJson(user), folders: foldersOf(user.id) }));
 
   // Changing your password signs you out everywhere else.
   route('POST', '/api/me/password', ({ user, body, token }) => {
@@ -1455,6 +1472,9 @@ export function createApp(opts: AppOptions): Server {
     // The old wording is kept, so anyone can see what an edited message used to say.
     db.prepare('INSERT INTO message_edits (message_id, content, edited_at) VALUES (?, ?, ?)').run(id, before.content, before.at);
     db.prepare('UPDATE messages SET content = ?, edited_at = ? WHERE id = ?').run(body.content, now(), id);
+    // New @names count for the inbox, without alerting anyone again.
+    const replyTo = (db.prepare('SELECT reply_to FROM messages WHERE id = ?').get(id) as { reply_to: number | null }).reply_to;
+    recordMentions(channel, id, user.id, body.content, replyTo);
     const linksChanged = linksIn(before.content).join() !== linksIn(body.content).join();
     if (linksChanged) db.prepare('DELETE FROM message_embeds WHERE message_id = ?').run(id);
     const message = messageById(id)!;
@@ -1818,12 +1838,442 @@ export function createApp(opts: AppOptions): Server {
     return message;
   };
 
+  // ---- notifications and presence ----
+  //
+  // Who a message is for (your @name, a reply to you, @everyone, @here or one of your roles) is
+  // worked out once, when it's sent, and kept: that's your mentions inbox and your unread
+  // mention counts. People who are away get a push on their phone or browser, and if they set
+  // up email, an email when a mention is still unread a while later.
+
+  const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const serverKind = (serverId: number) => (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind;
+
+  /** @everyone, @here and @Role, if the author's roles let them ping those. */
+  const pingsIn = (channel: Channel, authorId: number, content: string) => {
+    if (!content.includes('@') || serverKind(channel.serverId) !== 'burrow' || !can(channel.serverId, authorId, 'everyone')) return null;
+    const out: { everyone?: 1; here?: 1; roles?: number[] } = {};
+    if (/@everyone\b/i.test(content)) out.everyone = 1;
+    if (/@here\b/i.test(content)) out.here = 1;
+    const roles = db.prepare('SELECT id, name FROM roles WHERE server_id = ?').all(channel.serverId) as { id: number; name: string }[];
+    const named = roles.filter((r) => new RegExp(`@${escapeRe(r.name)}(?![\\w-])`, 'i').test(content)).map((r) => r.id);
+    if (named.length) out.roles = named;
+    return Object.keys(out).length ? out : null;
+  };
+
+  /** Keeps who a message is for (never its author), and returns them. Direct messages are for everyone in them anyway. */
+  const recordMentions = (channel: Channel, messageId: number, authorId: number, content: string, replyId: number | null) => {
+    const pings = pingsIn(channel, authorId, content);
+    db.prepare('UPDATE messages SET pings = ? WHERE id = ?').run(pings ? JSON.stringify(pings) : null, messageId);
+    const forWhom = new Set<number>();
+    if (serverKind(channel.serverId) !== 'burrow') return forWhom;
+    const audience = channelAudience(channel).filter((id) => id !== authorId);
+    if (content.includes('@')) {
+      const names = db
+        .prepare(`SELECT id, username FROM users WHERE id IN (${audience.map(() => '?').join(',') || 'NULL'})`)
+        .all(...audience) as { id: number; username: string }[];
+      for (const u of names) if (new RegExp(`@${escapeRe(u.username)}\\b`, 'i').test(content)) forWhom.add(u.id);
+    }
+    if (replyId !== null) {
+      const to = (db.prepare('SELECT author_id FROM messages WHERE id = ?').get(replyId) as { author_id: number } | undefined)?.author_id;
+      if (to !== undefined && audience.includes(to)) forWhom.add(to);
+    }
+    if (pings?.everyone) audience.forEach((id) => forWhom.add(id));
+    if (pings?.here) audience.filter((id) => online.has(id)).forEach((id) => forWhom.add(id));
+    if (pings?.roles) {
+      const inRoles = db
+        .prepare(`SELECT DISTINCT user_id FROM member_roles WHERE server_id = ? AND role_id IN (${pings.roles.map(() => '?').join(',')})`)
+        .all(channel.serverId, ...pings.roles) as { user_id: number }[];
+      for (const { user_id } of inRoles) if (audience.includes(user_id)) forWhom.add(user_id);
+    }
+    const add = db.prepare('INSERT OR IGNORE INTO mentions (message_id, user_id) VALUES (?, ?)');
+    for (const id of forWhom) add.run(messageId, id);
+    return forWhom;
+  };
+
+  // Presence: online, away (chosen, or nobody's touched any of their devices for a while) or
+  // do not disturb; a custom status; and the game the desktop app sees them playing.
+  const idleSockets = new Map<number, Set<WebSocket>>();
+  const activities = new Map<number, { name: string; since: number }>();
+  const userIdle = (userId: number) => {
+    const all = sockets.get(userId);
+    const idleOnes = idleSockets.get(userId);
+    return !!all?.size && !!idleOnes && [...all].every((ws) => idleOnes.has(ws));
+  };
+  type StatusRow = { status: string; status_text: string | null; status_emoji: string | null; status_until: number | null };
+  const statusRow = (userId: number) =>
+    db.prepare('SELECT status, status_text, status_emoji, status_until FROM users WHERE id = ?').get(userId) as StatusRow | undefined;
+  const customOf = (r: StatusRow | undefined) =>
+    r && (r.status_text || r.status_emoji) && (!r.status_until || r.status_until > now())
+      ? { text: r.status_text ?? '', emoji: r.status_emoji ?? '', until: r.status_until }
+      : null;
+  const presenceOf = (userId: number) => {
+    const r = statusRow(userId);
+    const on = online.has(userId);
+    const status = !on ? 'offline' : r?.status === 'dnd' ? 'dnd' : r?.status === 'away' || userIdle(userId) ? 'away' : 'online';
+    const activity = on ? activities.get(userId) ?? null : null;
+    return { status, custom: customOf(r), activity };
+  };
+  const sendPresence = (userId: number) =>
+    sendTo(usersSharingServerWith(userId), { type: 'presence', userId, online: online.has(userId), ...presenceOf(userId) });
+  // A custom status that runs out disappears for everyone at that moment.
+  const statusTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  const expireStatusAt = (userId: number, until: number | null) => {
+    clearTimeout(statusTimers.get(userId));
+    statusTimers.delete(userId);
+    if (!until) return;
+    const t = setTimeout(() => { statusTimers.delete(userId); sendPresence(userId); }, Math.min(Math.max(0, until - now()) + 50, 2 ** 31 - 1));
+    t.unref();
+    statusTimers.set(userId, t);
+  };
+
+  type MeRow = StatusRow & { quiet_start: number | null; quiet_end: number | null; time_zone: string | null; email: string | null; email_verified: number; email_mentions: number };
+  const meRow = (userId: number) =>
+    db
+      .prepare('SELECT status, status_text, status_emoji, status_until, quiet_start, quiet_end, time_zone, email, email_verified, email_mentions FROM users WHERE id = ?')
+      .get(userId) as MeRow;
+  /** You, as your own apps see you: settings included. */
+  const meJson = (user: User) => {
+    const r = meRow(user.id);
+    return {
+      ...user,
+      readReceipts: readReceiptsOn(user.id),
+      status: r.status,
+      customStatus: customOf(r),
+      quietHours: r.quiet_start === null || r.quiet_end === null ? null : { start: r.quiet_start, end: r.quiet_end, timeZone: r.time_zone },
+      email: r.email,
+      emailVerified: !!r.email_verified,
+      emailMentions: !!r.email_mentions,
+    };
+  };
+  const validTimeZone = (tz: unknown) => {
+    if (typeof tz !== 'string' || tz.length > 64) return false;
+    try { new Intl.DateTimeFormat('en', { timeZone: tz }); return true; } catch { return false; }
+  };
+  /** Status, custom status, quiet hours and the email switch, from PATCH /api/me. */
+  const updateMyPresence = (user: User, body: Json) => {
+    let changed = false;
+    if (body.status !== undefined) {
+      if (!['online', 'away', 'dnd'].includes(body.status as string)) throw new HttpError(400, 'Pick online, away or do not disturb');
+      db.prepare('UPDATE users SET status = ? WHERE id = ?').run(body.status as string, user.id);
+      changed = true;
+    }
+    if (body.customStatus !== undefined) {
+      const c = body.customStatus as Json | null;
+      if (c === null) {
+        db.prepare('UPDATE users SET status_text = NULL, status_emoji = NULL, status_until = NULL WHERE id = ?').run(user.id);
+        expireStatusAt(user.id, null);
+      } else {
+        const text = typeof c.text === 'string' ? c.text.replace(/\s+/g, ' ').trim() : '';
+        const emoji = typeof c.emoji === 'string' ? c.emoji.trim() : '';
+        if (text.length > 80) throw new HttpError(400, 'Keep your status under 80 characters');
+        if (emoji.length > 40) throw new HttpError(400, "That emoji doesn't work here");
+        if (!text && !emoji) throw new HttpError(400, 'Write a status or pick an emoji');
+        const until = c.until == null ? null : Math.floor(Number(c.until));
+        if (until !== null && !(until > now())) throw new HttpError(400, 'Pick a time in the future');
+        db.prepare('UPDATE users SET status_text = ?, status_emoji = ?, status_until = ? WHERE id = ?').run(text || null, emoji || null, until, user.id);
+        expireStatusAt(user.id, until);
+      }
+      changed = true;
+    }
+    if (body.quietHours !== undefined) {
+      const q = body.quietHours as Json | null;
+      if (q === null) db.prepare('UPDATE users SET quiet_start = NULL, quiet_end = NULL WHERE id = ?').run(user.id);
+      else {
+        const start = Math.floor(Number(q.start)), end = Math.floor(Number(q.end));
+        const ok = (m: number) => Number.isFinite(m) && m >= 0 && m < 1440;
+        if (!ok(start) || !ok(end) || start === end) throw new HttpError(400, 'Pick when quiet hours start and end');
+        if (!validTimeZone(q.timeZone)) throw new HttpError(400, "That time zone isn't one Burrow knows");
+        db.prepare('UPDATE users SET quiet_start = ?, quiet_end = ?, time_zone = ? WHERE id = ?').run(start, end, q.timeZone as string, user.id);
+      }
+    }
+    if (body.emailMentions !== undefined) db.prepare('UPDATE users SET email_mentions = ? WHERE id = ?').run(body.emailMentions ? 1 : 0, user.id);
+    if (changed) {
+      sendPresence(user.id);
+      sendTo([user.id], { type: 'me_updated', me: meJson(user) }); // your other devices
+    }
+  };
+
+  /** Whether it's within someone's quiet hours where they are. */
+  const inQuietHours = (userId: number, t = now()) => {
+    const r = meRow(userId);
+    if (r.quiet_start === null || r.quiet_end === null) return false;
+    let minutes: number;
+    try {
+      const parts = new Intl.DateTimeFormat('en-GB', { timeZone: r.time_zone ?? 'UTC', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(t);
+      minutes = Number(parts.find((p) => p.type === 'hour')!.value) * 60 + Number(parts.find((p) => p.type === 'minute')!.value);
+    } catch {
+      return false;
+    }
+    // Quiet hours usually run past midnight (22:00 to 07:00).
+    return r.quiet_start < r.quiet_end ? minutes >= r.quiet_start && minutes < r.quiet_end : minutes >= r.quiet_start || minutes < r.quiet_end;
+  };
+
+  // ---- push: alerts while Burrow is closed ----
+
+  const vapid: VapidKeys = (() => {
+    const saved = db.prepare("SELECT value FROM app_secrets WHERE name = 'vapid'").get() as { value: string } | undefined;
+    if (saved) {
+      try {
+        const keys = JSON.parse(saved.value) as VapidKeys;
+        if (vapidKeysWork(keys)) return keys;
+      } catch {}
+    }
+    const keys = newVapidKeys();
+    db.prepare("INSERT OR REPLACE INTO app_secrets (name, value) VALUES ('vapid', ?)").run(JSON.stringify(keys));
+    return keys;
+  })();
+  const pushContact = opts.pushContact || 'https://github.com/HaxMarris/Burrow';
+  // Only the big browsers' push services, so nobody can make the server post to anywhere else.
+  const PUSH_HOSTS = ['.googleapis.com', '.mozilla.com', '.push.apple.com', '.notify.windows.com', ...(opts.pushHosts ?? [])];
+  const pushHostAllowed = (endpoint: string) => {
+    try {
+      const u = new URL(endpoint);
+      const testHost = opts.pushHosts?.includes(u.host);
+      return (u.protocol === 'https:' || (testHost && u.protocol === 'http:')) && (testHost || PUSH_HOSTS.some((h) => h.startsWith('.') && u.hostname.endsWith(h)));
+    } catch {
+      return false;
+    }
+  };
+  const MAX_PUSH_DEVICES = 10;
+
+  route('GET', '/api/push/key', () => ({ key: vapid.publicKey }));
+  route('POST', '/api/push', ({ user, body }) => {
+    const endpoint = typeof body.endpoint === 'string' ? body.endpoint : '';
+    const keys = (body.keys ?? {}) as Json;
+    const p256dh = typeof keys.p256dh === 'string' ? keys.p256dh : '';
+    const auth = typeof keys.auth === 'string' ? keys.auth : '';
+    if (endpoint.length > 2000 || !pushHostAllowed(endpoint)) throw new HttpError(400, "That browser's alerts aren't supported");
+    if (Buffer.from(p256dh, 'base64url').length !== 65 || Buffer.from(auth, 'base64url').length !== 16) throw new HttpError(400, 'Those alert keys look wrong');
+    db.prepare(
+      `INSERT INTO push_subs (user_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, created_at = excluded.created_at`,
+    ).run(user.id, endpoint, p256dh, auth, now());
+    db.prepare(
+      `DELETE FROM push_subs WHERE user_id = ? AND id NOT IN (SELECT id FROM push_subs WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ${MAX_PUSH_DEVICES})`,
+    ).run(user.id, user.id);
+    return { ok: true };
+  });
+  route('DELETE', '/api/push', ({ user, body }) => {
+    db.prepare('DELETE FROM push_subs WHERE user_id = ? AND endpoint = ?').run(user.id, String(body.endpoint ?? ''));
+    return { ok: true };
+  });
+
+  /** Unread @mentions plus unread direct messages, for the number on the app icon. */
+  const badgeCount = (userId: number) => {
+    const mentions = (db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM (SELECT 1 FROM mentions x JOIN messages m ON m.id = x.message_id
+         LEFT JOIN read_state r ON r.user_id = x.user_id AND r.channel_id = m.channel_id
+         WHERE x.user_id = ? AND m.id > COALESCE(r.last_read_id, 0) LIMIT 100)`,
+      )
+      .get(userId) as { n: number }).n;
+    const dms = (db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM (SELECT 1 FROM members mb JOIN servers s ON s.id = mb.server_id AND s.kind = 'dm'
+         JOIN channels c ON c.server_id = s.id JOIN messages m ON m.channel_id = c.id
+         LEFT JOIN read_state r ON r.user_id = mb.user_id AND r.channel_id = c.id
+         WHERE mb.user_id = ? AND m.author_id != mb.user_id AND m.id > COALESCE(r.last_read_id, 0) AND m.created_at >= mb.joined_at LIMIT 100)`,
+      )
+      .get(userId) as { n: number }).n;
+    return Math.min(99, mentions + dms);
+  };
+
+  const pushTo = (userId: number, message: Json) => {
+    const subs = db.prepare('SELECT endpoint, p256dh, auth FROM push_subs WHERE user_id = ?').all(userId) as { endpoint: string; p256dh: string; auth: string }[];
+    for (const sub of subs) {
+      void sendPush(sub, message, vapid, pushContact).then((result) => {
+        if (result === 'gone') db.prepare('DELETE FROM push_subs WHERE endpoint = ?').run(sub.endpoint);
+      });
+    }
+  };
+
+  /** A message's text without formatting marks, for an alert or an email. */
+  const plainPreview = (m: Json) => {
+    const text = String(m.content ?? '')
+      .replace(/```[\s\S]*?```/g, '[code]')
+      .replace(/\|\|[\s\S]*?\|\|/g, '[spoiler]')
+      .replace(/[*_~`>#]+/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (text) return text.length > 200 ? text.slice(0, 199) + '…' : text;
+    const files = m.attachments as Json[] | undefined;
+    return m.poll ? `Poll: ${(m.poll as Json).question}` : m.sticker ? 'Sent a sticker' : files?.length ? `Sent ${files.length === 1 ? 'a file' : `${files.length} files`}` : '';
+  };
+
+  /**
+   * After a message is sent: pushes to the phones and browsers of people it's for who aren't
+   * looking at Burrow right now, and remembers mentions for email. Muted rooms, "nothing" and
+   * do not disturb stay silent; quiet hours make the alert silent.
+   */
+  const alertAway = (channel: Channel, message: Json, forWhom: Set<number>) => {
+    const dm = serverKind(channel.serverId) === 'dm';
+    const room = channel.kind === 'thread' && channel.parentId !== null ? channel.parentId : channel.id;
+    const place = placeOf(channel.id, message.authorId as number);
+    for (const id of channelAudience(channel)) {
+      if (id === message.authorId) continue;
+      const forThem = dm || forWhom.has(id);
+      const prefs = notifyPrefsOf(id, channel.serverId);
+      const roomPref = prefs.get(room), burrowPref = prefs.get(0);
+      if (roomPref?.mutedUntil || burrowPref?.mutedUntil) continue;
+      const level = roomPref?.level ?? burrowPref?.level ?? null;
+      if (level === 'none') continue;
+      // Every message only when they asked for every message; otherwise just what's for them.
+      if (!forThem && level !== 'all') continue;
+      if (statusRow(id)?.status === 'dnd') continue;
+      if (forThem && opts.mail) {
+        const e = db.prepare('SELECT email_verified, email_mentions FROM users WHERE id = ?').get(id) as { email_verified: number; email_mentions: number };
+        if (e.email_verified && e.email_mentions)
+          db.prepare('INSERT OR IGNORE INTO missed_mentions (user_id, message_id, created_at) VALUES (?, ?, ?)').run(id, message.id as number, now());
+      }
+      if (online.has(id) && !userIdle(id)) continue; // they'll see it in the app
+      const where = dm
+        ? isGroupDm(channel.serverId) ? `${message.author} in ${(db.prepare('SELECT name FROM servers WHERE id = ?').get(channel.serverId) as { name: string }).name || 'your group'}` : String(message.author)
+        : `${message.author} in #${place?.channelName ?? channel.name}${place?.threadName ? ` › ${place.threadName}` : ''} (${place?.serverName ?? ''})`;
+      pushTo(id, {
+        title: where,
+        body: plainPreview(message),
+        tag: `room-${channel.id}`,
+        channelId: channel.id,
+        messageId: message.id,
+        silent: inQuietHours(id),
+        badge: badgeCount(id),
+      });
+    }
+  };
+
+  // ---- the mentions inbox ----
+
+  route('GET', '/api/mentions', ({ user, url }) => {
+    const before = Number(url.searchParams.get('before')) || Number.MAX_SAFE_INTEGER;
+    const seen = new Map<number, Channel | null>();
+    const out: { id: number; channelId: number }[] = [];
+    let cursor = before;
+    // Rooms they can no longer see are skipped, so read in batches until there's one more than a page.
+    for (let done = false; out.length <= 30 && !done; ) {
+      const rows = db
+        .prepare(
+          `SELECT x.message_id AS id, m.channel_id AS channelId FROM mentions x JOIN messages m ON m.id = x.message_id
+           WHERE x.user_id = ? AND x.message_id < ? ORDER BY x.message_id DESC LIMIT 60`,
+        )
+        .all(user.id, cursor) as { id: number; channelId: number }[];
+      done = rows.length < 60;
+      for (const r of rows) {
+        cursor = r.id;
+        if (!seen.has(r.channelId)) {
+          const c = channelById(r.channelId);
+          seen.set(r.channelId, c && canSee(c, user.id) ? c : null);
+        }
+        if (seen.get(r.channelId)) out.push(r);
+      }
+    }
+    const more = out.length > 30;
+    out.length = Math.min(out.length, 30);
+    const lastRead = new Map<number, number>();
+    const messages = messagesByIds(out.map((r) => r.id)).map((m) => {
+      const c = seen.get(m.channelId as number)!;
+      if (!lastRead.has(c.id)) lastRead.set(c.id, lastReadOf(user.id, c.id, c.serverId));
+      return { ...m, place: placeOf(c.id, user.id), unread: (m.id as number) > lastRead.get(c.id)! };
+    });
+    return { messages, more };
+  });
+  // Clearing one from your inbox (it stays in the room).
+  route('DELETE', '/api/mentions/:id', ({ user, params }) => {
+    db.prepare('DELETE FROM mentions WHERE user_id = ? AND message_id = ?').run(user.id, Number(params[0]));
+    return { ok: true };
+  });
+
+  // ---- email: confirming your address, and mentions you missed ----
+
+  const mailTo = async (to: string, subject: string, text: string) => {
+    if (!opts.mail) throw new HttpError(400, "Email isn't set up on this server");
+    await sendMail(opts.mail, { to, subject, text });
+  };
+  const signature = () => (opts.publicUrl ? `\n\nOpen Burrow: ${opts.publicUrl}\nTo stop these emails, turn them off in your account settings.` : '\n\nTo stop these emails, turn them off in your account settings.');
+
+  route('POST', '/api/me/email', async ({ user, body }) => {
+    if (!opts.mail) throw new HttpError(400, "Email isn't set up on this server");
+    const email = typeof body.email === 'string' ? body.email.trim() : '';
+    if (!looksLikeEmail(email)) throw new HttpError(400, "That doesn't look like an email address");
+    checkTries([`email:${user.id}`], 5);
+    failedTry([`email:${user.id}`], 60 * 60 * 1000); // every code sent counts, so nobody's inbox is flooded
+    const code = String(randomBytes(4).readUInt32BE() % 1_000_000).padStart(6, '0');
+    db.prepare('UPDATE users SET email = ?, email_verified = 0, email_code = ?, email_code_expires = ? WHERE id = ?').run(email, code, now() + 30 * 60 * 1000, user.id);
+    try {
+      await mailTo(email, `Your Burrow code: ${code}`, `Hi ${user.username},\n\nYour code to confirm this email address on Burrow is ${code}. It works for 30 minutes.\n\nIf you didn't ask for this, you can ignore this email.`);
+    } catch (err) {
+      console.error('Sending email failed:', err);
+      throw new HttpError(502, "Burrow couldn't send the email. Check the address, or ask whoever runs this server.");
+    }
+    return meJson(user);
+  });
+  route('POST', '/api/me/email/verify', ({ user, body }) => {
+    const r = db.prepare('SELECT email_code, email_code_expires FROM users WHERE id = ?').get(user.id) as { email_code: string | null; email_code_expires: number | null };
+    checkTries([`email-code:${user.id}`], 5);
+    if (!r.email_code || !r.email_code_expires || r.email_code_expires < now()) throw new HttpError(400, 'That code has run out. Send a new one.');
+    if (!sameText(String(body.code ?? '').trim(), r.email_code)) {
+      failedTry([`email-code:${user.id}`], 30 * 60 * 1000);
+      throw new HttpError(400, "That code isn't right");
+    }
+    db.prepare('UPDATE users SET email_verified = 1, email_code = NULL, email_code_expires = NULL WHERE id = ?').run(user.id);
+    return meJson(user);
+  });
+  route('DELETE', '/api/me/email', ({ user }) => {
+    db.prepare('UPDATE users SET email = NULL, email_verified = 0, email_code = NULL, email_code_expires = NULL WHERE id = ?').run(user.id);
+    db.prepare('DELETE FROM missed_mentions WHERE user_id = ?').run(user.id);
+    return meJson(user);
+  });
+
+  const MENTION_EMAIL_DELAY = opts.mentionEmailDelayMs ?? 15 * 60 * 1000;
+  const MENTION_EMAIL_GAP = 60 * 60 * 1000; // at most one email an hour
+  let sendingEmails = false;
+  /** Emails people about mentions and direct messages still unread after a while. */
+  const sendMissedEmails = async (t = now()) => {
+    if (!opts.mail || sendingEmails) return;
+    sendingEmails = true;
+    try {
+      const users = db.prepare('SELECT DISTINCT user_id FROM missed_mentions WHERE created_at <= ?').all(t - MENTION_EMAIL_DELAY) as { user_id: number }[];
+      for (const { user_id: userId } of users) {
+        const u = db.prepare('SELECT username, email, email_verified, email_mentions, last_mention_email FROM users WHERE id = ?').get(userId) as
+          | { username: string; email: string | null; email_verified: number; email_mentions: number; last_mention_email: number | null }
+          | undefined;
+        const rows = db.prepare('SELECT message_id FROM missed_mentions WHERE user_id = ? ORDER BY message_id').all(userId) as { message_id: number }[];
+        if (!u?.email || !u.email_verified || !u.email_mentions) {
+          db.prepare('DELETE FROM missed_mentions WHERE user_id = ?').run(userId);
+          continue;
+        }
+        // Only what's still unread, in rooms they can still see.
+        const unread = messagesByIds(rows.map((r) => r.message_id)).filter((m) => {
+          const c = channelById(m.channelId as number);
+          return !!c && canSee(c, userId) && (m.id as number) > lastReadOf(userId, c.id, c.serverId);
+        });
+        if (!unread.length) {
+          db.prepare('DELETE FROM missed_mentions WHERE user_id = ?').run(userId);
+          continue;
+        }
+        if (u.last_mention_email && t - u.last_mention_email < MENTION_EMAIL_GAP) continue; // they'll be in the next one
+        if (statusRow(userId)?.status === 'dnd') continue;
+        db.prepare('DELETE FROM missed_mentions WHERE user_id = ?').run(userId);
+        db.prepare('UPDATE users SET last_mention_email = ? WHERE id = ?').run(t, userId);
+        const lines = unread.slice(-10).map((m) => {
+          const p = placeOf(m.channelId as number, userId);
+          const where = p?.kind === 'dm' ? 'a direct message' : `#${p?.channelName} in ${p?.serverName}`;
+          return `${m.author} in ${where}:\n  ${plainPreview(m)}`;
+        });
+        const subject = unread.length === 1 ? `${unread[0].author} mentioned you on Burrow` : `${unread.length} messages for you on Burrow`;
+        const more = unread.length > 10 ? `\n\n…and ${unread.length - 10} more.` : '';
+        await mailTo(u.email, subject, `Hi ${u.username},\n\nYou have messages waiting on Burrow:\n\n${lines.join('\n\n')}${more}${signature()}`).catch((err) =>
+          console.error('Sending a mention email failed:', err),
+        );
+      }
+    } finally {
+      sendingEmails = false;
+    }
+  };
+  const emailTimer = setInterval(() => void sendMissedEmails(), 60_000);
+  emailTimer.unref();
+
   // ---- unread messages: the newest message each person has read in each room ----
 
-  // Whether a message mentions someone: "@name" as a whole word, the way the app highlights it.
-  db.function('mentions_name', { deterministic: true }, (content, name) =>
-    new RegExp(`@${String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(String(content)) ? 1 : 0,
-  );
   const UNREAD_CAP = 100; // counts stop here; the app shows "99+"
 
   const lastReadOf = (userId: number, channelId: number, serverId: number) => {
@@ -1845,11 +2295,8 @@ export function createApp(opts: AppOptions): Server {
     const unread = count('');
     if (!unread) return { lastReadId, unread, mentions: 0 };
     const dm = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind === 'dm';
-    const name = (db.prepare('SELECT username FROM users WHERE id = ?').get(userId) as { username: string }).username;
-    // In a DM everything is for you; elsewhere it's @mentions and replies to you.
-    const mentions = dm
-      ? unread
-      : count('AND (mentions_name(m.content, ?) OR EXISTS (SELECT 1 FROM messages r WHERE r.id = m.reply_to AND r.author_id = ?))', name, userId);
+    // In a DM everything is for you; elsewhere it's @mentions (your name, @everyone, your roles) and replies to you.
+    const mentions = dm ? unread : count('AND EXISTS (SELECT 1 FROM mentions x WHERE x.message_id = m.id AND x.user_id = ?)', userId);
     return { lastReadId, unread, mentions };
   };
 
@@ -1904,7 +2351,8 @@ export function createApp(opts: AppOptions): Server {
       const dms = db.prepare("SELECT s.id FROM members m JOIN servers s ON s.id = m.server_id WHERE m.user_id = ? AND s.kind = 'dm'").all(user.id) as { id: number }[];
       for (const { id } of dms) sendServerUpdate(id);
     }
-    return { ...user, readReceipts: readReceiptsOn(user.id) };
+    updateMyPresence(user, body);
+    return meJson(user);
   });
 
   // ---- pinned messages ----
@@ -3082,7 +3530,11 @@ export function createApp(opts: AppOptions): Server {
     set.add(ws);
     if (!online.has(user.id)) {
       online.add(user.id);
-      sendTo(usersSharingServerWith(user.id), { type: 'presence', userId: user.id, online: true });
+      sendPresence(user.id);
+    } else if (idleSockets.has(user.id)) {
+      // A new device is in use, so they're back.
+      const wasIdle = userIdle(user.id);
+      if (wasIdle) sendPresence(user.id);
     }
     ws.send(JSON.stringify({ type: 'ready', user }));
     deliverReminders(user.id);
@@ -3149,6 +3601,22 @@ export function createApp(opts: AppOptions): Server {
             lastActive.set(user.id, Date.now());
           } else speaking.delete(user.id);
           broadcastToChannel(channelById(channelId)!, { type: 'voice_speaking', channelId, userId: user.id, speaking: on });
+        } else if (msg.type === 'idle') {
+          // Nobody has touched this device for a while (or they're back).
+          const before = userIdle(user.id);
+          let idleHere = idleSockets.get(user.id);
+          if (!idleHere) idleSockets.set(user.id, (idleHere = new Set()));
+          if (msg.idle) idleHere.add(ws);
+          else idleHere.delete(ws);
+          if (before !== userIdle(user.id)) sendPresence(user.id);
+        } else if (msg.type === 'activity') {
+          // The game the desktop app sees running, or nothing.
+          const name = typeof msg.name === 'string' ? msg.name.replace(/\s+/g, ' ').trim().slice(0, 64) : '';
+          const was = activities.get(user.id);
+          if ((was?.name ?? '') === name) return;
+          if (name) activities.set(user.id, { name, since: now() });
+          else activities.delete(user.id);
+          sendPresence(user.id);
         } else if (msg.type === 'voice_active') {
           // Touched the app, so they aren't away.
           if (inVoice.has(user.id)) lastActive.set(user.id, Date.now());
@@ -3172,20 +3640,26 @@ export function createApp(opts: AppOptions): Server {
     ws.on('close', () => {
       clearInterval(ping);
       set!.delete(ws);
+      const wasIdle = userIdle(user.id);
+      idleSockets.get(user.id)?.delete(ws);
       if (set!.size === 0) {
         sockets.delete(user.id);
         online.delete(user.id);
+        idleSockets.delete(user.id);
+        activities.delete(user.id);
         setVoice(user.id, null);
-        sendTo(usersSharingServerWith(user.id), { type: 'presence', userId: user.id, online: false });
-      }
+        sendPresence(user.id);
+      } else if (wasIdle !== userIdle(user.id)) sendPresence(user.id);
     });
   };
 
   // Tests set a due time in the past and then check the clock, rather than waiting for it.
-  Object.assign(server, { checkClock: tick, checkAfk });
+  Object.assign(server, { checkClock: tick, checkAfk, sendMissedEmails });
   server.on('close', () => {
     wss.close();
     clearInterval(afkTimer);
+    clearInterval(emailTimer);
+    for (const t of statusTimers.values()) clearTimeout(t);
     if (wakeTimer) clearTimeout(wakeTimer);
   });
   return server;

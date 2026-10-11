@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Burrow</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <meta name="theme-color" content="#2f5743" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Burrow" />
   <link rel="stylesheet" href="style.css" />
   <script src="theme.js"></script>
 </head>
@@ -72,8 +77,13 @@
         <svg viewBox="0 0 24 24"><path d="M12 2c.5 3 2.4 5 4.2 6.8A7.5 7.5 0 0 1 12 22a7.5 7.5 0 0 1-4.6-13.4c.2 1.6 1 2.9 2.3 3.6C9.6 8.5 10.4 5 12 2Z"/></svg>
         <span id="campfire-chip-label"></span><span id="campfire-chip-count"></span>
       </button>
+      <button class="icon-btn inbox-btn" id="inbox-btn" title="Mentions and replies" aria-label="Mentions and replies">
+        <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 4.6 18.9l-.9-1.8A8 8 0 1 1 20 12v1.2a1.8 1.8 0 0 1-3.6 0V7.5h-2v.9A5 5 0 1 0 15 15.5a3.8 3.8 0 0 0 7-2.3V12A10 10 0 0 0 12 2Zm0 13a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z"/></svg>
+        <span class="badge hidden" id="inbox-badge"></span>
+      </button>
       <button class="me-btn" id="me-btn" aria-haspopup="menu" aria-expanded="false" title="You">
         <span class="avatar" id="me-avatar"></span>
+        <span class="status-dot" id="me-dot"></span>
       </button>
     </header>
 
@@ -323,7 +333,7 @@
         <svg viewBox="0 0 24 24"><path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9l-5 4V5a1 1 0 0 1 1-1Z"/></svg>Messages
       </button>
       <button class="tab" id="tab-you">
-        <span class="avatar" id="tab-avatar"></span>You
+        <span class="tab-avatar-wrap"><span class="avatar" id="tab-avatar"></span><span class="status-dot" id="tab-dot"></span></span>You
       </button>
     </nav>
   </div>
@@ -334,6 +344,13 @@
       <span id="me-name" class="me-name"></span>
       <span id="conn-status" class="conn">Connecting…</span>
     </div>
+    <div class="status-picks" role="group" aria-label="Your status">
+      <button role="menuitemradio" data-status="online"><span class="status-dot online"></span><span>Online</span></button>
+      <button role="menuitemradio" data-status="away"><span class="status-dot away"></span><span>Away</span></button>
+      <button role="menuitemradio" data-status="dnd"><span class="status-dot dnd"></span><span>Do not disturb<small>No sounds or alerts</small></span></button>
+    </div>
+    <button role="menuitem" id="custom-status-btn">Set a custom status</button>
+    <button role="menuitem" id="inbox-menu-btn">Mentions and replies</button>
     <button role="menuitem" id="account-btn">Your account</button>
     <button role="menuitem" id="saved-btn">Saved messages</button>
     <button role="menuitem" id="scheduled-btn">Scheduled messages</button>

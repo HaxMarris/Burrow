@@ -1,10 +1,14 @@
 // Desktop wrapper: loads the bundled chat client, which asks the user for the
 // server address on first launch and remembers it.
-const { app, BrowserWindow, shell, Menu, desktopCapturer, ipcMain } = require('electron');
+const { app, BrowserWindow, shell, Menu, desktopCapturer, ipcMain, nativeImage, powerMonitor } = require('electron');
 const path = require('node:path');
 const { startUpdateChecks } = require('./updater');
 const appAudio = require('./app-audio');
 const hotkeys = require('./hotkeys');
+const activity = require('./activity');
+
+// The page asks how long the computer has been left alone, to show you as away.
+ipcMain.on('idle-seconds', (e) => { e.returnValue = powerMonitor.getSystemIdleTime(); });
 
 // The page asks once, at start, whether it can share just one program's sound.
 ipcMain.on('app-audio-supported', (e) => { e.returnValue = appAudio.supported(); });
@@ -39,6 +43,18 @@ function createWindow() {
     if (!win.isDestroyed()) win.webContents.send('hotkey', name, down);
   }));
   ipcMain.on('hotkeys-permission', () => hotkeys.askPermission());
+
+  // The game you're playing, for "Playing …" under your name.
+  const games = activity.watch((name) => { if (!win.isDestroyed()) win.webContents.send('activity', name); });
+  ipcMain.on('activity-refresh', () => games.repeat());
+  win.webContents.on('did-finish-load', () => games.repeat());
+
+  // Unread mentions on the dock or taskbar icon. Windows shows a small picture the page draws.
+  ipcMain.on('set-badge', (_e, count, image) => {
+    if (process.platform === 'win32') {
+      win.setOverlayIcon(count && image ? nativeImage.createFromDataURL(image) : null, count ? `${count} unread` : '');
+    } else app.setBadgeCount(count);
+  });
   win.webContents.on('did-start-navigation', (e) => { if (e.isMainFrame && !e.isSameDocument) hotkeys.stop(); });
 
   // YouTube's player (listen together) won't play without knowing which site it's on, and an
@@ -52,6 +68,9 @@ function createWindow() {
   win.on('closed', () => {
     appAudio.stop();
     hotkeys.stop();
+    games.stop();
+    ipcMain.removeAllListeners('activity-refresh');
+    ipcMain.removeAllListeners('set-badge');
     ipcMain.removeHandler('hotkeys-set');
     ipcMain.removeAllListeners('hotkeys-permission');
     ipcMain.removeHandler('app-audio-start');

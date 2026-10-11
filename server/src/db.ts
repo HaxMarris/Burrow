@@ -148,6 +148,7 @@ export function openDb(file: string): Db {
   addChatExtras(db);
   addOrganization(db);
   addVoiceExtras(db);
+  addPresence(db);
   return db;
 }
 
@@ -375,10 +376,73 @@ function addVoiceExtras(db: Db) {
   `);
 }
 
+/** Added with the notifications and presence update: status, push, the mentions inbox, quiet hours and email. */
+function addPresence(db: Db) {
+  addColumn(db, 'users', 'status', "TEXT NOT NULL DEFAULT 'online'"); // 'online', 'away' or 'dnd'
+  addColumn(db, 'users', 'status_text', 'TEXT');
+  addColumn(db, 'users', 'status_emoji', 'TEXT');
+  addColumn(db, 'users', 'status_until', 'INTEGER'); // when the custom status clears itself
+  addColumn(db, 'users', 'quiet_start', 'INTEGER'); // minutes after midnight, in time_zone
+  addColumn(db, 'users', 'quiet_end', 'INTEGER');
+  addColumn(db, 'users', 'time_zone', 'TEXT');
+  addColumn(db, 'users', 'email', 'TEXT');
+  addColumn(db, 'users', 'email_verified', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'users', 'email_mentions', 'INTEGER NOT NULL DEFAULT 1');
+  addColumn(db, 'users', 'email_code', 'TEXT');
+  addColumn(db, 'users', 'email_code_expires', 'INTEGER');
+  addColumn(db, 'users', 'last_mention_email', 'INTEGER');
+  addColumn(db, 'messages', 'pings', 'TEXT'); // {"everyone":1,"here":1,"roles":[ids]} when the author may ping those
+  const hadMentions = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mentions'").get();
+  db.exec(`
+    -- Phones and browsers that get alerts while Burrow is closed.
+    CREATE TABLE IF NOT EXISTS push_subs (
+      id         INTEGER PRIMARY KEY,
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      endpoint   TEXT NOT NULL UNIQUE,
+      p256dh     TEXT NOT NULL,
+      auth       TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    -- Who each message is for: @name, a reply, @everyone, @here or one of their roles.
+    CREATE TABLE IF NOT EXISTS mentions (
+      message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      PRIMARY KEY (message_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS mentions_by_user ON mentions(user_id, message_id);
+    -- Mentions waiting to be emailed if they're still unread after a while.
+    CREATE TABLE IF NOT EXISTS missed_mentions (
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, message_id)
+    );
+  `);
+  if (hadMentions) return;
+  // Older messages: @names and replies, so the inbox starts full.
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const add = db.prepare('INSERT OR IGNORE INTO mentions (message_id, user_id) VALUES (?, ?)');
+  const servers = db.prepare("SELECT id FROM servers WHERE kind = 'burrow'").all() as { id: number }[];
+  for (const { id } of servers) {
+    const members = db.prepare('SELECT u.id, u.username FROM members m JOIN users u ON u.id = m.user_id WHERE m.server_id = ?').all(id) as { id: number; username: string }[];
+    const named = members.map((m) => ({ id: m.id, re: new RegExp(`@${escape(m.username)}\\b`, 'i') }));
+    const rows = db
+      .prepare(
+        `SELECT m.id, m.author_id AS author, m.content, r.author_id AS repliedTo FROM messages m JOIN channels c ON c.id = m.channel_id
+         LEFT JOIN messages r ON r.id = m.reply_to WHERE c.server_id = ? AND (m.content LIKE '%@%' OR m.reply_to IS NOT NULL)`,
+      )
+      .all(id) as { id: number; author: number | null; content: string; repliedTo: number | null }[];
+    for (const row of rows) {
+      for (const n of named) if (n.id !== row.author && n.re.test(row.content)) add.run(row.id, n.id);
+      if (row.repliedTo && row.repliedTo !== row.author && members.some((m) => m.id === row.repliedTo)) add.run(row.id, row.repliedTo);
+    }
+  }
+}
+
 /** Every new burrow starts with a Moderator role, which the host can change or delete. */
 export function addModeratorRole(db: Db, serverId: number) {
   const r = db
-    .prepare("INSERT INTO roles (server_id, name, color, perms, position, created_at) VALUES (?, 'Moderator', '#4f8a5b', 'rooms,messages,remove,ban,voice', 1, ?)")
+    .prepare("INSERT INTO roles (server_id, name, color, perms, position, created_at) VALUES (?, 'Moderator', '#4f8a5b', 'rooms,messages,remove,ban,voice,everyone', 1, ?)")
     .run(serverId, Date.now());
   return Number(r.lastInsertRowid);
 }
