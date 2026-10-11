@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import { writeFile, mkdir, unlink, stat, copyFile } from 'node:fs/promises';
+import { writeFile, mkdir, unlink, stat, copyFile, readFile } from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { extname, join, normalize } from 'node:path';
@@ -12,6 +12,7 @@ import { gifSearch, download, type GifOptions } from './gifs.ts';
 import { fetchEmbed, fetchImage, linksIn, type Embed, type EmbedOptions } from './embeds.ts';
 import { newVapidKeys, sendPush, vapidKeysWork, type VapidKeys } from './push.ts';
 import { looksLikeEmail, sendMail, type MailConfig } from './mail.ts';
+import { checkTotp, hashRecovery, newRecoveryCodes, newTotpSecret, verifyAssertion, verifyRegistration, ZipWriter } from './account.ts';
 
 export interface AppOptions {
   db: Db;
@@ -39,7 +40,7 @@ export interface AppOptions {
   /** How long a mention waits unread before it's emailed (default 15 minutes). */
 }
 
-type User = { id: number; username: string; avatar: string | null };
+type User = { id: number; username: string; displayName: string | null; avatar: string | null };
 const PERMS = ['rooms', 'messages', 'remove', 'ban', 'roles', 'burrow', 'emoji', 'voice', 'everyone', 'pin', 'invites', 'timeout', 'audit'] as const;
 type Perm = (typeof PERMS)[number];
 type Standing = { host: boolean; rank: number; perms: Set<Perm>; roleIds: number[] };
@@ -163,7 +164,7 @@ export function createApp(opts: AppOptions): Server {
     if (!token) return undefined;
     const row = db
       .prepare(
-        `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar, COALESCE(s.last_used_at, s.created_at) AS lastUsed
+        `SELECT u.id, u.username, u.display_name AS displayName, ${avatarUrl('u.avatar')} AS avatar, COALESCE(s.last_used_at, s.created_at) AS lastUsed
          FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`,
       )
       .get(token) as (User & { lastUsed: number }) | undefined;
@@ -202,6 +203,14 @@ export function createApp(opts: AppOptions): Server {
     if (failures.size > 10000) for (const [k, f] of failures) if (f.until <= t) failures.delete(k);
   };
   const clearTries = (key: string) => failures.delete(key);
+
+  const USER_COLS = `id, username, display_name AS displayName, ${avatarUrl('avatar')} AS avatar`;
+  const userById = (id: number) => db.prepare(`SELECT ${USER_COLS} FROM users WHERE id = ?`).get(id) as User | undefined;
+  /** The name someone goes by in a burrow: their nickname there, else their display name, else their username. */
+  const nameSql = (userAlias: string, serverIdSql: string) =>
+    `COALESCE((SELECT nn.nickname FROM members nn WHERE nn.server_id = ${serverIdSql} AND nn.user_id = ${userAlias}.id), ${userAlias}.display_name, ${userAlias}.username)`;
+  const nameIn = (serverId: number, userId: number) =>
+    (db.prepare(`SELECT ${nameSql('u', '?')} AS name FROM users u WHERE u.id = ?`).get(serverId, userId) as { name: string } | undefined)?.name ?? 'Someone';
 
   const isMember = (serverId: number, userId: number) =>
     !!db.prepare('SELECT 1 FROM members WHERE server_id = ? AND user_id = ?').get(serverId, userId);
@@ -283,7 +292,7 @@ export function createApp(opts: AppOptions): Server {
     if (id == null) return null;
     const m = db
       .prepare(
-        `SELECT m.id, m.content, u.id AS authorId, u.username AS author,
+        `SELECT m.id, m.content, u.id AS authorId, ${nameSql('u', '(SELECT c.server_id FROM channels c WHERE c.id = m.channel_id)')} AS author,
                 EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id) AS hasAttachments
          FROM messages m JOIN users u ON u.id = m.author_id WHERE m.id = ?`,
       )
@@ -321,7 +330,8 @@ export function createApp(opts: AppOptions): Server {
   // Every message is read with these columns, then filled in by withAttachments.
   const MESSAGE_SELECT = `SELECT m.id, m.channel_id AS channelId, m.content, m.created_at AS createdAt, m.edited_at AS editedAt,
       m.reply_to AS replyToId, m.pinned_at AS pinnedAt, m.forwarded, m.sticker_id AS stickerId, m.embeds_off AS embedsOff, m.pings, m.live,
-      u.id AS authorId, u.username AS author, ${avatarUrl('u.avatar')} AS authorAvatar
+      u.id AS authorId, ${nameSql('u', '(SELECT c.server_id FROM channels c WHERE c.id = m.channel_id)')} AS author, u.username AS authorUsername,
+      ${avatarUrl('u.avatar')} AS authorAvatar
     FROM messages m JOIN users u ON u.id = m.author_id`;
 
   const messageById = (id: number) => {
@@ -389,10 +399,12 @@ export function createApp(opts: AppOptions): Server {
       .all(serverId) as { user_id: number; role_id: number }[];
     const members = db
       .prepare(
-        `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar, m.voice_muted AS voiceMuted, m.timeout_until AS timeoutUntil FROM members m JOIN users u ON u.id = m.user_id
+        `SELECT u.id, u.username, u.display_name AS displayName, m.nickname, u.accent, ${avatarUrl('u.avatar')} AS avatar,
+                u.deleted_at IS NOT NULL AS deleted, m.voice_muted AS voiceMuted, m.timeout_until AS timeoutUntil
+         FROM members m JOIN users u ON u.id = m.user_id
          WHERE m.server_id = ? ORDER BY u.username`,
       )
-      .all(serverId) as (User & { voiceMuted: number; timeoutUntil: number | null })[];
+      .all(serverId) as (User & { voiceMuted: number; timeoutUntil: number | null; deleted: number })[];
     const accepted = (db.prepare('SELECT rules_accepted_at FROM members WHERE server_id = ? AND user_id = ?').get(serverId, viewerId) as
       | { rules_accepted_at: number | null }
       | undefined)?.rules_accepted_at;
@@ -415,15 +427,18 @@ export function createApp(opts: AppOptions): Server {
         const roleIds = memberRoles.filter((r) => r.user_id === m.id).map((r) => r.role_id);
         const host = server.kind === 'burrow' && m.id === server.ownerId;
         const powers = roleIds.some((id) => (roles.find((r) => r.id === id)?.perms.length ?? 0) > 0);
-        return { ...m, voiceMuted: !!m.voiceMuted, timeoutUntil: (m.timeoutUntil ?? 0) > now() ? m.timeoutUntil : null, roleIds, role: host ? 'host' : powers ? 'mod' : 'member', online: online.has(m.id), ...presenceOf(m.id) };
+        return { ...m, deleted: !!m.deleted, voiceMuted: !!m.voiceMuted, timeoutUntil: (m.timeoutUntil ?? 0) > now() ? m.timeoutUntil : null, roleIds, role: host ? 'host' : powers ? 'mod' : 'member', online: online.has(m.id), ...presenceOf(m.id) };
       }),
     };
   };
 
-  const startSession = (user: User) => {
+  /** Logs someone in on this device. `from` is the request, so "your devices" can say which one it is. */
+  const startSession = (user: User, from?: { ip: string; ua: string }) => {
     const token = newToken();
-    db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)').run(token, user.id, now());
-    return { token, user };
+    db.prepare('INSERT INTO sessions (token, user_id, created_at, last_used_at, device, ip) VALUES (?, ?, ?, ?, ?, ?)').run(
+      token, user.id, now(), now(), from?.ua.slice(0, 300) ?? null, from?.ip ?? null,
+    );
+    return { token, user: userById(user.id) ?? user };
   };
 
   const cleanName = (value: unknown, field: string, max = 64) => {
@@ -620,6 +635,7 @@ export function createApp(opts: AppOptions): Server {
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
     const problem = postProblem(channel, user.id);
     if (problem) throw new HttpError(403, problem);
+    dmBlockCheck(channel.serverId, user.id);
     const flagged = filterCheck(channel, user.id, typeof input.content === 'string' ? input.content : '');
     // Slow mode: people who manage rooms or messages aren't held back, and nor are scheduled messages.
     if (channel.slow && !extras.scheduled && !can(channel.serverId, user.id, 'rooms') && !can(channel.serverId, user.id, 'messages')) {
@@ -688,7 +704,7 @@ export function createApp(opts: AppOptions): Server {
 
   // ---- HTTP routes --------------------------------------------------------
 
-  type Handler = (ctx: { user: User; params: string[]; body: Json; url: URL; token: string | undefined; ip: string }) => unknown;
+  type Handler = (ctx: { user: User; params: string[]; body: Json; url: URL; token: string | undefined; ip: string; ua: string; host: string }) => unknown;
   type Route = { method: string; pattern: RegExp; auth: boolean; handler: Handler };
   const routes: Route[] = [];
   const route = (method: string, path: string, handler: Handler, auth = true) =>
@@ -710,7 +726,7 @@ export function createApp(opts: AppOptions): Server {
   route(
     'POST',
     '/api/register',
-    ({ body, ip }) => {
+    ({ body, ip, ua }) => {
       checkTries([`register-ip:${ip}`], 10);
       const username = cleanName(body.username, 'Username', 32);
       if (!/^[\w.-]+$/.test(username)) throw new HttpError(400, 'Username may only use letters, numbers, _ . -');
@@ -725,7 +741,7 @@ export function createApp(opts: AppOptions): Server {
       const r = db
         .prepare('INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)')
         .run(username, hashPassword(body.password), now());
-      return startSession({ id: Number(r.lastInsertRowid), username, avatar: null });
+      return startSession(userById(Number(r.lastInsertRowid))!, { ip, ua });
     },
     false,
   );
@@ -733,20 +749,20 @@ export function createApp(opts: AppOptions): Server {
   route(
     'POST',
     '/api/login',
-    ({ body, ip }) => {
+    ({ body, ip, ua }) => {
       const name = String(body.username ?? '').toLowerCase();
       const keys = [`login-user:${name}`, `login-ip:${ip}`];
       checkTries(keys.slice(0, 1), 10);
       checkTries(keys.slice(1), 30);
       const row = db
-        .prepare(`SELECT id, username, ${avatarUrl('avatar')} AS avatar, password_hash FROM users WHERE username = ?`)
-        .get(String(body.username ?? '')) as (User & { password_hash: string }) | undefined;
+        .prepare(`SELECT id, password_hash FROM users WHERE username = ? AND deleted_at IS NULL`)
+        .get(String(body.username ?? '')) as { id: number; password_hash: string } | undefined;
       if (!row || !verifyPassword(String(body.password ?? ''), row.password_hash)) {
         failedTry(keys);
         throw new HttpError(401, 'Wrong username or password');
       }
       clearTries(keys[0]);
-      return startSession({ id: row.id, username: row.username, avatar: row.avatar });
+      return loginOrAskCode(row.id, { ip, ua });
     },
     false,
   );
@@ -843,11 +859,13 @@ export function createApp(opts: AppOptions): Server {
          WHERE a.user_id = ? AND b.user_id = ? AND s.kind = 'burrow'`,
       )
       .get(a, b);
-  /** The people you're adding to a conversation: real, not you, and sharing a burrow with you. */
+  /** The people you're adding to a conversation: real, not you, friends or sharing a burrow with you, and not blocked either way. */
   const dmPeople = (user: User, ids: unknown) => {
     const list = [...new Set((Array.isArray(ids) ? ids : []).map(Number))].filter((id) => id !== user.id);
-    for (const id of list)
-      if (!sharesBurrow(user.id, id)) throw new HttpError(403, 'You can only message people who share a burrow with you');
+    for (const id of list) {
+      if (!sharesBurrow(user.id, id) && !areFriends(user.id, id)) throw new HttpError(403, 'You can only message friends and people who share a burrow with you');
+      if (blockedEitherWay(user.id, id)) throw new HttpError(403, "You can't message this person");
+    }
     return list;
   };
   const isGroupDm = (serverId: number) => !!db.prepare("SELECT 1 FROM servers WHERE id = ? AND kind = 'dm' AND dm_key IS NULL").get(serverId);
@@ -938,23 +956,25 @@ export function createApp(opts: AppOptions): Server {
       | { owner_id: number }
       | undefined;
     if (!owner || !isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
-    if (owner.owner_id === user.id) {
-      broadcastToServer(serverId, { type: 'server_deleted', serverId });
-      for (const id of voiceRoomIds(serverId)) closeVoiceRoom(id);
-      removeFiles(
-        db
-          .prepare('SELECT a.id FROM attachments a JOIN channels c ON c.id = a.channel_id WHERE c.server_id = ?')
-          .all(serverId) as Json[],
-      );
-      removeBurrowPicture(serverId);
-      removeBurrowPicture(serverId, 'banner');
-      for (const e of db.prepare('SELECT file FROM custom_emoji WHERE server_id = ?').all(serverId) as { file: string }[]) removeEmojiFile(e.file);
-      db.prepare('DELETE FROM servers WHERE id = ?').run(serverId);
-    } else {
-      removeMember(serverId, user.id);
-    }
+    if (owner.owner_id === user.id) deleteBurrow(serverId);
+    else removeMember(serverId, user.id);
     return { ok: true };
   });
+
+  /** A host leaving deletes the burrow, with its files, pictures and emoji. */
+  const deleteBurrow = (serverId: number) => {
+    broadcastToServer(serverId, { type: 'server_deleted', serverId });
+    for (const id of voiceRoomIds(serverId)) closeVoiceRoom(id);
+    removeFiles(
+      db
+        .prepare('SELECT a.id FROM attachments a JOIN channels c ON c.id = a.channel_id WHERE c.server_id = ?')
+        .all(serverId) as Json[],
+    );
+    removeBurrowPicture(serverId);
+    removeBurrowPicture(serverId, 'banner');
+    for (const e of db.prepare('SELECT file FROM custom_emoji WHERE server_id = ?').all(serverId) as { file: string }[]) removeEmojiFile(e.file);
+    db.prepare('DELETE FROM servers WHERE id = ?').run(serverId);
+  };
 
   /** Takes someone out of a burrow: out of its voice rooms, its private rooms and its member list. */
   const removeMember = (serverId: number, userId: number) => {
@@ -1280,7 +1300,7 @@ export function createApp(opts: AppOptions): Server {
     if (!canSee(to, targetId)) throw new HttpError(403, "They can't see that room");
     if (from.id !== to.id) {
       audit(to.serverId, user.id, 'voice_move', targetId, `#${from.name} › #${to.name}`);
-      moveTo(targetId, to.id, { by: user.username });
+      moveTo(targetId, to.id, { by: nameIn(to.serverId, user.id) });
     }
     return { ok: true };
   });
@@ -1290,7 +1310,7 @@ export function createApp(opts: AppOptions): Server {
     const from = channelById(inVoice.get(targetId) ?? -1);
     if (!from) throw new HttpError(400, "They aren't at a fire");
     voiceTarget(from.serverId, user, targetId);
-    sendTo([targetId], { type: 'voice_kicked', by: user.username });
+    sendTo([targetId], { type: 'voice_kicked', by: user.displayName || user.username });
     audit(from.serverId, user.id, 'voice_disconnect', targetId, `#${from.name}`);
     kickFromVoice(targetId);
     return { ok: true };
@@ -1489,7 +1509,7 @@ export function createApp(opts: AppOptions): Server {
     }
     const inCall = new Set(usersInVoice(channelId));
     const others = serverMemberIds(serverId).filter((id) => id !== user.id && !inCall.has(id));
-    sendTo(others, { type: 'ring', serverId, channelId, from: { id: user.id, username: user.username } });
+    sendTo(others, { type: 'ring', serverId, channelId, from: { id: user.id, username: user.displayName || user.username } });
     return { channelId };
   });
   // Not picking up: the people in the call hear about it, and your other devices stop ringing.
@@ -1497,7 +1517,7 @@ export function createApp(opts: AppOptions): Server {
     const serverId = Number(params[0]);
     if (!isMember(serverId, user.id)) throw new HttpError(404, 'Conversation not found');
     const channelId = callRoom(serverId);
-    if (channelId !== undefined) sendTo(usersInVoice(channelId), { type: 'ring_declined', serverId, userId: user.id, username: user.username });
+    if (channelId !== undefined) sendTo(usersInVoice(channelId), { type: 'ring_declined', serverId, userId: user.id, username: user.displayName || user.username });
     sendTo([user.id], { type: 'ring_stop', serverId });
     return { ok: true };
   });
@@ -1619,7 +1639,7 @@ export function createApp(opts: AppOptions): Server {
     const before = Number(url.searchParams.get('before')) || Number.MAX_SAFE_INTEGER;
     const rows = db
       .prepare(
-        `SELECT a.id, a.action, a.detail, a.created_at AS createdAt, a.actor_id AS actorId, ua.username AS actor, a.target_id AS targetId, ut.username AS target
+        `SELECT a.id, a.action, a.detail, a.created_at AS createdAt, a.actor_id AS actorId, COALESCE(ua.display_name, ua.username) AS actor, a.target_id AS targetId, COALESCE(ut.display_name, ut.username) AS target
          FROM audit_log a LEFT JOIN users ua ON ua.id = a.actor_id LEFT JOIN users ut ON ut.id = a.target_id
          WHERE a.server_id = ? AND a.id < ? ORDER BY a.id DESC LIMIT 51`,
       )
@@ -1770,7 +1790,7 @@ export function createApp(opts: AppOptions): Server {
     return db
       .prepare(
         `SELECT r.id, r.message_id AS messageId, r.channel_id AS channelId, c.name AS channelName, r.content, r.reason, r.created_at AS createdAt,
-                r.author_id AS authorId, ua.username AS author, ${avatarUrl('ua.avatar')} AS authorAvatar, ur.username AS reporter,
+                r.author_id AS authorId, COALESCE(ua.display_name, ua.username) AS author, ${avatarUrl('ua.avatar')} AS authorAvatar, ur.username AS reporter,
                 r.resolved_at AS resolvedAt, uv.username AS resolvedBy
          FROM reports r LEFT JOIN users ua ON ua.id = r.author_id LEFT JOIN users ur ON ur.id = r.reporter_id
          LEFT JOIN users uv ON uv.id = r.resolved_by LEFT JOIN channels c ON c.id = r.channel_id
@@ -1924,9 +1944,7 @@ export function createApp(opts: AppOptions): Server {
     const old = db.prepare('SELECT avatar FROM users WHERE id = ?').get(user.id) as { avatar: string | null };
     db.prepare('UPDATE users SET avatar = ? WHERE id = ?').run(file, user.id);
     if (old.avatar && opts.uploadDir) unlink(avatarPath(old.avatar)).catch(() => {});
-    const updated = { id: user.id, username: user.username, avatar: file && `/api/avatars/${file}` };
-    sendTo(new Set([user.id, ...usersSharingServerWith(user.id)]), { type: 'user_updated', user: updated });
-    return updated;
+    return userChanged(user.id);
   };
 
   /** The logged-in uploader of a picture, which is the raw request body. */
@@ -2127,7 +2145,7 @@ export function createApp(opts: AppOptions): Server {
     if (!c) return null;
     const dm = c.serverKind === 'dm';
     const partnerName = dm
-      ? (db.prepare('SELECT u.username FROM members m JOIN users u ON u.id = m.user_id WHERE m.server_id = ? AND m.user_id != ?').get(c.serverId as number, viewerId) as { username: string } | undefined)?.username
+      ? (db.prepare('SELECT COALESCE(u.display_name, u.username) AS name FROM members m JOIN users u ON u.id = m.user_id WHERE m.server_id = ? AND m.user_id != ?').get(c.serverId as number, viewerId) as { name: string } | undefined)?.name
       : null;
     return {
       serverId: c.serverId,
@@ -2199,6 +2217,8 @@ export function createApp(opts: AppOptions): Server {
         .all(channel.serverId, ...pings.roles) as { user_id: number }[];
       for (const { user_id } of inRoles) if (audience.includes(user_id)) forWhom.add(user_id);
     }
+    // Nobody is pinged by someone they've blocked.
+    for (const id of forWhom) if (blocked(id, authorId)) forWhom.delete(id);
     const add = db.prepare('INSERT OR IGNORE INTO mentions (message_id, user_id) VALUES (?, ?)');
     for (const id of forWhom) add.run(messageId, id);
     return forWhom;
@@ -2228,7 +2248,7 @@ export function createApp(opts: AppOptions): Server {
     return { status, custom: customOf(r), activity };
   };
   const sendPresence = (userId: number) =>
-    sendTo(usersSharingServerWith(userId), { type: 'presence', userId, online: online.has(userId), ...presenceOf(userId) });
+    sendTo(new Set([...usersSharingServerWith(userId), ...friendIds(userId)]), { type: 'presence', userId, online: online.has(userId), ...presenceOf(userId) });
   // A custom status that runs out disappears for everyone at that moment.
   const statusTimers = new Map<number, ReturnType<typeof setTimeout>>();
   const expireStatusAt = (userId: number, until: number | null) => {
@@ -2240,10 +2260,13 @@ export function createApp(opts: AppOptions): Server {
     statusTimers.set(userId, t);
   };
 
-  type MeRow = StatusRow & { quiet_start: number | null; quiet_end: number | null; time_zone: string | null; email: string | null; email_verified: number };
+  type MeRow = StatusRow & {
+    quiet_start: number | null; quiet_end: number | null; time_zone: string | null; email: string | null; email_verified: number;
+    totp_secret: string | null; recovery_codes: string;
+  };
   const meRow = (userId: number) =>
     db
-      .prepare('SELECT status, status_text, status_emoji, status_until, quiet_start, quiet_end, time_zone, email, email_verified FROM users WHERE id = ?')
+      .prepare('SELECT status, status_text, status_emoji, status_until, quiet_start, quiet_end, time_zone, email, email_verified, totp_secret, recovery_codes FROM users WHERE id = ?')
       .get(userId) as MeRow;
   /** You, as your own apps see you: settings included. */
   const meJson = (user: User) => {
@@ -2256,6 +2279,10 @@ export function createApp(opts: AppOptions): Server {
       quietHours: r.quiet_start === null || r.quiet_end === null ? null : { start: r.quiet_start, end: r.quiet_end, timeZone: r.time_zone },
       email: r.email,
       emailVerified: !!r.email_verified,
+      ...profileOf(user.id),
+      twoStep: !!r.totp_secret,
+      recoveryCodesLeft: (JSON.parse(r.recovery_codes) as string[]).length,
+      blockedIds: blockedBy(user.id),
     };
   };
   const validTimeZone = (tz: unknown) => {
@@ -2422,7 +2449,7 @@ export function createApp(opts: AppOptions): Server {
     const room = channel.kind === 'thread' && channel.parentId !== null ? channel.parentId : channel.id;
     const place = placeOf(channel.id, message.authorId as number);
     for (const id of channelAudience(channel)) {
-      if (id === message.authorId) continue;
+      if (id === message.authorId || blocked(id, message.authorId as number)) continue;
       const forThem = dm || forWhom.has(id);
       const prefs = notifyPrefsOf(id, channel.serverId);
       const roomPref = prefs.get(room), burrowPref = prefs.get(0);
@@ -2560,7 +2587,7 @@ export function createApp(opts: AppOptions): Server {
   route(
     'POST',
     '/api/password/reset',
-    ({ body, ip }) => {
+    ({ body, ip, ua }) => {
       const name = String(body.username ?? '').trim();
       checkTries([`reset-ip:${ip}`], 10);
       const u = db.prepare(`SELECT id, username, ${avatarUrl('avatar')} AS avatar, reset_code, reset_expires, reset_tries FROM users WHERE username = ?`).get(name) as
@@ -2580,7 +2607,8 @@ export function createApp(opts: AppOptions): Server {
       db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id);
       for (const ws of sockets.get(u.id) ?? []) ws.close(4001, 'Password changed');
       clearTries(`login-user:${name.toLowerCase()}`);
-      return startSession({ id: u.id, username: u.username, avatar: u.avatar });
+      // With two-step login on, the new password still needs the code from their phone.
+      return loginOrAskCode(u.id, { ip, ua });
     },
     false,
   );
@@ -2664,8 +2692,9 @@ export function createApp(opts: AppOptions): Server {
       const dms = db.prepare("SELECT s.id FROM members m JOIN servers s ON s.id = m.server_id WHERE m.user_id = ? AND s.kind = 'dm'").all(user.id) as { id: number }[];
       for (const { id } of dms) sendServerUpdate(id);
     }
+    updateProfile(user, body);
     updateMyPresence(user, body);
-    return meJson(user);
+    return meJson(userById(user.id)!);
   });
 
   // ---- pinned messages ----
@@ -2808,7 +2837,7 @@ export function createApp(opts: AppOptions): Server {
     for (const s of due) {
       db.prepare('DELETE FROM scheduled_messages WHERE id = ?').run(s.id as number);
       const uid = s.user_id as number;
-      const user = db.prepare(`SELECT id, username, ${avatarUrl('avatar')} AS avatar FROM users WHERE id = ?`).get(uid) as User | undefined;
+      const user = userById(uid);
       if (!user) continue;
       // The message it answered may be gone by now; it's sent anyway, as a plain message.
       const replyStill = s.reply_to != null && db.prepare('SELECT 1 FROM messages WHERE id = ? AND channel_id = ?').get(s.reply_to as number, s.channel_id as number);
@@ -3738,6 +3767,607 @@ export function createApp(opts: AppOptions): Server {
     if (next !== null) wakeAt(next);
   }
 
+  // ---- profiles: names, about-me cards and nicknames ----------------------
+
+  const MAX_BIO = 190;
+  const profileOf = (userId: number) => {
+    const r = db.prepare('SELECT display_name, bio, banner, accent, created_at FROM users WHERE id = ?').get(userId) as
+      | { display_name: string | null; bio: string; banner: string | null; accent: string | null; created_at: number }
+      | undefined;
+    return {
+      displayName: r?.display_name ?? null,
+      bio: r?.bio ?? '',
+      banner: r?.banner ? `/api/avatars/${r.banner}` : null,
+      accent: r?.accent ?? null,
+      joinedAt: r?.created_at ?? null,
+    };
+  };
+
+  /** Tells everyone who can see this person that their name, picture or card changed. */
+  const userChanged = (userId: number) => {
+    const u = userById(userId)!;
+    const p = profileOf(userId);
+    const updated = { ...u, accent: p.accent };
+    sendTo(new Set([userId, ...usersSharingServerWith(userId), ...friendIds(userId), ...pendingIds(userId)]), { type: 'user_updated', user: updated });
+    sendTo([userId], { type: 'me_updated', me: meJson(u) });
+    return updated;
+  };
+
+  /** Display name, bio and accent colour, from PATCH /api/me. */
+  const updateProfile = (user: User, body: Json) => {
+    let changed = false;
+    if (body.displayName !== undefined) {
+      const name = typeof body.displayName === 'string' ? body.displayName.replace(/\s+/g, ' ').trim() : '';
+      if (name.length > 32) throw new HttpError(400, 'Keep your display name to 32 characters');
+      db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(name || null, user.id);
+      changed = true;
+    }
+    if (body.bio !== undefined) {
+      const bio = typeof body.bio === 'string' ? body.bio.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim() : '';
+      if (bio.length > MAX_BIO) throw new HttpError(400, `Keep your about me to ${MAX_BIO} characters`);
+      db.prepare('UPDATE users SET bio = ? WHERE id = ?').run(bio, user.id);
+      changed = true;
+    }
+    if (body.accent !== undefined) {
+      db.prepare('UPDATE users SET accent = ? WHERE id = ?').run(body.accent === null ? null : cleanColor(body.accent), user.id);
+      changed = true;
+    }
+    if (changed) userChanged(user.id);
+  };
+
+  const setBannerFile = (user: User, file: string | null) => {
+    const old = db.prepare('SELECT banner FROM users WHERE id = ?').get(user.id) as { banner: string | null };
+    db.prepare('UPDATE users SET banner = ? WHERE id = ?').run(file, user.id);
+    if (old.banner && opts.uploadDir) unlink(avatarPath(old.banner)).catch(() => {});
+    userChanged(user.id);
+    return meJson(user);
+  };
+  const handleBannerUpload = async (req: IncomingMessage, res: ServerResponse) => {
+    const user = pictureUploader(req);
+    send(res, 200, setBannerFile(user, await savePicture(req, 'avatars', 'Banners')));
+  };
+  route('DELETE', '/api/me/banner', ({ user }) => setBannerFile(user, null));
+
+  /** Someone's card: who they are, what you share, and whether you're friends. */
+  route('GET', '/api/users/:id', ({ user, params }) => {
+    const id = Number(params[0]);
+    const u = userById(id);
+    const knows = id === user.id || usersSharingServerWith(user.id).includes(id) || friendRow(user.id, id);
+    if (!u || !knows) throw new HttpError(404, 'Person not found');
+    const mutual = db
+      .prepare(
+        `SELECT s.id, s.name FROM members a JOIN members b ON a.server_id = b.server_id JOIN servers s ON s.id = a.server_id
+         WHERE a.user_id = ? AND b.user_id = ? AND s.kind = 'burrow' ORDER BY s.name`,
+      )
+      .all(user.id, id);
+    const deleted = !!(db.prepare('SELECT deleted_at FROM users WHERE id = ?').get(id) as { deleted_at: number | null }).deleted_at;
+    return { ...u, ...profileOf(id), deleted, friend: friendState(user.id, id), blocked: blocked(user.id, id), mutualBurrows: id === user.id ? [] : mutual };
+  });
+
+  // Your name in one burrow. Empty goes back to your display name.
+  route('PATCH', '/api/servers/:id/nickname', ({ user, params, body }) => {
+    const serverId = Number(params[0]);
+    if (!isBurrow(serverId) || !isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
+    const nick = typeof body.nickname === 'string' ? body.nickname.replace(/\s+/g, ' ').trim() : '';
+    if (nick.length > 32) throw new HttpError(400, 'Keep your nickname to 32 characters');
+    db.prepare('UPDATE members SET nickname = ? WHERE server_id = ? AND user_id = ?').run(nick || null, serverId, user.id);
+    sendServerUpdate(serverId);
+    return serverSummary(serverId, user.id);
+  });
+
+  // ---- friends and blocking -----------------------------------------------
+
+  const pair = (a: number, b: number) => (a < b ? [a, b] : [b, a]);
+  type FriendRow = { requested_by: number; accepted_at: number | null };
+  const friendRow = (a: number, b: number) =>
+    db.prepare('SELECT requested_by, accepted_at FROM friends WHERE user_a = ? AND user_b = ?').get(...pair(a, b)) as FriendRow | undefined;
+  /** 'friends', 'incoming' (they asked you), 'outgoing' (you asked them) or null. */
+  const friendState = (me: number, other: number) => {
+    const r = friendRow(me, other);
+    return !r ? null : r.accepted_at ? 'friends' : r.requested_by === me ? 'outgoing' : 'incoming';
+  };
+  const areFriends = (a: number, b: number) => !!friendRow(a, b)?.accepted_at;
+  const friendIds = (userId: number) =>
+    (
+      db
+        .prepare('SELECT CASE WHEN user_a = ? THEN user_b ELSE user_a END AS id FROM friends WHERE (user_a = ? OR user_b = ?) AND accepted_at IS NOT NULL')
+        .all(userId, userId, userId) as { id: number }[]
+    ).map((r) => r.id);
+  const pendingIds = (userId: number) =>
+    (
+      db
+        .prepare('SELECT CASE WHEN user_a = ? THEN user_b ELSE user_a END AS id FROM friends WHERE (user_a = ? OR user_b = ?) AND accepted_at IS NULL')
+        .all(userId, userId, userId) as { id: number }[]
+    ).map((r) => r.id);
+  /** Whether `viewer` has blocked `other`. */
+  const blocked = (viewer: number, other: number) => !!db.prepare('SELECT 1 FROM blocks WHERE user_id = ? AND blocked_id = ?').get(viewer, other);
+  const blockedEitherWay = (a: number, b: number) => blocked(a, b) || blocked(b, a);
+  const blockedBy = (userId: number) =>
+    (db.prepare('SELECT blocked_id AS id FROM blocks WHERE user_id = ? ORDER BY created_at').all(userId) as { id: number }[]).map((r) => r.id);
+  /** A one-to-one conversation stops when either person blocks the other, or the other deleted their account. */
+  const dmBlockCheck = (serverId: number, userId: number) => {
+    const s = db.prepare("SELECT dm_key FROM servers WHERE id = ? AND kind = 'dm'").get(serverId) as { dm_key: string | null } | undefined;
+    if (!s?.dm_key) return;
+    const other = s.dm_key.split(':').map(Number).find((id) => id !== userId);
+    if (other === undefined) return;
+    if (blockedEitherWay(userId, other)) throw new HttpError(403, "You can't message this person");
+    if ((db.prepare('SELECT deleted_at FROM users WHERE id = ?').get(other) as { deleted_at: number | null } | undefined)?.deleted_at)
+      throw new HttpError(403, 'This account was deleted');
+  };
+
+  const personJson = (id: number) => {
+    const u = userById(id)!;
+    return { ...u, online: online.has(id), ...presenceOf(id) };
+  };
+  /** Your friends (with who's online), requests both ways, and the people you've blocked. */
+  const friendsOf = (userId: number) => {
+    const rows = db
+      .prepare('SELECT user_a, user_b, requested_by, accepted_at FROM friends WHERE user_a = ? OR user_b = ? ORDER BY COALESCE(accepted_at, created_at) DESC')
+      .all(userId, userId) as (FriendRow & { user_a: number; user_b: number })[];
+    const other = (r: { user_a: number; user_b: number }) => (r.user_a === userId ? r.user_b : r.user_a);
+    return {
+      friends: rows.filter((r) => r.accepted_at).map((r) => personJson(other(r))),
+      incoming: rows.filter((r) => !r.accepted_at && r.requested_by !== userId).map((r) => personJson(other(r))),
+      outgoing: rows.filter((r) => !r.accepted_at && r.requested_by === userId).map((r) => personJson(other(r))),
+      blocked: blockedBy(userId).map((id) => userById(id)!).filter(Boolean),
+    };
+  };
+  const friendsChanged = (...ids: number[]) => {
+    for (const id of ids) sendTo([id], { type: 'friends', ...friendsOf(id) });
+  };
+
+  route('GET', '/api/friends', ({ user }) => friendsOf(user.id));
+
+  // Asks someone to be friends, by username or id. If they already asked you, you're friends.
+  route('POST', '/api/friends', ({ user, body }) => {
+    checkTries([`friend:${user.id}`], 30);
+    failedTry([`friend:${user.id}`], 60 * 60 * 1000); // every request counts, so nobody is flooded
+    const target = (
+      body.userId != null
+        ? db.prepare('SELECT id FROM users WHERE id = ? AND deleted_at IS NULL').get(Number(body.userId))
+        : db.prepare('SELECT id FROM users WHERE username = ? AND deleted_at IS NULL').get(String(body.username ?? '').trim().replace(/^@/, ''))
+    ) as { id: number } | undefined;
+    if (target?.id === user.id) throw new HttpError(400, "You can't add yourself");
+    // The same answer for nobody and for someone who blocked you.
+    if (!target || blocked(target.id, user.id)) throw new HttpError(404, "Couldn't find anyone with that username");
+    if (blocked(user.id, target.id)) throw new HttpError(400, 'Unblock them first');
+    const r = friendRow(user.id, target.id);
+    if (r?.accepted_at) return friendsOf(user.id);
+    if (r && r.requested_by !== user.id) {
+      db.prepare('UPDATE friends SET accepted_at = ? WHERE user_a = ? AND user_b = ?').run(now(), ...pair(user.id, target.id));
+    } else if (!r) {
+      const [a, b] = pair(user.id, target.id);
+      db.prepare('INSERT INTO friends (user_a, user_b, requested_by, created_at) VALUES (?, ?, ?, ?)').run(a, b, user.id, now());
+      pushTo(target.id, { title: 'Friend request', body: `${user.displayName || user.username} wants to be friends`, tag: `friend-${user.id}` });
+    }
+    friendsChanged(user.id, target.id);
+    return friendsOf(user.id);
+  });
+
+  route('POST', '/api/friends/:id/accept', ({ user, params }) => {
+    const other = Number(params[0]);
+    const r = friendRow(user.id, other);
+    if (!r || r.requested_by === user.id) throw new HttpError(404, 'No friend request from them');
+    if (!r.accepted_at) db.prepare('UPDATE friends SET accepted_at = ? WHERE user_a = ? AND user_b = ?').run(now(), ...pair(user.id, other));
+    friendsChanged(user.id, other);
+    sendPresence(user.id);
+    sendPresence(other);
+    return friendsOf(user.id);
+  });
+
+  // Unfriends, declines a request, or takes back one you sent.
+  route('DELETE', '/api/friends/:id', ({ user, params }) => {
+    const other = Number(params[0]);
+    db.prepare('DELETE FROM friends WHERE user_a = ? AND user_b = ?').run(...pair(user.id, other));
+    friendsChanged(user.id, other);
+    return friendsOf(user.id);
+  });
+
+  route('POST', '/api/blocks', ({ user, body }) => {
+    const other = Number(body.userId);
+    if (other === user.id) throw new HttpError(400, "You can't block yourself");
+    if (!userById(other)) throw new HttpError(404, 'Person not found');
+    db.prepare('INSERT OR IGNORE INTO blocks (user_id, blocked_id, created_at) VALUES (?, ?, ?)').run(user.id, other, now());
+    db.prepare('DELETE FROM friends WHERE user_a = ? AND user_b = ?').run(...pair(user.id, other));
+    friendsChanged(user.id, other);
+    sendTo([user.id], { type: 'me_updated', me: meJson(user) });
+    return meJson(user);
+  });
+
+  route('DELETE', '/api/blocks/:id', ({ user, params }) => {
+    db.prepare('DELETE FROM blocks WHERE user_id = ? AND blocked_id = ?').run(user.id, Number(params[0]));
+    friendsChanged(user.id);
+    sendTo([user.id], { type: 'me_updated', me: meJson(user) });
+    return meJson(user);
+  });
+
+  // ---- your login: username, devices, two-step login, passkeys ------------
+
+  /** Checks your password (and with two-step login on, a code) before something big. */
+  const confirmIdentity = (user: User, body: Json, { needCode = true } = {}) => {
+    const key = `confirm-user:${user.id}`;
+    checkTries([key], 10);
+    const row = db.prepare('SELECT password_hash, totp_secret FROM users WHERE id = ?').get(user.id) as { password_hash: string; totp_secret: string | null };
+    if (!verifyPassword(String(body.password ?? ''), row.password_hash)) {
+      failedTry([key]);
+      throw new HttpError(403, 'Your password is wrong');
+    }
+    if (needCode && row.totp_secret && !useSecondFactor(user.id, String(body.code ?? ''))) {
+      failedTry([key]);
+      throw new HttpError(403, 'That code from your authenticator app isn\'t right');
+    }
+    clearTries(key);
+  };
+
+  /** Signs a person out everywhere (but this login, if given) and closes those connections. */
+  const signOutOthers = (userId: number, keepToken: string | null, reason: string) => {
+    if (keepToken) db.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(userId, keepToken);
+    else db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+    for (const ws of sockets.get(userId) ?? []) if (socketTokens.get(ws) !== keepToken) ws.close(4001, reason);
+  };
+
+  route('POST', '/api/me/username', ({ user, body }) => {
+    confirmIdentity(user, body);
+    const username = cleanName(body.username, 'Username', 32);
+    if (!/^[\w.-]+$/.test(username)) throw new HttpError(400, 'Username may only use letters, numbers, _ . -');
+    const taken = db.prepare('SELECT id FROM users WHERE username = ?').get(username) as { id: number } | undefined;
+    if (taken && taken.id !== user.id) throw new HttpError(409, 'That username is taken');
+    db.prepare('UPDATE users SET username = ? WHERE id = ?').run(username, user.id);
+    return userChanged(user.id);
+  });
+
+  const sessionId = (token: string) => createHash('sha256').update(token).digest('hex').slice(0, 16);
+  /** "Chrome on Windows", "Burrow app on Mac" and so on, from a user agent. */
+  const deviceName = (ua: string | null) => {
+    if (!ua) return 'Unknown device';
+    const os = /iPhone|iPad/.test(ua) ? (/iPad/.test(ua) ? 'iPad' : 'iPhone') : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X|Macintosh/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : '';
+    const app = /Electron|Burrow\//.test(ua) ? 'Burrow app' : /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /OPR\//.test(ua) ? 'Opera' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : /node/i.test(ua) ? 'Script' : 'Browser';
+    return os ? `${app} on ${os}` : app;
+  };
+  route('GET', '/api/me/sessions', ({ user, token }) =>
+    (
+      db.prepare('SELECT token, created_at, last_used_at, device, ip FROM sessions WHERE user_id = ? ORDER BY COALESCE(last_used_at, created_at) DESC').all(user.id) as
+        { token: string; created_at: number; last_used_at: number | null; device: string | null; ip: string | null }[]
+    ).map((s) => ({
+      id: sessionId(s.token),
+      device: deviceName(s.device),
+      ip: s.ip,
+      createdAt: s.created_at,
+      lastUsedAt: s.last_used_at ?? s.created_at,
+      current: s.token === token,
+      online: [...(sockets.get(user.id) ?? [])].some((ws) => socketTokens.get(ws) === s.token),
+    })),
+  );
+  route('DELETE', '/api/me/sessions/:code', ({ user, params, token }) => {
+    const all = db.prepare('SELECT token FROM sessions WHERE user_id = ?').all(user.id) as { token: string }[];
+    const s = all.find((x) => sessionId(x.token) === params[0]);
+    if (!s) throw new HttpError(404, 'That device is already signed out');
+    if (s.token === token) throw new HttpError(400, 'Use Log out to sign out of this device');
+    db.prepare('DELETE FROM sessions WHERE token = ?').run(s.token);
+    for (const ws of sockets.get(user.id) ?? []) if (socketTokens.get(ws) === s.token) ws.close(4001, 'Signed out');
+    return { ok: true };
+  });
+  route('DELETE', '/api/me/sessions', ({ user, token }) => {
+    signOutOthers(user.id, token ?? null, 'Signed out');
+    return { ok: true };
+  });
+
+  // Two-step login. Turning it on is a choice; nobody has to.
+  const twoStepTickets = new Map<string, { userId: number; until: number; tries: number; from: { ip: string; ua: string } }>();
+  /** A login that's passed the password: straight in, or (with two-step login on) a ticket to swap for one with a code. */
+  const loginOrAskCode = (userId: number, from: { ip: string; ua: string }) => {
+    const row = db.prepare('SELECT totp_secret FROM users WHERE id = ?').get(userId) as { totp_secret: string | null };
+    if (!row.totp_secret) return startSession(userById(userId)!, from);
+    const t = now();
+    for (const [k, v] of twoStepTickets) if (v.until < t) twoStepTickets.delete(k);
+    const ticket = newToken();
+    twoStepTickets.set(ticket, { userId, until: t + 5 * 60 * 1000, tries: 0, from });
+    return { twoStep: true, ticket };
+  };
+  /** A code from the authenticator app (used at most once) or one of the recovery codes (then gone). */
+  const useSecondFactor = (userId: number, code: string) => {
+    const r = db.prepare('SELECT totp_secret, totp_last_step, recovery_codes FROM users WHERE id = ?').get(userId) as
+      { totp_secret: string | null; totp_last_step: number; recovery_codes: string };
+    if (!r.totp_secret) return true;
+    const step = checkTotp(r.totp_secret, code, r.totp_last_step, now());
+    if (step !== null) {
+      db.prepare('UPDATE users SET totp_last_step = ? WHERE id = ?').run(step, userId);
+      return true;
+    }
+    const codes = JSON.parse(r.recovery_codes) as string[];
+    const i = code.trim() ? codes.indexOf(hashRecovery(code)) : -1;
+    if (i < 0) return false;
+    codes.splice(i, 1);
+    db.prepare('UPDATE users SET recovery_codes = ? WHERE id = ?').run(JSON.stringify(codes), userId);
+    return true;
+  };
+  route(
+    'POST',
+    '/api/login/two-step',
+    ({ body, ip }) => {
+      checkTries([`two-step-ip:${ip}`], 20);
+      const ticket = twoStepTickets.get(String(body.ticket ?? ''));
+      if (!ticket || ticket.until < now()) throw new HttpError(400, 'That took too long. Log in again.');
+      checkTries([`two-step-user:${ticket.userId}`], 10);
+      if (!useSecondFactor(ticket.userId, String(body.code ?? ''))) {
+        failedTry([`two-step-ip:${ip}`, `two-step-user:${ticket.userId}`]);
+        if (++ticket.tries >= 5) twoStepTickets.delete(String(body.ticket));
+        throw new HttpError(401, ticket.tries >= 5 ? 'Too many wrong codes. Log in again.' : "That code isn't right");
+      }
+      twoStepTickets.delete(String(body.ticket));
+      clearTries(`two-step-user:${ticket.userId}`);
+      return startSession(userById(ticket.userId)!, ticket.from);
+    },
+    false,
+  );
+  // Setting it up: a secret for the authenticator app (shown as a QR code), then a code to prove it works.
+  route('POST', '/api/me/two-step/setup', ({ user, body }) => {
+    confirmIdentity(user, body, { needCode: false });
+    const secret = newTotpSecret();
+    db.prepare('UPDATE users SET totp_pending = ? WHERE id = ?').run(secret, user.id);
+    const label = encodeURIComponent(`Burrow:${user.username}`);
+    return { secret, uri: `otpauth://totp/${label}?secret=${secret}&issuer=Burrow&digits=6&period=30` };
+  });
+  route('POST', '/api/me/two-step/enable', ({ user, body }) => {
+    const r = db.prepare('SELECT totp_pending FROM users WHERE id = ?').get(user.id) as { totp_pending: string | null };
+    if (!r.totp_pending) throw new HttpError(400, 'Start again from the beginning');
+    checkTries([`two-step-setup:${user.id}`], 10);
+    const step = checkTotp(r.totp_pending, String(body.code ?? ''), -1, now());
+    if (step === null) {
+      failedTry([`two-step-setup:${user.id}`]);
+      throw new HttpError(400, "That code isn't right. Check the time on your phone, and try the newest code.");
+    }
+    const codes = newRecoveryCodes();
+    db.prepare('UPDATE users SET totp_secret = totp_pending, totp_pending = NULL, totp_last_step = ?, recovery_codes = ? WHERE id = ?').run(
+      step, JSON.stringify(codes.map(hashRecovery)), user.id,
+    );
+    sendTo([user.id], { type: 'me_updated', me: meJson(user) });
+    return { recoveryCodes: codes, me: meJson(user) };
+  });
+  route('POST', '/api/me/two-step/disable', ({ user, body }) => {
+    confirmIdentity(user, body);
+    db.prepare("UPDATE users SET totp_secret = NULL, totp_pending = NULL, recovery_codes = '[]' WHERE id = ?").run(user.id);
+    sendTo([user.id], { type: 'me_updated', me: meJson(user) });
+    return meJson(user);
+  });
+  route('POST', '/api/me/two-step/recovery', ({ user, body }) => {
+    confirmIdentity(user, body);
+    const codes = newRecoveryCodes();
+    db.prepare('UPDATE users SET recovery_codes = ? WHERE id = ? AND totp_secret IS NOT NULL').run(JSON.stringify(codes.map(hashRecovery)), user.id);
+    return { recoveryCodes: codes, me: meJson(user) };
+  });
+
+  // Passkeys: Face ID, Windows Hello, a phone or a security key instead of a password.
+  // The site name a passkey is tied to: PUBLIC_URL's host, or the host the app was opened at.
+  const rpIdFor = (host: string) => {
+    if (opts.publicUrl) return new URL(opts.publicUrl).hostname;
+    return host.replace(/:\d+$/, '').replace(/^\[|\]$/g, '') || 'localhost';
+  };
+  const passkeyChallenges = new Map<string, { challenge: string; until: number; userId?: number; rpId: string }>();
+  const newChallenge = (key: string, rpId: string, userId?: number) => {
+    const t = now();
+    for (const [k, v] of passkeyChallenges) if (v.until < t) passkeyChallenges.delete(k);
+    const challenge = randomBytes(32).toString('base64url');
+    passkeyChallenges.set(key, { challenge, until: t + 5 * 60 * 1000, userId, rpId });
+    return challenge;
+  };
+  const takeChallenge = (key: string) => {
+    const c = passkeyChallenges.get(key);
+    passkeyChallenges.delete(key);
+    if (!c || c.until < now()) throw new HttpError(400, 'That took too long. Try again.');
+    return c;
+  };
+  const passkeysOf = (userId: number) =>
+    db.prepare('SELECT id, name, created_at AS createdAt, last_used_at AS lastUsedAt FROM passkeys WHERE user_id = ? ORDER BY created_at').all(userId);
+
+  route('GET', '/api/me/passkeys', ({ user }) => passkeysOf(user.id));
+  route('POST', '/api/me/passkeys/options', ({ user, body, host }) => {
+    confirmIdentity(user, body);
+    const rpId = rpIdFor(host);
+    const challenge = newChallenge(`add:${user.id}`, rpId, user.id);
+    return {
+      challenge,
+      rp: { name: 'Burrow', id: rpId },
+      user: { id: Buffer.from(String(user.id)).toString('base64url'), name: user.username, displayName: user.displayName || user.username },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -8 }, { type: 'public-key', alg: -257 }],
+      authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'preferred' },
+      excludeCredentials: (passkeysOf(user.id) as { id: string }[]).map((p) => ({ type: 'public-key', id: p.id })),
+      attestation: 'none',
+      timeout: 120_000,
+    };
+  });
+  route('POST', '/api/me/passkeys', ({ user, body, ua }) => {
+    const c = takeChallenge(`add:${user.id}`);
+    const cred = (body.credential ?? {}) as Json;
+    const response = (cred.response ?? {}) as Json;
+    let key;
+    try {
+      key = verifyRegistration({ clientDataJSON: String(response.clientDataJSON ?? ''), attestationObject: String(response.attestationObject ?? '') }, c.challenge, c.rpId);
+    } catch (err) {
+      throw new HttpError(400, err instanceof Error ? err.message : 'That passkey didn\'t work');
+    }
+    if (db.prepare('SELECT 1 FROM passkeys WHERE id = ?').get(key.id)) throw new HttpError(409, 'That passkey is already added');
+    const name = (typeof body.name === 'string' && body.name.trim().slice(0, 40)) || `Passkey on ${deviceName(ua).replace(/^.* on /, '')}`;
+    db.prepare('INSERT INTO passkeys (id, user_id, name, public_key, alg, sign_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+      key.id, user.id, name, JSON.stringify(key.jwk), key.alg, key.signCount, now(),
+    );
+    return passkeysOf(user.id);
+  });
+  route('DELETE', '/api/me/passkeys/:code', ({ user, params }) => {
+    db.prepare('DELETE FROM passkeys WHERE id = ? AND user_id = ?').run(params[0], user.id);
+    return passkeysOf(user.id);
+  });
+  route(
+    'POST',
+    '/api/login/passkey/options',
+    ({ ip, host }) => {
+      checkTries([`passkey-ip:${ip}`], 30);
+      const id = newToken();
+      const rpId = rpIdFor(host);
+      return { id, challenge: newChallenge(`login:${id}`, rpId), rpId, userVerification: 'preferred', timeout: 120_000 };
+    },
+    false,
+  );
+  route(
+    'POST',
+    '/api/login/passkey',
+    ({ body, ip, ua }) => {
+      checkTries([`passkey-ip:${ip}`], 30);
+      const c = takeChallenge(`login:${String(body.id ?? '')}`);
+      const cred = (body.credential ?? {}) as Json;
+      const response = (cred.response ?? {}) as Json;
+      const key = db.prepare('SELECT p.user_id, p.public_key, p.alg, p.sign_count FROM passkeys p JOIN users u ON u.id = p.user_id WHERE p.id = ? AND u.deleted_at IS NULL').get(String(cred.id ?? '')) as
+        | { user_id: number; public_key: string; alg: number; sign_count: number }
+        | undefined;
+      if (!key) {
+        failedTry([`passkey-ip:${ip}`]);
+        throw new HttpError(401, "That passkey isn't on this server anymore. Log in with your password.");
+      }
+      let signCount;
+      try {
+        ({ signCount } = verifyAssertion(
+          { clientDataJSON: String(response.clientDataJSON ?? ''), authenticatorData: String(response.authenticatorData ?? ''), signature: String(response.signature ?? '') },
+          { jwk: JSON.parse(key.public_key), alg: key.alg, signCount: key.sign_count },
+          c.challenge,
+          c.rpId,
+        ));
+      } catch (err) {
+        failedTry([`passkey-ip:${ip}`]);
+        throw new HttpError(401, err instanceof Error ? err.message : "That passkey didn't check out");
+      }
+      db.prepare('UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE id = ?').run(signCount, now(), String(cred.id));
+      // A passkey already proves two things (the device, and the face or PIN that unlocked it).
+      return startSession(userById(key.user_id)!, { ip, ua });
+    },
+    false,
+  );
+
+  // A reset link made by whoever runs the server (server/src/reset-link.ts), for someone locked out.
+  const resetLinkUser = (token: unknown) => {
+    const u = db.prepare('SELECT id, username, reset_link_expires FROM users WHERE reset_link = ? AND deleted_at IS NULL').get(hashCode(String(token ?? ''))) as
+      | { id: number; username: string; reset_link_expires: number }
+      | undefined;
+    if (!u || u.reset_link_expires < now()) throw new HttpError(400, 'That reset link has run out or was already used. Ask whoever runs this server for a new one.');
+    return u;
+  };
+  route('GET', '/api/password/link', ({ url, ip }) => {
+    checkTries([`reset-link-ip:${ip}`], 20);
+    try { return { username: resetLinkUser(url.searchParams.get('token')).username }; }
+    catch (err) { failedTry([`reset-link-ip:${ip}`]); throw err; }
+  }, false);
+  route('POST', '/api/password/link', ({ body, ip, ua }) => {
+    checkTries([`reset-link-ip:${ip}`], 20);
+    let u;
+    try { u = resetLinkUser(body.token); }
+    catch (err) { failedTry([`reset-link-ip:${ip}`]); throw err; }
+    if (typeof body.newPassword !== 'string' || body.newPassword.length < 8) throw new HttpError(400, 'New password must be at least 8 characters');
+    db.prepare('UPDATE users SET password_hash = ?, reset_link = NULL, reset_link_expires = NULL WHERE id = ?').run(hashPassword(body.newPassword), u.id);
+    signOutOthers(u.id, null, 'Password changed');
+    clearTries(`login-user:${u.username.toLowerCase()}`);
+    return loginOrAskCode(u.id, { ip, ua });
+  }, false);
+
+  // ---- leaving for good, and taking your things with you ------------------
+
+  // Deleting your account: burrows you host with other people in them have to be handed over first.
+  // Your messages stay (as "Deleted user") or go, as you choose.
+  route('DELETE', '/api/me', ({ user, body }) => {
+    confirmIdentity(user, body);
+    const hosted = db.prepare("SELECT id, name FROM servers WHERE owner_id = ? AND kind = 'burrow'").all(user.id) as { id: number; name: string }[];
+    const busy = hosted.filter((s) => serverMemberIds(s.id).some((id) => id !== user.id));
+    if (busy.length)
+      throw new HttpError(409, `Hand over or delete ${busy.map((s) => s.name).join(', ')} first: you're the host${busy.length > 1 ? ' of those burrows' : ''}.`);
+    signOutOthers(user.id, null, 'Account deleted');
+    for (const s of hosted) deleteBurrow(s.id);
+    const places = db.prepare('SELECT m.server_id AS id, s.kind, s.dm_key FROM members m JOIN servers s ON s.id = m.server_id WHERE m.user_id = ?').all(user.id) as
+      { id: number; kind: string; dm_key: string | null }[];
+    if (body.deleteMessages === true) {
+      const touched = db.prepare('SELECT DISTINCT channel_id AS id FROM messages WHERE author_id = ?').all(user.id) as { id: number }[];
+      removeFiles(db.prepare('SELECT a.id FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.author_id = ?').all(user.id) as Json[]);
+      db.prepare('DELETE FROM messages WHERE author_id = ?').run(user.id);
+      for (const { id } of touched) {
+        const channel = channelById(id);
+        if (channel) broadcastToChannel(channel, { type: 'messages_purged', channelId: id, userId: user.id });
+      }
+    }
+    // Out of every burrow and group. One-to-one conversations stay, so the other person keeps theirs.
+    for (const p of places) {
+      if (p.kind === 'burrow') removeMember(p.id, user.id);
+      else if (!p.dm_key) leaveGroup(p.id, user);
+    }
+    const files = db.prepare('SELECT avatar, banner FROM users WHERE id = ?').get(user.id) as { avatar: string | null; banner: string | null };
+    for (const f of [files.avatar, files.banner]) if (f && opts.uploadDir) unlink(avatarPath(f)).catch(() => {});
+    for (const table of ['friends_a', 'friends_b', 'blocks', 'blocks_by', 'passkeys', 'push_subs', 'scheduled_messages', 'saved_messages']) {
+      const [t, col] =
+        table === 'friends_a' ? ['friends', 'user_a'] : table === 'friends_b' ? ['friends', 'user_b'] : table === 'blocks_by' ? ['blocks', 'blocked_id'] : [table, 'user_id'];
+      try { db.prepare(`DELETE FROM ${t} WHERE ${col} = ?`).run(user.id); } catch { /* a table this server doesn't have */ }
+    }
+    db.prepare(
+      `UPDATE users SET username = ?, display_name = 'Deleted user', password_hash = '!', avatar = NULL, banner = NULL, bio = '', accent = NULL,
+         email = NULL, email_verified = 0, email_code = NULL, reset_code = NULL, reset_link = NULL, totp_secret = NULL, totp_pending = NULL,
+         recovery_codes = '[]', status_text = NULL, status_emoji = NULL, deleted_at = ? WHERE id = ?`,
+    ).run(`deleted-${user.id}-${randomBytes(4).toString('hex')}`, now(), user.id);
+    for (const p of places) if (p.kind === 'dm' && p.dm_key) sendServerUpdate(p.id);
+    userChanged(user.id);
+    return { ok: true };
+  });
+
+  // Export my data: a zip of your account, your messages (as JSON) and the files you sent.
+  const handleExport = async (req: IncomingMessage, res: ServerResponse) => {
+    const user = userByToken(req.headers.authorization?.replace(/^Bearer /, ''));
+    if (!user) throw new HttpError(401, 'Not logged in');
+    checkTries([`export:${user.id}`], 5);
+    failedTry([`export:${user.id}`], 60 * 60 * 1000);
+    const me = meJson(user);
+    const burrows = db.prepare("SELECT s.id, s.name, m.joined_at AS joinedAt, m.nickname FROM members m JOIN servers s ON s.id = m.server_id WHERE m.user_id = ? AND s.kind = 'burrow'").all(user.id);
+    const messages = (
+      db
+        .prepare(
+          `SELECT m.id, m.channel_id AS channelId, m.content, m.created_at AS createdAt, m.edited_at AS editedAt, m.reply_to AS replyTo, c.name AS room, s.name AS burrow, s.kind
+           FROM messages m JOIN channels c ON c.id = m.channel_id JOIN servers s ON s.id = c.server_id WHERE m.author_id = ? ORDER BY m.id`,
+        )
+        .all(user.id) as Json[]
+    ).map(({ kind, burrow, room, ...m }) => ({ ...m, place: kind === 'dm' ? placeOf(m.channelId as number, user.id)?.serverName ?? 'Direct message' : `${burrow} › #${room}` }));
+    const files = db
+      .prepare('SELECT a.id, a.name, a.type, a.size, a.message_id AS messageId FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.author_id = ? ORDER BY a.message_id, a.position')
+      .all(user.id) as { id: string; name: string; type: string; size: number; messageId: number }[];
+    const safe = (name: string) => name.replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').slice(-120);
+    const fileName = (f: { id: string; name: string }) => `files/${f.id.slice(0, 8)}-${safe(f.name)}`;
+    const byMessage = new Map<number, string[]>();
+    for (const f of files) byMessage.set(f.messageId, [...(byMessage.get(f.messageId) ?? []), fileName(f)]);
+    const zip = new ZipWriter();
+    res.writeHead(200, {
+      'content-type': 'application/zip',
+      'content-disposition': `attachment; filename="burrow-${safe(user.username)}.zip"`,
+      'cache-control': 'no-store',
+    });
+    const write = async (chunks: Buffer[]) => {
+      for (const c of chunks) if (!res.write(c)) await new Promise((r) => res.once('drain', r));
+    };
+    const json = (v: unknown) => Buffer.from(JSON.stringify(v, null, 2));
+    const { id: _, blockedIds: __, ...account } = me;
+    await write(zip.add('account.json', json({ ...account, burrows, friends: friendsOf(user.id).friends.map((f) => f.username), exportedAt: new Date().toISOString() })));
+    await write(zip.add('messages.json', json(messages.map((m) => ({ ...m, files: byMessage.get((m as Json).id as number) ?? [] })))));
+    const pictures = db.prepare('SELECT avatar, banner FROM users WHERE id = ?').get(user.id) as { avatar: string | null; banner: string | null };
+    let total = 0;
+    const LIMIT = 3.5 * 1024 ** 3; // a plain zip can't go past 4 GB
+    const skipped: string[] = [];
+    const addFile = async (path: string, name: string) => {
+      const data = await readFile(path).catch(() => null);
+      if (!data) return;
+      if (total + data.length > LIMIT) return void skipped.push(name);
+      total += data.length;
+      await write(zip.add(name, data));
+    };
+    if (opts.uploadDir) {
+      if (pictures.avatar) await addFile(avatarPath(pictures.avatar), `profile/picture${extname(pictures.avatar)}`);
+      if (pictures.banner) await addFile(avatarPath(pictures.banner), `profile/banner${extname(pictures.banner)}`);
+      for (const f of files) await addFile(filePath(f.id), fileName(f));
+    }
+    if (skipped.length) await write(zip.add('files-left-out.txt', Buffer.from(`These files didn't fit in one zip:\n${skipped.join('\n')}\n`)));
+    res.end(zip.finish());
+  };
+
   // ---- HTTP plumbing ------------------------------------------------------
 
   const readBody = (req: IncomingMessage) =>
@@ -3805,6 +4435,8 @@ export function createApp(opts: AppOptions): Server {
       const file = (req.method === 'GET' || req.method === 'HEAD') && url.pathname.match(/^\/api\/attachments\/([\w-]+)(\/|$)/);
       if (file) return await serveAttachment(req, res, file[1]);
       if (req.method === 'POST' && url.pathname === '/api/me/avatar') return await handleAvatarUpload(req, res);
+      if (req.method === 'POST' && url.pathname === '/api/me/banner') return await handleBannerUpload(req, res);
+      if (req.method === 'GET' && url.pathname === '/api/me/export') return await handleExport(req, res);
       const burrowUpload = req.method === 'POST' && url.pathname.match(/^\/api\/servers\/(\d+)\/(picture|banner)$/);
       if (burrowUpload) return await handleBurrowPictureUpload(req, res, Number(burrowUpload[1]), burrowUpload[2] === 'banner' ? 'banner' : 'icon');
       const emojiUpload = req.method === 'POST' && url.pathname.match(/^\/api\/servers\/(\d+)\/emoji$/);
@@ -3828,7 +4460,8 @@ export function createApp(opts: AppOptions): Server {
         if (r.auth && !user) throw new HttpError(401, 'Not logged in');
         const body = req.method === 'GET' ? {} : await readBody(req);
         if (url.pathname === '/api/logout') body.token = token;
-        return send(res, 200, await r.handler({ user: user!, params: m.slice(1), body, url, token, ip: clientIp(req) }));
+        const ua = String(req.headers['user-agent'] ?? '');
+        return send(res, 200, await r.handler({ user: user!, params: m.slice(1), body, url, token, ip: clientIp(req), ua, host: String(req.headers.host ?? '') }));
       }
       throw new HttpError(404, 'Not found');
     } catch (err) {
@@ -3911,11 +4544,12 @@ export function createApp(opts: AppOptions): Server {
           const content = typeof msg.content === 'string' ? msg.content.trim() : '';
           if (!content) throw new HttpError(400, 'Message is empty');
           if (content.length > 1000) throw new HttpError(400, 'Message is too long');
-          const message = { id: ++firesideId, userId: user.id, author: user.username, content, createdAt: Date.now() };
+          const author = nameIn(channelById(channelId)!.serverId, user.id);
+          const message = { id: ++firesideId, userId: user.id, author, content, createdAt: Date.now() };
           if (channelById(channelId)?.keepChat) {
             const r = db
               .prepare('INSERT INTO fireside_messages (channel_id, user_id, author, content, created_at) VALUES (?, ?, ?, ?, ?)')
-              .run(channelId, user.id, user.username, content, message.createdAt);
+              .run(channelId, user.id, author, content, message.createdAt);
             message.id = Number(r.lastInsertRowid);
             db.prepare('DELETE FROM fireside_messages WHERE channel_id = ? AND id NOT IN (SELECT id FROM fireside_messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?)')
               .run(channelId, channelId, FIRESIDE_KEEP);
@@ -3964,7 +4598,7 @@ export function createApp(opts: AppOptions): Server {
           if (channel && canSee(channel, user.id))
             sendTo(
               channelAudience(channel).filter((id) => id !== user.id),
-              { type: 'typing', channelId: channel.id, userId: user.id, username: user.username },
+              { type: 'typing', channelId: channel.id, userId: user.id, username: nameIn(channel.serverId, user.id) },
             );
         }
       } catch (err) {
