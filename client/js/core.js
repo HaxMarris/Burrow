@@ -107,6 +107,7 @@ async function showAuth() {
   if (!isDesktop && !/Android|iPhone|iPad/.test(navigator.userAgent)) showDesktopDownloads();
   renderAuthMode();
   showAuthInvite();
+  showAccountsOnLogin();
   if (resetLinkToken && !isDesktop) showResetLink();
 }
 
@@ -119,17 +120,22 @@ function showDesktopDownloads() {
   const ua = navigator.userAgent;
   const mine = /Windows/.test(ua) ? 'win' : /Mac/.test(ua) && !/iPhone|iPad/.test(ua) && navigator.maxTouchPoints < 2 ? 'mac'
     : /Linux/.test(ua) && !/Android/.test(ua) ? 'linux' : null;
-  for (const a of box.querySelectorAll('a')) a.classList.toggle('mine', a.dataset.os === mine);
+  for (const a of box.querySelectorAll('a[data-os]')) a.classList.toggle('mine', a.dataset.os === mine);
   if (desktopLinksLoaded) return;
   desktopLinksLoaded = true;
   fetch('https://api.github.com/repos/HaxMarris/Burrow/releases/latest')
     .then((r) => (r.ok ? r.json() : null))
     .then((release) => {
-      const ends = { win: '.exe', mac: '.dmg', linux: '.AppImage' };
-      for (const a of box.querySelectorAll('a')) {
-        const file = release?.assets?.find((f) => f.name.endsWith(ends[a.dataset.os]));
+      // Macs: Apple chips (M1 and later) by default, and a separate build for older Intel Macs.
+      const ends = { win: '.exe', mac: '-arm64.dmg', intel: '-x64.dmg', linux: '.AppImage' };
+      const find = (os) => release?.assets?.find((f) => f.name.endsWith(ends[os])) ?? (os === 'mac' ? release?.assets?.find((f) => f.name.endsWith('.dmg')) : null);
+      for (const a of box.querySelectorAll('a[data-os]')) {
+        const file = find(a.dataset.os);
         if (file) a.href = file.browser_download_url;
       }
+      const intel = find('intel');
+      $('#get-intel-mac').classList.toggle('hidden', !intel || mine !== 'mac');
+      if (intel) $('#get-intel-mac a').href = intel.browser_download_url;
     })
     .catch(() => {});
 }
@@ -350,6 +356,8 @@ $('#link-form').addEventListener('submit', async (e) => {
 async function logout(callServer = true) {
   leaveVoice();
   if (callServer) api('/api/logout', { method: 'POST' }).catch(() => {});
+  forgetAccount();
+  forgetOffline();
   state.token = null;
   state.me = null;
   store.set('token', null);
@@ -386,6 +394,7 @@ async function enterApp() {
   openPendingInvite();
   startPush();
   openLinkedMessage();
+  afterEnter();
 }
 
 async function loadServers() {
@@ -446,6 +455,7 @@ function connect() {
     // So is whether you're away from this device, and what you're playing.
     if (idleSent) ws.send(JSON.stringify({ type: 'idle', idle: true }));
     if (sharedActivity) ws.send(JSON.stringify({ type: 'activity', name: sharedActivity }));
+    flushOutbox();
     // Catch up on anything missed while disconnected.
     if (wasRetry) { loadServers().then(catchUpRoom).catch(() => {}); loadFriends(); }
   };

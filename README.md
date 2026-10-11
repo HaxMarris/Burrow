@@ -254,15 +254,23 @@ docker compose up -d
 
 **Desktop app:** the first time it opens it asks for the server address, then works the same way.
 
+**Phones:** on Android, open the server address in Chrome and pick *Install the app* from your menu
+(your picture, top right) or Chrome's own *Install app*; Burrow then has its own icon, opens without
+the browser around it, shows up in the share menu of other apps, and can send alerts while closed.
+On an iPhone or iPad, use Safari's Share › *Add to Home Screen*. Both need Burrow on `https://`.
+
 To build installers, let GitHub do it: on the repo page go to **Releases → Draft a new release**,
 type a new tag such as `v0.1.0`, and click **Publish release**. The `Desktop release` workflow then
-builds a Windows `.exe`, macOS `.dmg` and Linux `.AppImage` and attaches them to that release,
-usually within about ten minutes. Send your friends the release link.
+builds a Windows `.exe`, two macOS `.dmg`s (`arm64` for Apple chips, M1 and later, and `x64` for
+older Intel Macs) and a Linux `.AppImage` and attaches them to that release, usually within about
+ten minutes. Send your friends the release link, or your server's login page, whose download buttons
+pick the right file (Macs get the Apple-chip one, with a link to the Intel one).
 
 **Updates:** the desktop app checks for a newer release when it starts and every six hours.
-On Windows and Linux it downloads the update in the background and asks to restart; if they pick
-*Later*, it installs the next time they quit. On macOS it shows a *Download* button that opens the
-release page, because macOS only lets signed apps update themselves. Release tags must look like
+On Windows, Linux and signed Mac builds it downloads the update in the background and asks to
+restart; if they pick *Later*, it installs the next time they quit. An unsigned Mac build shows a
+*Download* button that opens the release page instead, because macOS only lets signed apps update
+themselves. Release tags must look like
 `v1.2.3`; the tag becomes the app's version number.
 
 You can also run the workflow by hand from the **Actions** tab to get test builds without publishing anything.
@@ -276,9 +284,39 @@ npm start        # run it without packaging
 npm run dist     # build an installer for the current OS into desktop/dist/
 ```
 
-The installers are unsigned, so Windows SmartScreen will say "Windows protected your PC"
-(click *More info → Run anyway*) and macOS needs right-click → *Open* the first time.
-Code-signing certificates fix that but cost money.
+Without signing, Windows SmartScreen says "Windows protected your PC" (click *More info → Run
+anyway*) and macOS needs right-click → *Open* the first time (on recent macOS: System Settings ›
+Privacy & Security › *Open Anyway*).
+
+### Signing the desktop app
+
+Signing makes those warnings go away and lets Mac builds update themselves. It's optional and costs
+money, so the release workflow signs only when you've added the secrets below (repo **Settings ›
+Secrets and variables › Actions › New repository secret**); without them it builds unsigned, as above.
+
+**Mac** (needs an [Apple Developer Program](https://developer.apple.com/programs/) membership, $99 a year):
+
+1. In Xcode (*Settings › Accounts › Manage Certificates › + › Developer ID Application*) or on the
+   developer website, create a *Developer ID Application* certificate, then export it from Keychain
+   Access as a `.p12` file with a password.
+2. Add the secrets `MAC_CERTIFICATE` (the `.p12` as base64: `base64 -i cert.p12 | pbcopy`) and
+   `MAC_CERTIFICATE_PASSWORD`.
+3. For notarizing (Apple checks the app, so it opens with no warning at all): `APPLE_ID` (your Apple
+   account's email), `APPLE_APP_SPECIFIC_PASSWORD` (make one at [account.apple.com](https://account.apple.com)
+   › Sign-In and Security › App-Specific Passwords) and `APPLE_TEAM_ID` (on the developer website
+   under Membership).
+
+**Windows:** certificates now have to live on special hardware, so the practical choice is
+[Azure Artifact Signing](https://azure.microsoft.com/products/artifact-signing) (formerly Trusted
+Signing, about $10 a month). Set up an account and a certificate profile there, make an app
+registration with the *Certificate Profile Signer* role on that account, then add the secrets
+`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_SIGNING_ENDPOINT` (e.g.
+`https://eus.codesigning.azure.net`), `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE` and
+`AZURE_PUBLISHER_NAME` (the name on the certificate). If you have an older `.pfx` certificate
+instead, add it as `WIN_CERTIFICATE` (base64) and `WIN_CERTIFICATE_PASSWORD`. SmartScreen can still
+warn for a while after you first sign, until enough people have installed it.
+
+Then publish a release as usual.
 
 ## 3. Using it
 
@@ -307,10 +345,14 @@ Burrow has its own names for things: a **burrow** is a shared space for one grou
 - Type `@everyone` (everyone who can see the room), `@here` (only people online) or `@` and a role's name to ping them all. Only roles allowed to *mention @everyone and roles* can; for everyone else it's just text.
 - The **GIF** button next to the message box opens trending GIFs; type to search, and tap one to send it.
 - Pictures and videos load only as they scroll into view, and keep their space so the chat doesn't jump. Videos show a still from the video until you press play, so nothing more downloads until then. A video over 20 MB (or over the limit) gets a **Shrink** button before it's sent, which makes it 720p; it plays the video through once on your device, so it takes as long as the video (Chrome, Edge, Firefox and the desktop app).
-- If your connection drops, Burrow reconnects by itself when it can, fetches only the messages you missed, and puts you back at the fire you were at.
+- If your connection drops, Burrow reconnects by itself when it can, fetches only the messages you missed, and puts you back at the fire you were at. With no connection at all it still opens (on the web, once you've used it there over `https://`) and shows your burrows and the latest messages in rooms you'd opened on that device; messages you write wait in a *Waiting to send* list above the message box (with ✕ to drop one) and go out once you're back.
 - The **+** in the message box uploads files, makes a poll, sends a sticker, or sends what you've typed later. The smiley opens every emoji (and your burrows' own), and the microphone records a voice message.
 - Each message's **⋯** menu pins it, starts a thread, forwards it, saves it (or reminds you about it later), marks it unread, or shows its edit history. Your saved and scheduled messages are in your menu, top right.
-- The magnifier at the top of a room searches messages; **Ctrl+K** (⌘K on a Mac) opens it from anywhere. The pin next to it lists the room's pinned messages.
+- The magnifier at the top of a room searches messages; **Ctrl+F** (⌘F on a Mac) opens it from anywhere. The pin next to it lists the room's pinned messages.
+- **Keyboard:** **Ctrl+K** jumps to any room, conversation or burrow by typing part of its name (unread ones first), **Alt+↑/↓** moves to the room above or below, and **Alt+Shift+↑/↓** to the next unread one. **Ctrl+/** (or *Keyboard shortcuts* in your menu) lists them all. Rooms, people and menus can all be reached with Tab and opened with Enter, and screen readers read out the buttons and new messages.
+- **On a phone:** swipe a message to the right to reply to it, swipe in from the left edge of a room to go back to the rooms, and swipe along a room's name at the top for the next or previous room. On Android, sharing a photo, file or link from another app to Burrow asks which room it goes to, then puts it in the message box.
+- *Settings* in your account also has **Display**: compact messages (plain lines instead of cards), text size (80% to 150%) and less motion (or follow your system's setting). These are kept per device.
+- **In the desktop app:** closing the window keeps Burrow running in the tray (the menu bar on a Mac), with a red dot when something's unread; quit from the icon's menu. *Settings › App* turns that off, and can start Burrow when the computer starts. **Switch server** in your menu adds other people's Burrow servers and switches between them, staying logged in to each. Ctrl+plus and Ctrl+minus change the text size.
 - People whose role lets them *manage emoji* add a burrow's own emoji and stickers in its settings; type `:name:` to use one.
 - The moon button in your profile card switches between the light "birch" theme and the dark "pine night" theme. By default it follows your system setting.
 - Your account also has a **theme color** wheel: pick any color (nearer the middle is softer) or one of the presets, and Burrow's backgrounds and accents follow it in both light and dark. *Back to forest green* undoes it.
@@ -375,7 +417,7 @@ out before CPU for video: each camera at medium quality is about 0.5 Mbps for ev
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more), the rooms, burrows and organization update (headings and room order, topics, slow mode, announcement and archived rooms, invite links that run out, banners, rules and a welcome room, muting, events, group conversations and folders), and the voice and Campfire update (push to talk and hotkeys, voice sensitivity, soundboard, moving and muting people, AFK fire, seat limits, calls, listen together, kept fireside chat, music mode and a voice changer), and the notifications and presence update (away and Do not disturb, custom statuses, playing now, a mentions inbox, @everyone and @role mentions, quiet hours, the app icon count, alerts while Burrow is closed), password resets by email, the moderation update (timeouts, an audit log, reports, a word filter, bulk delete, read-only roles, more role permissions and upload limits per role), the video and streaming update (side by side, pop out, previews, chat over a stream, who's watching, camera backgrounds, tab sharing with sound, clips, drawing and go-live posts), the profiles, friends and DMs update (display names, nicknames, profile cards, friends, blocking, username changes, devices, reset links, two-step login, passkeys, data export and account deletion), and the speed and reliability update (clean reconnects, lazy-loaded pictures, video thumbnails and shrinking, the client split into parts, checks on every pull request and a load test).
+Done: auto-update for the desktop app, voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more), the rooms, burrows and organization update (headings and room order, topics, slow mode, announcement and archived rooms, invite links that run out, banners, rules and a welcome room, muting, events, group conversations and folders), and the voice and Campfire update (push to talk and hotkeys, voice sensitivity, soundboard, moving and muting people, AFK fire, seat limits, calls, listen together, kept fireside chat, music mode and a voice changer), and the notifications and presence update (away and Do not disturb, custom statuses, playing now, a mentions inbox, @everyone and @role mentions, quiet hours, the app icon count, alerts while Burrow is closed), password resets by email, the moderation update (timeouts, an audit log, reports, a word filter, bulk delete, read-only roles, more role permissions and upload limits per role), the video and streaming update (side by side, pop out, previews, chat over a stream, who's watching, camera backgrounds, tab sharing with sound, clips, drawing and go-live posts), the profiles, friends and DMs update (display names, nicknames, profile cards, friends, blocking, username changes, devices, reset links, two-step login, passkeys, data export and account deletion), and the speed and reliability update (clean reconnects, lazy-loaded pictures, video thumbnails and shrinking, the client split into parts, checks on every pull request and a load test), and the apps update (Android install and sharing into Burrow, swipes, working offline, the tray and starting with the computer, signed Mac and Intel Mac builds, Windows signing, keyboard shortcuts and a quick switcher, accessibility, compact messages, text size and several servers in the desktop app).
 
 Ideas for later: text message encryption, sharing one program's sound on macOS.
 
