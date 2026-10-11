@@ -472,10 +472,13 @@ async function selectChannel(id, { around = null, present = false } = {}) {
   try {
     msgs = await api(`/api/channels/${id}/messages?limit=50${target != null ? `&around=${target}` : ''}`);
   } catch (err) {
-    if (state.channelId === id) alertError(err);
-    return;
+    // No connection: what this device saved of the room, if anything.
+    msgs = err instanceof TypeError ? cachedRoom(id) : null;
+    if (state.channelId !== id) return;
+    if (!msgs && err instanceof TypeError) return renderMessages();
+    if (!msgs) return alertError(err);
   }
-  if (parentLoad) await parentLoad;
+  if (parentLoad) await parentLoad.catch(() => {});
   if (state.channelId !== id) return;
   state.messages = msgs;
   // In slow mode, your last message here decides when you can send the next.

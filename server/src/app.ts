@@ -4538,6 +4538,9 @@ export function createApp(opts: AppOptions): Server {
       // Invite links open the app, which shows the burrow before joining.
       const invite = url.pathname.match(/^\/invite\/([\w-]{1,32})\/?$/);
       if (invite) return res.writeHead(302, { location: `/?invite=${invite[1]}` }).end();
+      // Something shared from another app on a phone, before Burrow's service worker was there to
+      // catch it: open the app (the shared things are lost, but it doesn't error).
+      if (req.method === 'POST' && url.pathname === '/share') return res.writeHead(303, { location: '/' }).end();
       return serveStatic(req, res, url.pathname);
     }
 

@@ -7,6 +7,7 @@ const appAudio = require('./app-audio');
 const hotkeys = require('./hotkeys');
 const activity = require('./activity');
 const drawOverlay = require('./draw-overlay');
+const tray = require('./tray');
 
 // The page asks how long the computer has been left alone, to show you as away.
 ipcMain.on('idle-seconds', (e) => { e.returnValue = powerMonitor.getSystemIdleTime(); });
@@ -14,8 +15,28 @@ ipcMain.on('idle-seconds', (e) => { e.returnValue = powerMonitor.getSystemIdleTi
 // The page asks once, at start, whether it can share just one program's sound.
 ipcMain.on('app-audio-supported', (e) => { e.returnValue = appAudio.supported(); });
 
-function createWindow() {
+// Keep running in the tray when the window is closed, and start with the computer.
+ipcMain.on('desktop-settings', (e) => { e.returnValue = tray.readSettings(); });
+ipcMain.handle('desktop-settings-set', (_e, change) => tray.saveSettings({
+  ...('closeToTray' in change ? { closeToTray: !!change.closeToTray } : {}),
+  ...('openAtLogin' in change ? { openAtLogin: !!change.openAtLogin } : {}),
+}));
+
+// Only one copy of the app: opening it again brings back the window that's already running.
+if (!app.requestSingleInstanceLock()) app.exit(0);
+app.on('second-instance', () => showWindow());
+
+function showWindow() {
+  const win = BrowserWindow.getAllWindows()[0];
+  if (!win) return createWindow();
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+function createWindow({ hidden = false } = {}) {
   const win = new BrowserWindow({
+    show: !hidden,
     width: 1280,
     height: 800,
     minWidth: 480,
@@ -58,7 +79,17 @@ function createWindow() {
     if (process.platform === 'win32') {
       win.setOverlayIcon(count && image ? nativeImage.createFromDataURL(image) : null, count ? `${count} unread` : '');
     } else app.setBadgeCount(count);
+    tray.setUnread(count);
   });
+  // Closing the window keeps Burrow running in the tray (unless that's turned off), so
+  // messages still arrive and voice stays connected.
+  win.on('close', (e) => {
+    if (app.isQuitting || !tray.readSettings().closeToTray || (!tray.active() && process.platform !== 'darwin')) return;
+    e.preventDefault();
+    win.hide();
+    if (process.platform === 'darwin') app.dock?.hide();
+  });
+  win.on('show', () => { if (process.platform === 'darwin') app.dock?.show(); });
   win.webContents.on('did-start-navigation', (e) => { if (e.isMainFrame && !e.isSameDocument) hotkeys.stop(); });
 
   // YouTube's player (listen together) won't play without knowing which site it's on, and an
@@ -134,13 +165,14 @@ function createWindow() {
 
 if (process.platform === 'win32') app.setAppUserModelId('chat.burrow.desktop'); // needed for notifications
 
+app.on('before-quit', () => { app.isQuitting = true; });
+
 app.whenReady().then(() => {
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
-  createWindow();
+  createWindow({ hidden: tray.openedHidden() });
+  tray.createTray(showWindow);
   startUpdateChecks(() => BrowserWindow.getAllWindows()[0]);
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
+  app.on('activate', () => showWindow());
 });
 
 app.on('window-all-closed', () => {
