@@ -387,10 +387,11 @@ function addPresence(db: Db) {
   addColumn(db, 'users', 'time_zone', 'TEXT');
   addColumn(db, 'users', 'email', 'TEXT');
   addColumn(db, 'users', 'email_verified', 'INTEGER NOT NULL DEFAULT 0');
-  addColumn(db, 'users', 'email_mentions', 'INTEGER NOT NULL DEFAULT 1');
   addColumn(db, 'users', 'email_code', 'TEXT');
   addColumn(db, 'users', 'email_code_expires', 'INTEGER');
-  addColumn(db, 'users', 'last_mention_email', 'INTEGER');
+  addColumn(db, 'users', 'reset_code', 'TEXT'); // sha256 of the emailed code for a forgotten password
+  addColumn(db, 'users', 'reset_expires', 'INTEGER');
+  addColumn(db, 'users', 'reset_tries', 'INTEGER NOT NULL DEFAULT 0');
   addColumn(db, 'messages', 'pings', 'TEXT'); // {"everyone":1,"here":1,"roles":[ids]} when the author may ping those
   const hadMentions = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mentions'").get();
   db.exec(`
@@ -410,14 +411,11 @@ function addPresence(db: Db) {
       PRIMARY KEY (message_id, user_id)
     );
     CREATE INDEX IF NOT EXISTS mentions_by_user ON mentions(user_id, message_id);
-    -- Mentions waiting to be emailed if they're still unread after a while.
-    CREATE TABLE IF NOT EXISTS missed_mentions (
-      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-      created_at INTEGER NOT NULL,
-      PRIMARY KEY (user_id, message_id)
-    );
+    -- Emails about missed mentions were dropped for password resets.
+    DROP TABLE IF EXISTS missed_mentions;
   `);
+  for (const col of ['email_mentions', 'last_mention_email'])
+    if ((db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get('users', col))) db.exec(`ALTER TABLE users DROP COLUMN ${col}`);
   if (hadMentions) return;
   // Older messages: @names and replies, so the inbox starts full.
   const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

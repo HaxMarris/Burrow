@@ -1234,3 +1234,7 @@ button.seat-face { cursor: pointer; }
   .status-picks button { padding: 12px; }
   .inline-form { flex-direction: column; }
 }
+.auth-card > .forgot-row { margin: -6px 0 0; text-align: right; }
+.forgot-row a { color: var(--accent); font-weight: 700; }
+.reset-step2 { display: flex; flex-direction: column; gap: 14px; }
+#reset-resend { margin-right: 10px; }

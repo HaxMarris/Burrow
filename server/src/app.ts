@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { writeFile, mkdir, unlink, stat, copyFile } from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { extname, join, normalize } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { addModeratorRole, type Db } from './db.ts';
@@ -28,7 +28,7 @@ export interface AppOptions {
   gifs?: GifOptions;
   /** Link previews are on unless this is false. */
   linkPreviews?: EmbedOptions | false;
-  /** Where to send email (missed mentions, confirming an address); email is off without it. */
+  /** Where to send email (confirming an address, resetting a forgotten password); email is off without it. */
   mail?: MailConfig;
   /** The address people open Burrow at, for links in emails. */
   publicUrl?: string;
@@ -37,7 +37,6 @@ export interface AppOptions {
   /** Push services Burrow will send to. Tests add their own. */
   pushHosts?: string[];
   /** How long a mention waits unread before it's emailed (default 15 minutes). */
-  mentionEmailDelayMs?: number;
 }
 
 type User = { id: number; username: string; avatar: string | null };
@@ -1926,10 +1925,10 @@ export function createApp(opts: AppOptions): Server {
     statusTimers.set(userId, t);
   };
 
-  type MeRow = StatusRow & { quiet_start: number | null; quiet_end: number | null; time_zone: string | null; email: string | null; email_verified: number; email_mentions: number };
+  type MeRow = StatusRow & { quiet_start: number | null; quiet_end: number | null; time_zone: string | null; email: string | null; email_verified: number };
   const meRow = (userId: number) =>
     db
-      .prepare('SELECT status, status_text, status_emoji, status_until, quiet_start, quiet_end, time_zone, email, email_verified, email_mentions FROM users WHERE id = ?')
+      .prepare('SELECT status, status_text, status_emoji, status_until, quiet_start, quiet_end, time_zone, email, email_verified FROM users WHERE id = ?')
       .get(userId) as MeRow;
   /** You, as your own apps see you: settings included. */
   const meJson = (user: User) => {
@@ -1942,7 +1941,6 @@ export function createApp(opts: AppOptions): Server {
       quietHours: r.quiet_start === null || r.quiet_end === null ? null : { start: r.quiet_start, end: r.quiet_end, timeZone: r.time_zone },
       email: r.email,
       emailVerified: !!r.email_verified,
-      emailMentions: !!r.email_mentions,
     };
   };
   const validTimeZone = (tz: unknown) => {
@@ -1986,7 +1984,6 @@ export function createApp(opts: AppOptions): Server {
         db.prepare('UPDATE users SET quiet_start = ?, quiet_end = ?, time_zone = ? WHERE id = ?').run(start, end, q.timeZone as string, user.id);
       }
     }
-    if (body.emailMentions !== undefined) db.prepare('UPDATE users SET email_mentions = ? WHERE id = ?').run(body.emailMentions ? 1 : 0, user.id);
     if (changed) {
       sendPresence(user.id);
       sendTo([user.id], { type: 'me_updated', me: meJson(user) }); // your other devices
@@ -2120,11 +2117,6 @@ export function createApp(opts: AppOptions): Server {
       // Every message only when they asked for every message; otherwise just what's for them.
       if (!forThem && level !== 'all') continue;
       if (statusRow(id)?.status === 'dnd') continue;
-      if (forThem && opts.mail) {
-        const e = db.prepare('SELECT email_verified, email_mentions FROM users WHERE id = ?').get(id) as { email_verified: number; email_mentions: number };
-        if (e.email_verified && e.email_mentions)
-          db.prepare('INSERT OR IGNORE INTO missed_mentions (user_id, message_id, created_at) VALUES (?, ?, ?)').run(id, message.id as number, now());
-      }
       if (online.has(id) && !userIdle(id)) continue; // they'll see it in the app
       const where = dm
         ? isGroupDm(channel.serverId) ? `${message.author} in ${(db.prepare('SELECT name FROM servers WHERE id = ?').get(channel.serverId) as { name: string }).name || 'your group'}` : String(message.author)
@@ -2182,13 +2174,12 @@ export function createApp(opts: AppOptions): Server {
     return { ok: true };
   });
 
-  // ---- email: confirming your address, and mentions you missed ----
+  // ---- email: confirming your address, so you can reset a forgotten password ----
 
   const mailTo = async (to: string, subject: string, text: string) => {
     if (!opts.mail) throw new HttpError(400, "Email isn't set up on this server");
     await sendMail(opts.mail, { to, subject, text });
   };
-  const signature = () => (opts.publicUrl ? `\n\nOpen Burrow: ${opts.publicUrl}\nTo stop these emails, turn them off in your account settings.` : '\n\nTo stop these emails, turn them off in your account settings.');
 
   route('POST', '/api/me/email', async ({ user, body }) => {
     if (!opts.mail) throw new HttpError(400, "Email isn't set up on this server");
@@ -2218,59 +2209,66 @@ export function createApp(opts: AppOptions): Server {
     return meJson(user);
   });
   route('DELETE', '/api/me/email', ({ user }) => {
-    db.prepare('UPDATE users SET email = NULL, email_verified = 0, email_code = NULL, email_code_expires = NULL WHERE id = ?').run(user.id);
-    db.prepare('DELETE FROM missed_mentions WHERE user_id = ?').run(user.id);
+    db.prepare('UPDATE users SET email = NULL, email_verified = 0, email_code = NULL, email_code_expires = NULL, reset_code = NULL WHERE id = ?').run(user.id);
     return meJson(user);
   });
 
-  const MENTION_EMAIL_DELAY = opts.mentionEmailDelayMs ?? 15 * 60 * 1000;
-  const MENTION_EMAIL_GAP = 60 * 60 * 1000; // at most one email an hour
-  let sendingEmails = false;
-  /** Emails people about mentions and direct messages still unread after a while. */
-  const sendMissedEmails = async (t = now()) => {
-    if (!opts.mail || sendingEmails) return;
-    sendingEmails = true;
-    try {
-      const users = db.prepare('SELECT DISTINCT user_id FROM missed_mentions WHERE created_at <= ?').all(t - MENTION_EMAIL_DELAY) as { user_id: number }[];
-      for (const { user_id: userId } of users) {
-        const u = db.prepare('SELECT username, email, email_verified, email_mentions, last_mention_email FROM users WHERE id = ?').get(userId) as
-          | { username: string; email: string | null; email_verified: number; email_mentions: number; last_mention_email: number | null }
-          | undefined;
-        const rows = db.prepare('SELECT message_id FROM missed_mentions WHERE user_id = ? ORDER BY message_id').all(userId) as { message_id: number }[];
-        if (!u?.email || !u.email_verified || !u.email_mentions) {
-          db.prepare('DELETE FROM missed_mentions WHERE user_id = ?').run(userId);
-          continue;
-        }
-        // Only what's still unread, in rooms they can still see.
-        const unread = messagesByIds(rows.map((r) => r.message_id)).filter((m) => {
-          const c = channelById(m.channelId as number);
-          return !!c && canSee(c, userId) && (m.id as number) > lastReadOf(userId, c.id, c.serverId);
-        });
-        if (!unread.length) {
-          db.prepare('DELETE FROM missed_mentions WHERE user_id = ?').run(userId);
-          continue;
-        }
-        if (u.last_mention_email && t - u.last_mention_email < MENTION_EMAIL_GAP) continue; // they'll be in the next one
-        if (statusRow(userId)?.status === 'dnd') continue;
-        db.prepare('DELETE FROM missed_mentions WHERE user_id = ?').run(userId);
-        db.prepare('UPDATE users SET last_mention_email = ? WHERE id = ?').run(t, userId);
-        const lines = unread.slice(-10).map((m) => {
-          const p = placeOf(m.channelId as number, userId);
-          const where = p?.kind === 'dm' ? 'a direct message' : `#${p?.channelName} in ${p?.serverName}`;
-          return `${m.author} in ${where}:\n  ${plainPreview(m)}`;
-        });
-        const subject = unread.length === 1 ? `${unread[0].author} mentioned you on Burrow` : `${unread.length} messages for you on Burrow`;
-        const more = unread.length > 10 ? `\n\n…and ${unread.length - 10} more.` : '';
-        await mailTo(u.email, subject, `Hi ${u.username},\n\nYou have messages waiting on Burrow:\n\n${lines.join('\n\n')}${more}${signature()}`).catch((err) =>
-          console.error('Sending a mention email failed:', err),
-        );
+  // Forgot your password: a code goes to your confirmed email, and the code sets a new one.
+  const RESET_MINUTES = 30;
+  const hashCode = (code: string) => createHash('sha256').update(code).digest('hex');
+  route(
+    'POST',
+    '/api/password/forgot',
+    async ({ body, ip }) => {
+      if (!opts.mail) throw new HttpError(400, "Email isn't set up on this server, so ask whoever runs it to reset your password.");
+      const name = String(body.username ?? '').trim();
+      checkTries([`forgot-ip:${ip}`], 10);
+      checkTries([`reset-user:${name.toLowerCase()}`], 3);
+      failedTry([`forgot-ip:${ip}`], 60 * 60 * 1000);
+      failedTry([`reset-user:${name.toLowerCase()}`], 60 * 60 * 1000); // every code sent counts, so nobody's inbox is flooded
+      const u = db.prepare('SELECT id, username, email, email_verified FROM users WHERE username = ?').get(name) as
+        | { id: number; username: string; email: string | null; email_verified: number }
+        | undefined;
+      // The same answer either way, so this can't be used to find out who has an email on file.
+      const answer = { ok: true, minutes: RESET_MINUTES };
+      if (!u?.email || !u.email_verified) return answer;
+      const code = String(randomBytes(4).readUInt32BE() % 1_000_000).padStart(6, '0');
+      db.prepare('UPDATE users SET reset_code = ?, reset_expires = ?, reset_tries = 0 WHERE id = ?').run(hashCode(code), now() + RESET_MINUTES * 60 * 1000, u.id);
+      const link = opts.publicUrl ? `\n\nOpen Burrow: ${opts.publicUrl}` : '';
+      await mailTo(u.email, `Your Burrow password code: ${code}`, `Hi ${u.username},\n\nSomeone (hopefully you) asked to reset your Burrow password. Your code is ${code}. It works for ${RESET_MINUTES} minutes.${link}\n\nIf it wasn't you, ignore this email: your password stays the same.`).catch((err) =>
+        console.error('Sending a password reset email failed:', err),
+      );
+      return answer;
+    },
+    false,
+  );
+  route(
+    'POST',
+    '/api/password/reset',
+    ({ body, ip }) => {
+      const name = String(body.username ?? '').trim();
+      checkTries([`reset-ip:${ip}`], 10);
+      const u = db.prepare(`SELECT id, username, ${avatarUrl('avatar')} AS avatar, reset_code, reset_expires, reset_tries FROM users WHERE username = ?`).get(name) as
+        | (User & { reset_code: string | null; reset_expires: number | null; reset_tries: number })
+        | undefined;
+      if (!u?.reset_code || !u.reset_expires || u.reset_expires < now()) throw new HttpError(400, 'That code has run out. Ask for a new one.');
+      if (!sameText(hashCode(String(body.code ?? '').trim()), u.reset_code)) {
+        failedTry([`reset-ip:${ip}`]);
+        // Five wrong guesses and the code is gone, so it can't be guessed.
+        if (u.reset_tries + 1 >= 5) db.prepare('UPDATE users SET reset_code = NULL WHERE id = ?').run(u.id);
+        else db.prepare('UPDATE users SET reset_tries = reset_tries + 1 WHERE id = ?').run(u.id);
+        throw new HttpError(400, u.reset_tries + 1 >= 5 ? 'Too many wrong codes. Ask for a new one.' : "That code isn't right");
       }
-    } finally {
-      sendingEmails = false;
-    }
-  };
-  const emailTimer = setInterval(() => void sendMissedEmails(), 60_000);
-  emailTimer.unref();
+      if (typeof body.newPassword !== 'string' || body.newPassword.length < 8) throw new HttpError(400, 'New password must be at least 8 characters');
+      db.prepare('UPDATE users SET password_hash = ?, reset_code = NULL, reset_expires = NULL, reset_tries = 0 WHERE id = ?').run(hashPassword(body.newPassword), u.id);
+      // Signed out everywhere, as when you change it yourself.
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id);
+      for (const ws of sockets.get(u.id) ?? []) ws.close(4001, 'Password changed');
+      clearTries(`login-user:${name.toLowerCase()}`);
+      return startSession({ id: u.id, username: u.username, avatar: u.avatar });
+    },
+    false,
+  );
 
   // ---- unread messages: the newest message each person has read in each room ----
 
@@ -3654,11 +3652,10 @@ export function createApp(opts: AppOptions): Server {
   };
 
   // Tests set a due time in the past and then check the clock, rather than waiting for it.
-  Object.assign(server, { checkClock: tick, checkAfk, sendMissedEmails });
+  Object.assign(server, { checkClock: tick, checkAfk });
   server.on('close', () => {
     wss.close();
     clearInterval(afkTimer);
-    clearInterval(emailTimer);
     for (const t of statusTimers.values()) clearTimeout(t);
     if (wakeTimer) clearTimeout(wakeTimer);
   });

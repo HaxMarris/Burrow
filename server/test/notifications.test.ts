@@ -58,7 +58,7 @@ const mailText = (raw: string) => {
   return { subject: /Subject: (.*)/.exec(head)![1], text: Buffer.from(body.replace(/\s/g, ''), 'base64').toString() };
 };
 
-let app: Server & { sendMissedEmails?: (t?: number) => Promise<void> };
+let app: Server;
 let base = '';
 let pushHost = '';
 
@@ -72,7 +72,6 @@ before(async () => {
     pushHosts: [pushHost],
     mail: { url: `smtp://localhost:${(fakeSmtp.address() as AddressInfo).port}`, from: 'Burrow <burrow@example.com>' },
     publicUrl: 'https://burrow.example.com',
-    mentionEmailDelayMs: 0,
   });
   await new Promise<void>((r) => app.listen(0, r));
   base = `http://localhost:${(app.address() as AddressInfo).port}`;
@@ -322,9 +321,8 @@ test('a direct message pushes to the other person', async () => {
   assert.equal(pushes[0].message.badge, 1);
 });
 
-test('email: confirm an address with a code, then get mentions you missed', async () => {
-  const [ann, bob] = await people('ann', 'bob');
-  const b = await burrow(ann, bob);
+test('email: confirm an address with a code, then reset a forgotten password with it', async () => {
+  const [bob, eve] = await people('bob', 'eve');
   mails.length = 0;
   let me = (await call('/api/me/email', { body: { email: 'bob@example.com' }, token: bob.token })).data;
   assert.equal(me.email, 'bob@example.com');
@@ -336,26 +334,34 @@ test('email: confirm an address with a code, then get mentions you missed', asyn
   assert.equal(me.emailVerified, true);
   assert.equal((await call('/api/me/email', { body: { email: 'not an email' }, token: bob.token })).status, 400);
 
-  // Read before the email goes out: no email.
+  // No confirmed email, or no such person: the same answer, and no email.
   mails.length = 0;
-  const seen = (await say(ann.token, b.room, `@${bob.user.username} first`)).data;
-  await call(`/api/channels/${b.room}/read`, { body: { lastReadId: seen.id }, token: bob.token });
-  await app.sendMissedEmails!(Date.now() + 1000);
+  assert.deepEqual((await call('/api/password/forgot', { body: { username: eve.user.username } })).data, { ok: true, minutes: 30 });
+  assert.deepEqual((await call('/api/password/forgot', { body: { username: 'nobody-here' } })).data, { ok: true, minutes: 30 });
   assert.equal(mails.length, 0);
-  // Still unread: one email with it.
-  await say(ann.token, b.room, `@${bob.user.username} second`);
-  await app.sendMissedEmails!(Date.now() + 1000);
+
+  // Bob forgot his: a code arrives, and a wrong one doesn't work.
+  assert.equal((await call('/api/password/forgot', { body: { username: bob.user.username } })).status, 200);
   assert.equal(mails.length, 1);
   const mail = mailText(mails[0]);
-  assert.match(mail.subject, /^ann\d+ mentioned you on Burrow$/);
-  assert.match(mail.text, /#general in Den:\r\n {2}@bob\d+ second/);
+  const reset = /code: (\d{6})/.exec(mail.subject)![1];
   assert.match(mail.text, /https:\/\/burrow\.example\.com/);
-  // At most one an hour.
-  await say(ann.token, b.room, `@${bob.user.username} third`);
-  await app.sendMissedEmails!(Date.now() + 1000);
-  assert.equal(mails.length, 1);
-  // Turned off: none.
-  await call('/api/me', { method: 'PATCH', body: { emailMentions: false }, token: bob.token });
-  await app.sendMissedEmails!(Date.now() + 2 * 3600e3);
-  assert.equal(mails.length, 1);
+  const wrong = reset === '000000' ? '111111' : '000000';
+  assert.equal((await call('/api/password/reset', { body: { username: bob.user.username, code: wrong, newPassword: 'new-password' } })).status, 400);
+  assert.equal((await call('/api/password/reset', { body: { username: bob.user.username, code: reset, newPassword: 'short' } })).status, 400);
+  const done = await call('/api/password/reset', { body: { username: bob.user.username, code: reset, newPassword: 'new-password' } });
+  assert.equal(done.status, 200);
+  assert.ok(done.data.token);
+  // Signed out everywhere else, the code is used up, and the new password works.
+  assert.equal((await call('/api/me', { token: bob.token })).status, 401);
+  assert.equal((await call('/api/password/reset', { body: { username: bob.user.username, code: reset, newPassword: 'another-one' } })).status, 400);
+  assert.equal((await call('/api/login', { body: { username: bob.user.username, password: 'password1' } })).status, 401);
+  assert.equal((await call('/api/login', { body: { username: bob.user.username, password: 'new-password' } })).status, 200);
+
+  // Five wrong guesses and the code stops working.
+  await call('/api/password/forgot', { body: { username: bob.user.username } });
+  const next = /code: (\d{6})/.exec(mailText(mails.at(-1)!).subject)![1];
+  const bad = next === '000000' ? '111111' : '000000';
+  for (let i = 0; i < 5; i++) await call('/api/password/reset', { body: { username: bob.user.username, code: bad, newPassword: 'whatever-1' } });
+  assert.equal((await call('/api/password/reset', { body: { username: bob.user.username, code: next, newPassword: 'whatever-1' } })).status, 400);
 });

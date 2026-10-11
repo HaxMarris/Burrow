@@ -41,6 +41,6 @@ app.listen(port, () => {
   if (!process.env.REGISTRATION_CODE)
     console.log('Warning: REGISTRATION_CODE is not set, so anyone who can reach this server can sign up.');
   if (!process.env.KLIPY_API_KEY) console.log('The GIF picker is off (set KLIPY_API_KEY to turn it on).');
-  if (!process.env.SMTP_URL) console.log('Email is off (set SMTP_URL to email people about mentions they missed).');
+  if (!process.env.SMTP_URL) console.log("Email is off, so people can't reset a forgotten password themselves (set SMTP_URL to turn it on).");
   if (!process.env.LIVEKIT_API_KEY) console.log('Voice rooms are off (set LIVEKIT_API_KEY and LIVEKIT_API_SECRET to turn them on).');
 });
