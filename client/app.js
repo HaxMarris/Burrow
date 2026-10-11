@@ -491,6 +491,11 @@ function handleEvent(ev) {
       if (state.voice) leaveVoice();
       toast(`${ev.by} took you out of the fire.`);
       break;
+    case 'reports': {
+      const s = state.servers.get(ev.serverId);
+      if (s) s.openReports = ev.open;
+      break;
+    }
     case 'server_muted': {
       const s = state.servers.get(ev.serverId);
       if (s) s.serverMuted = ev.muted;
@@ -1657,6 +1662,8 @@ $('#server-menu-btn').onclick = () => {
       <button class="btn secondary" id="open-notify" aria-haspopup="menu">Notifications: ${n.muted ? 'muted' : { all: 'all messages', mentions: 'only @mentions', none: 'nothing' }[n.level]}</button>
       ${s.rules ? '<button class="btn secondary" id="open-rules">Rules</button>' : ''}
       ${can(s, 'burrow') ? '<button class="btn secondary" id="open-edit">Edit burrow</button>' : ''}
+      ${can(s, 'messages') ? `<button class="btn secondary" id="open-reports">Reports${s.openReports ? ` · ${s.openReports}` : ''}</button>` : ''}
+      ${can(s, 'audit') ? '<button class="btn secondary" id="open-audit">Audit log</button>' : ''}
       ${can(s, 'roles') ? `<button class="btn secondary" id="open-roles">Roles${s.roles.length ? ` · ${s.roles.length}` : ''}</button>` : ''}
       ${can(s, 'emoji') && state.maxUploadBytes ? `<button class="btn secondary" id="open-emoji">Emoji and stickers${s.emoji?.length ? ` · ${s.emoji.length}` : ''}</button>
         <button class="btn secondary" id="open-sounds">Soundboard${s.sounds?.length ? ` · ${s.sounds.length}` : ''}</button>` : ''}
@@ -1672,6 +1679,8 @@ $('#server-menu-btn').onclick = () => {
   $('#open-rules')?.addEventListener('click', () => openRules(s));
   $('#open-edit')?.addEventListener('click', () => openEditBurrow(s.id));
   $('#open-roles')?.addEventListener('click', () => openRoles(s.id));
+  $('#open-reports')?.addEventListener('click', () => openReports(s.id));
+  $('#open-audit')?.addEventListener('click', () => openAudit(s.id));
   $('#open-emoji')?.addEventListener('click', () => openEmojiManager(s.id));
   $('#open-sounds')?.addEventListener('click', () => openSounds(s.id));
   $('#leave-server').onclick = async () => {
@@ -1766,14 +1775,18 @@ const GEAR_ICON = '<svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0
 // gets what their roles allow, and can only act on people and roles below their highest role.
 const PERMS = [
   ['rooms', 'Manage rooms', 'Add, change and delete rooms, and see every private room'],
-  ['messages', 'Delete messages', "Delete other people's messages"],
+  ['messages', 'Delete messages', "Delete other people's messages, many at once too, and deal with reports"],
+  ['pin', 'Pin messages', 'Pin and unpin messages in rooms'],
+  ['timeout', 'Time people out', "Stop someone writing and talking for a while, without removing them"],
   ['remove', 'Remove people', 'Take people out of the burrow (they can come back with the invite)'],
   ['ban', 'Ban people', "Remove people for good, and see and lift bans"],
   ['roles', 'Manage roles', 'Make, change and hand out the roles below their own'],
-  ['burrow', 'Edit the burrow', "Change its name, pictures, description, welcome room, rules and AFK fire, and manage invites and events"],
+  ['burrow', 'Edit the burrow', "Change its name, pictures, description, welcome room, rules, AFK fire, upload limit and word filter, and manage events"],
+  ['invites', 'Manage invites', "See and cancel everyone's invite links, and make a new permanent link"],
   ['emoji', 'Manage emoji and sounds', "Add, rename and remove the burrow's own emoji, stickers and soundboard sounds"],
   ['voice', 'Manage voice', 'Move people between fires, mute them for everyone, disconnect them, and sit at a full fire'],
   ['everyone', 'Mention @everyone and roles', 'Ping everyone in a room with @everyone or @here, or everyone with a role with @role'],
+  ['audit', 'See the audit log', 'See who removed, banned, deleted or changed what, and when'],
 ];
 const ROLE_COLORS = ['#4f8a5b', '#2f7d74', '#3f6fa8', '#7a5aa6', '#b0527a', '#c2553d', '#c98a2b', '#8a8f87'];
 
@@ -1843,7 +1856,9 @@ function openRoomSettings(c) {
       <div id="room-posters" class="${c.announce ? '' : 'hidden'}">
         <p class="small muted">The host and people who manage rooms can always post. Which roles can too?</p>
         ${s.roles?.length ? `<ul class="access-list" id="post-roles">${s.roles.map((r) => `<li><label class="check"><input type="checkbox" value="${r.id}" ${postRoles.includes(r.id) ? 'checked' : ''} /> ${roleDot(r.color)}${escapeHtml(r.name)}</label></li>`).join('')}</ul>` : '<p class="small muted">This burrow has no roles yet.</p>'}
-      </div>` : c.kind === 'voice' ? voiceRoomSettings(c) : ''}
+      </div>
+      ${s.roles?.length ? `<h4>Read only</h4><p class="small muted">People with these roles can read this room but not write in it, unless they manage rooms.</p>
+        <ul class="access-list" id="read-only-roles">${s.roles.map((r) => `<li><label class="check"><input type="checkbox" value="${r.id}" ${(c.readOnlyRoleIds ?? []).includes(r.id) ? 'checked' : ''} /> ${roleDot(r.color)}${escapeHtml(r.name)}</label></li>`).join('')}</ul>` : ''}` : c.kind === 'voice' ? voiceRoomSettings(c) : ''}
       ${privacyFields(s, c.private, c.memberIds ?? [], c.roleIds ?? [])}
       <div class="error" id="modal-error"></div>
       <div class="modal-row">
@@ -1870,6 +1885,7 @@ function openRoomSettings(c) {
       slow: Number($('#room-slow').value),
       announce: $('#room-announce').checked,
       postRoleIds: [...document.querySelectorAll('#post-roles input:checked')].map((i) => Number(i.value)),
+      ...($('#read-only-roles') ? { readOnlyRoleIds: [...document.querySelectorAll('#read-only-roles input:checked')].map((i) => Number(i.value)) } : {}),
     } : c.kind === 'voice' ? { userLimit: Number($('#room-seats').value), keepChat: $('#room-keep-chat').checked } : {};
     try {
       const updated = await api(`/api/channels/${c.id}`, { method: 'PATCH', body: { name: $('#room-name').value, ...extra, ...readPrivacyFields() } });
@@ -1888,6 +1904,7 @@ function openRoomSettings(c) {
   };
 }
 
+const TIMEOUTS = [[5, '5 minutes'], [10, '10 minutes'], [60, '1 hour'], [1440, '1 day'], [10080, '1 week']];
 function openMemberMenu(s, m) {
   const myRank = rankOf(s, me(s));
   const self = m.id === state.me.id;
@@ -1900,6 +1917,10 @@ function openMemberMenu(s, m) {
     <p class="muted">${isHost(s, m.id) ? 'Host of' : current.length ? `${current.map((r) => escapeHtml(r.name)).join(', ')} in` : 'Member of'} ${escapeHtml(s.name)}</p>
     ${editRoles ? `<h4>Roles</h4><ul class="access-list" id="member-roles">${roles.map((r) => `<li><label class="check"><input type="checkbox" value="${r.id}" ${m.roleIds.includes(r.id) ? 'checked' : ''} ${r.position > myRank ? '' : 'disabled'} /> ${roleDot(r.color)}${escapeHtml(r.name)}</label></li>`).join('')}</ul>
       <button class="btn" id="member-save-roles">Save roles</button>` : ''}
+    ${removable && can(s, 'timeout') ? (m.timeoutUntil && m.timeoutUntil > Date.now()
+      ? `<p class="muted small">Timed out until ${escapeHtml(new Date(m.timeoutUntil).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' }))}.</p><button class="btn secondary" id="member-timeout-end">End timeout</button>`
+      : `<div class="inline-form"><select id="member-timeout-for">${TIMEOUTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select><button class="btn secondary" id="member-timeout">Time out</button></div>
+        <p class="small muted">They can read, but not write, react with files or talk at a fire until it runs out.</p>`) : ''}
     ${removable && can(s, 'voice') ? `<button class="btn secondary" id="member-voice-mute">${m.voiceMuted ? 'Let them speak in voice' : 'Mute in voice for everyone'}</button>` : ''}
     ${removable && can(s, 'remove') ? '<button class="btn secondary" id="member-remove">Remove from burrow</button>' : ''}
     ${removable && can(s, 'ban') ? '<button class="btn danger" id="member-ban">Ban from burrow</button>' : ''}
@@ -1913,6 +1934,8 @@ function openMemberMenu(s, m) {
   if (editRoles) $('#member-save-roles').onclick = () =>
     act('roles', { roleIds: [...document.querySelectorAll('#member-roles input:checked')].map((i) => Number(i.value)) });
   $('#member-voice-mute')?.addEventListener('click', () => act('voice-mute', { muted: !m.voiceMuted }));
+  $('#member-timeout')?.addEventListener('click', () => act('timeout', { minutes: Number($('#member-timeout-for').value) }));
+  $('#member-timeout-end')?.addEventListener('click', () => act('timeout', { minutes: 0 }));
   $('#member-remove')?.addEventListener('click', () => confirm(`Remove ${m.username} from ${s.name}?`) && act('remove', { ban: false }));
   $('#member-ban')?.addEventListener('click', () => confirm(`Ban ${m.username} from ${s.name}?`) && act('remove', { ban: true }));
 }
@@ -1979,6 +2002,9 @@ function openRoleEditor(serverId, roleId) {
         <input type="checkbox" value="${key}" ${role.perms.includes(key) ? 'checked' : ''} ${can(s, key) ? '' : 'disabled'} />
         <span><b>${label}</b><br /><span class="small muted">${hint}</span></span></label></li>`).join('')}</ul>
       <p class="small muted">A role with nothing ticked is just a colored label, like "Friends".</p>
+      ${state.maxUploadBytes ? `<label>Largest file this role can share
+        <span class="inline-form"><input type="number" id="role-upload" min="0" max="${Math.floor(state.maxUploadBytes / 1048576)}" placeholder="Same as everyone" value="${role.uploadMb ?? ''}" /><span class="muted">MB</span></span>
+        <span class="small muted">Empty: the burrow's limit. 0: no files. People get the biggest limit of their roles, up to the server's ${formatSize(state.maxUploadBytes)}.</span></label>` : ''}
       <div class="error" id="modal-error"></div>
       <div class="modal-row">
         ${roleId ? '<button type="button" class="btn danger" id="role-delete">Delete role</button>' : ''}
@@ -2003,6 +2029,7 @@ function openRoleEditor(serverId, roleId) {
       name: $('#role-name').value,
       color: $('#role-color').value,
       perms: [...document.querySelectorAll('.perm-list input:checked')].map((i) => i.value),
+      ...($('#role-upload') ? { uploadMb: $('#role-upload').value === '' ? null : Number($('#role-upload').value) } : {}),
     };
     try { done(await api(roleId ? `/api/roles/${roleId}` : `/api/servers/${serverId}/roles`, { method: roleId ? 'PATCH' : 'POST', body })); }
     catch (err) { $('#modal-error').textContent = err.message; }
@@ -2419,25 +2446,33 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeGifPi
 
 const IMAGE_TYPES = /^image\/(png|jpeg|gif|webp|avif)$/;
 
+/** The largest file you can share in the open room: the burrow can set its own, and roles can change it. */
+function uploadLimit(channelId = state.channelId) {
+  const s = roomById(channelId)?.s;
+  return s && !isDm(s) && s.myUploadLimit != null ? s.myUploadLimit : state.maxUploadBytes;
+}
+
 function addFiles(fileList) {
   if (!state.maxUploadBytes || !state.channelId) return;
   const channelId = state.channelId;
+  const limit = uploadLimit(channelId);
+  if (!limit) return alert("Your roles can't share files in this burrow.");
   for (const file of fileList) {
     if (state.pending.length >= 10) { alert('You can attach up to 10 files at a time.'); break; }
     const shrinkable = SHRINKABLE_TYPES.test(file.type);
     // Photos are checked after shrinking, since most get well under the limit.
-    if (file.size > state.maxUploadBytes && !shrinkable) {
-      alert(`"${file.name}" is too big. Files can be at most ${formatSize(state.maxUploadBytes)}.`);
+    if (file.size > limit && !shrinkable) {
+      alert(`"${file.name}" is too big. Files can be at most ${formatSize(limit)} here.`);
       continue;
     }
     const p = { file, previewUrl: IMAGE_TYPES.test(file.type) ? URL.createObjectURL(file) : null, progress: 0, error: null };
     p.done = (shrinkable ? shrinkPhoto(file) : Promise.resolve(file)).then((f) => {
       p.file = f;
       if (!state.pending.includes(p)) throw new Error('Upload cancelled');
-      if (f.size > state.maxUploadBytes) {
-        p.error = `Too big (at most ${formatSize(state.maxUploadBytes)})`;
+      if (f.size > limit) {
+        p.error = `Too big (at most ${formatSize(limit)})`;
         renderPending();
-        throw new Error(`"${f.name}" is too big. Files can be at most ${formatSize(state.maxUploadBytes)}.`);
+        throw new Error(`"${f.name}" is too big. Files can be at most ${formatSize(limit)} here.`);
       }
       return uploadFile(channelId, p);
     });
@@ -5852,7 +5887,7 @@ function openMessageMenu(anchor, m) {
   const mine = m.authorId === state.me.id;
   const saved = state.saved.get(m.id);
   openMenu(anchor, [
-    { label: m.pinnedAt ? 'Unpin' : 'Pin to this room', run: () => api(`/api/messages/${m.id}/pin`, { method: 'POST', body: { pinned: !m.pinnedAt } }).catch(alertError) },
+    (isDm(s) || can(s, 'pin')) && { label: m.pinnedAt ? 'Unpin' : 'Pin to this room', run: () => api(`/api/messages/${m.id}/pin`, { method: 'POST', body: { pinned: !m.pinnedAt } }).catch(alertError) },
     where && !where.thread && !isDm(s) && { label: m.thread ? 'Open thread' : 'Start a thread', run: () => startThread(m) },
     { label: 'Forward', run: () => openForward(m) },
     { label: saved ? 'Remove from saved' : 'Save for later', run: () => toggleSaved(m) },
@@ -5862,6 +5897,8 @@ function openMessageMenu(anchor, m) {
     m.editedAt && { label: 'Edit history', run: () => openEditHistory(m) },
     mine && m.embeds?.length && { label: 'Remove link previews', run: () => api(`/api/messages/${m.id}/embeds`, { method: 'POST' }).catch(alertError) },
     mine && m.poll && !m.poll.closed && { label: 'End poll now', run: () => api(`/api/messages/${m.id}/poll/end`, { method: 'POST' }).catch(alertError) },
+    s && !isDm(s) && !mine && { label: 'Report to moderators', run: () => openReport(m) },
+    s && !isDm(s) && can(s, 'messages') && { label: 'Delete from here down', danger: true, run: () => bulkDeleteFrom(m) },
     (mine || can(s, 'messages')) && { label: 'Delete', danger: true, run: () => confirmDelete(m) },
   ]);
 }
@@ -6040,6 +6077,113 @@ async function openSaved() {
       ],
     })));
   } catch (err) { $('#saved-list') && ($('#saved-list').textContent = err.message); }
+}
+
+// ---- moderation: reports, the audit log, bulk delete
+
+function openReport(m) {
+  modal(`<h2>Report to moderators</h2><p class="muted small">The people who manage messages in this burrow will see this message and your reason.</p>
+    <label>Reason (optional)<input id="report-reason" maxlength="200" placeholder="What's wrong with it?"></label>
+    <div class="modal-row"><button class="btn secondary" data-close>Cancel</button><button class="btn danger" id="report-send">Report</button></div>`);
+  $('#report-send').onclick = async () => {
+    try {
+      await api(`/api/messages/${m.id}/report`, { method: 'POST', body: { reason: $('#report-reason').value.trim() } });
+      closeModal();
+      toast('Reported to the moderators.');
+    } catch (err) { alertError(err); }
+  };
+}
+
+function bulkDeleteFrom(m) {
+  modal(`<h2>Delete from here down</h2><p>Delete this message and every message after it in this room? Up to 100 at a time, and it can't be undone.</p>
+    <div class="modal-row"><button class="btn secondary" data-close>Cancel</button><button class="btn danger" id="bulk-del">Delete them</button></div>`);
+  $('#bulk-del').onclick = async () => {
+    closeModal();
+    try {
+      const { deleted } = await api(`/api/channels/${m.channelId}/bulk-delete`, { method: 'POST', body: { fromId: m.id } });
+      toast(`Deleted ${deleted} message${deleted === 1 ? '' : 's'}.`);
+    } catch (err) { alertError(err); }
+  };
+}
+
+async function openReports(serverId) {
+  modal(`<h2>Reports</h2><p class="muted small">Messages people reported, and ones the word filter caught. Handled reports stay here for a week.</p>
+    <div id="report-list" class="card-list"><p class="muted">Loading…</p></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
+  try {
+    const reports = await api(`/api/servers/${serverId}/reports`);
+    const list = $('#report-list');
+    if (!list) return;
+    if (!reports.length) return (list.innerHTML = '<p class="muted">No reports. All quiet.</p>');
+    list.replaceChildren(...reports.map((r) => {
+      const who = r.reporter ? `Reported by ${r.reporter}` : 'Caught by the word filter';
+      const note = `${who}${r.reporter && r.reason ? `: ${r.reason}` : r.reason && !r.reporter ? ` (${r.reason.replace(/^Word filter: /, '')})` : ''}`
+        + (r.resolvedAt ? ` · handled by ${r.resolvedBy ?? 'someone'}` : '');
+      const m = { id: r.messageId, channelId: r.channelId, author: r.author ?? 'Someone', authorId: r.authorId, authorAvatar: r.authorAvatar, content: r.content, createdAt: r.createdAt };
+      const resolve = (deleteMessage) => (b) => {
+        b.disabled = true;
+        api(`/api/reports/${r.id}/resolve`, { method: 'POST', body: { deleteMessage } }).then(() => openReports(serverId)).catch(alertError);
+      };
+      const card = messageCard(m, null, {
+        note,
+        onOpen: r.messageId && !r.resolvedAt ? () => { closeModal(); jumpTo(r.channelId, r.messageId); } : undefined,
+        buttons: r.resolvedAt ? [] : [['Delete message', resolve(true), 'danger'], ['Dismiss', resolve(false)]],
+      });
+      if (r.resolvedAt) card.classList.add('resolved');
+      return card;
+    }));
+  } catch (err) { $('#report-list') && ($('#report-list').textContent = err.message); }
+}
+
+const AUDIT_LABELS = {
+  remove: (e) => `removed ${e.target}`,
+  ban: (e) => `banned ${e.target}`,
+  unban: (e) => `unbanned ${e.target}`,
+  timeout: (e) => `timed out ${e.target} for ${e.detail}`,
+  timeout_end: (e) => `ended ${e.target}'s timeout`,
+  role_create: (e) => `made the role ${e.detail}`,
+  role_edit: (e) => `changed the role ${e.detail}`,
+  role_delete: (e) => `deleted the role ${e.detail}`,
+  role_give: (e) => `gave ${e.target} the role ${e.detail}`,
+  role_take: (e) => `took the role ${e.detail} from ${e.target}`,
+  room_edit: (e) => `changed the room ${e.detail}`,
+  room_delete: (e) => `deleted the room ${e.detail}`,
+  message_delete: (e) => `deleted a message from ${e.target} ${e.detail}`,
+  bulk_delete: (e) => `deleted ${e.detail}`,
+  voice_disconnect: (e) => `disconnected ${e.target} from ${e.detail}`,
+  voice_mute: (e) => `muted ${e.target} at the fire`,
+  voice_unmute: (e) => `unmuted ${e.target} at the fire`,
+  voice_move: (e) => `moved ${e.target} (${e.detail})`,
+  burrow_edit: (e) => `changed the burrow's ${e.detail}`,
+  invite_reset: () => 'made a new invite code',
+};
+
+async function openAudit(serverId) {
+  modal(`<h2>Audit log</h2><p class="muted small">Who did what in this burrow, newest first.</p>
+    <div id="audit-list" class="audit-list"><p class="muted">Loading…</p></div>
+    <div class="modal-row"><button class="btn secondary hidden" id="audit-more">Show older</button><button class="btn secondary" data-close>Close</button></div>`);
+  const list = $('#audit-list');
+  let first = true;
+  const load = async (before) => {
+    try {
+      const { entries, more } = await api(`/api/servers/${serverId}/audit${before ? `?before=${before}` : ''}`);
+      if (!$('#audit-list')) return;
+      if (first) list.innerHTML = '';
+      first = false;
+      if (!entries.length && !before) list.innerHTML = '<p class="muted">Nothing yet.</p>';
+      for (const e of entries) {
+        const row = document.createElement('div');
+        row.className = 'audit-row';
+        const label = AUDIT_LABELS[e.action]?.({ ...e, target: e.target ?? 'someone' }) ?? e.action;
+        row.innerHTML = `<span><b>${escapeHtml(e.actor ?? 'Someone')}</b> ${escapeHtml(label)}</span><span class="muted small">${escapeHtml(formatTime(new Date(e.createdAt)))}</span>`;
+        list.append(row);
+      }
+      const btn = $('#audit-more');
+      btn.classList.toggle('hidden', !more);
+      btn.onclick = () => load(entries[entries.length - 1].id);
+    } catch (err) { list.textContent = err.message; }
+  };
+  load();
 }
 
 // ---- scheduled messages: written now, sent later (text only)
@@ -6750,7 +6894,7 @@ async function sendVoice(r, seconds) {
   const type = (r.rec.mimeType || r.chunks[0]?.type || 'audio/webm').split(';')[0];
   const ext = { 'audio/webm': 'webm', 'audio/ogg': 'ogg', 'audio/mp4': 'm4a' }[type] ?? 'webm';
   const file = new File(r.chunks, `voice-message.${ext}`, { type });
-  if (file.size > state.maxUploadBytes) return alert('That recording is too big to send.');
+  if (file.size > uploadLimit()) return alert(uploadLimit() ? 'That recording is too big to send.' : "Your roles can't share files in this burrow.");
   const replyTo = state.channelId === r.channelId ? state.replyTo : null;
   if (replyTo) setReply(null);
   try {
@@ -7244,6 +7388,8 @@ function postBlock(where) {
   const { s, c } = where;
   if (settingsRoom(s, c)?.archived) return { text: 'This room is archived. You can read it, but nobody can write in it.' };
   if (!s.rulesAccepted) return { text: `Accept ${s.name}'s rules to start chatting.`, button: 'Read the rules', run: () => openRules(s) };
+  if (s.timeoutUntil && s.timeoutUntil > Date.now())
+    return { text: `You're timed out in ${s.name} until ${new Date(s.timeoutUntil).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}. You can still read.` };
   if (!where.thread && c.canPost === false) return { text: 'Only some people can post in this room. You can still react and reply in threads.' };
   return null;
 }
@@ -7365,6 +7511,14 @@ function openEditBurrow(serverId) {
         <span class="small muted">New people accept these before they can chat. Changing them asks everyone again.</span>
       </label>
       ${afkSettings(s)}
+      ${state.maxUploadBytes ? `<label>Largest file people can share
+        <span class="inline-form"><input type="number" id="burrow-upload" min="0" max="${Math.floor(state.maxUploadBytes / 1048576)}" placeholder="${Math.floor(state.maxUploadBytes / 1048576)}" value="${s.uploadMb ?? ''}" /><span class="muted">MB</span></span>
+        <span class="small muted">Empty: the server's ${formatSize(state.maxUploadBytes)}. 0: no files. Roles can allow more (Roles › Edit).</span></label>` : ''}
+      <label>Word filter<textarea id="burrow-words" rows="2" placeholder="Words separated by commas">${escapeHtml((s.wordFilter?.words ?? []).join(', '))}</textarea>
+        <span class="small muted">Whole words, any capitals. People who can delete messages aren't filtered.</span></label>
+      <label>When a message has one<select id="burrow-words-action">
+        <option value="block" ${s.wordFilter?.action !== 'flag' ? 'selected' : ''}>Don't send it</option>
+        <option value="flag" ${s.wordFilter?.action === 'flag' ? 'selected' : ''}>Send it, and report it to moderators</option></select></label>
       <div class="error" id="modal-error"></div>
       <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">Save</button></div>
     </form>
@@ -7407,6 +7561,8 @@ function openEditBurrow(serverId) {
           description: $('#burrow-desc').value,
           welcomeChannelId: $('#burrow-welcome').value ? Number($('#burrow-welcome').value) : null,
           rules: $('#burrow-rules').value,
+          ...($('#burrow-upload') ? { uploadMb: $('#burrow-upload').value === '' ? null : Number($('#burrow-upload').value) } : {}),
+          wordFilter: { words: $('#burrow-words').value.split(/[,\n]/).map((w) => w.trim()).filter(Boolean), action: $('#burrow-words-action').value },
           ...($('#burrow-afk') ? { afkChannelId: $('#burrow-afk').value ? Number($('#burrow-afk').value) : null, afkMinutes: Number($('#burrow-afk-minutes').value) } : {}),
         },
       }));
