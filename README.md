@@ -46,9 +46,13 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 chat-app/
 ├── server/     Node.js + TypeScript server (HTTP API, WebSockets, SQLite)
 ├── client/     The chat UI (plain HTML/CSS/JS), served by the server and bundled into the desktop app
+│   └── js/     The app itself, in parts that index.html loads in order (they share one scope)
 ├── desktop/    Electron wrapper that packages the client as an installable app
+├── scripts/    check-client.mjs, the client check that runs on every pull request
 ├── Dockerfile, docker-compose.yml
-└── .github/workflows/desktop-release.yml   Builds installers on GitHub when you publish a release
+└── .github/workflows/
+    ├── checks.yml           On every pull request: server types and tests, client checks, Docker build
+    └── desktop-release.yml  Builds installers on GitHub when you publish a release
 ```
 
 The server has one runtime dependency (`ws`). It uses Node's built-in SQLite
@@ -302,6 +306,8 @@ Burrow has its own names for things: a **burrow** is a shared space for one grou
 - Your account has the notification settings: alerts while Burrow is closed, quiet hours (no sounds or pop-ups, and silent phone alerts, between two times), and, in the desktop app, whether to show the game you're playing.
 - Type `@everyone` (everyone who can see the room), `@here` (only people online) or `@` and a role's name to ping them all. Only roles allowed to *mention @everyone and roles* can; for everyone else it's just text.
 - The **GIF** button next to the message box opens trending GIFs; type to search, and tap one to send it.
+- Pictures and videos load only as they scroll into view, and keep their space so the chat doesn't jump. Videos show a still from the video until you press play, so nothing more downloads until then. A video over 20 MB (or over the limit) gets a **Shrink** button before it's sent, which makes it 720p; it plays the video through once on your device, so it takes as long as the video (Chrome, Edge, Firefox and the desktop app).
+- If your connection drops, Burrow reconnects by itself when it can, fetches only the messages you missed, and puts you back at the fire you were at.
 - The **+** in the message box uploads files, makes a poll, sends a sticker, or sends what you've typed later. The smiley opens every emoji (and your burrows' own), and the microphone records a voice message.
 - Each message's **⋯** menu pins it, starts a thread, forwards it, saves it (or reminds you about it later), marks it unread, or shows its edit history. Your saved and scheduled messages are in your menu, top right.
 - The magnifier at the top of a room searches messages; **Ctrl+K** (⌘K on a Mac) opens it from anywhere. The pin next to it lists the room's pinned messages.
@@ -314,16 +320,62 @@ Burrow has its own names for things: a **burrow** is a shared space for one grou
 ```sh
 cd server
 npm install
-npm run dev      # restarts on changes; open http://localhost:3000
-npm test         # end-to-end API and WebSocket tests
+npm run dev        # restarts on changes; open http://localhost:3000
+npm test           # end-to-end API and WebSocket tests
+npm run typecheck  # TypeScript's type check
+node ../scripts/check-client.mjs   # the client's scripts: load order and duplicate names
 ```
 
-Client changes need only a browser refresh. The API is plain JSON over HTTP
-with a bearer token, and live events come over `/ws?token=…`; see `server/src/app.ts`.
+Client changes need only a browser refresh. The client is plain scripts in `client/js/`, loaded in
+order by `index.html` and sharing one scope, so something one part runs straight away can only use
+what earlier parts set up (functions it calls later, from a click or a message, can live anywhere).
+`check-client.mjs` catches mistakes there. The API is plain JSON over HTTP with a bearer token, and
+live events come over `/ws?token=…`; see `server/src/app.ts`.
+
+Every pull request runs **Checks** on GitHub: the type check, the tests, the client check with ESLint,
+a syntax check of the desktop app and a Docker build.
+
+### Load test
+
+How many people can the server handle? This starts a throwaway Burrow next to the real one (its own
+empty database, deleted afterwards) and adds people in steps, all chatting in one busy room, until
+messages get slow:
+
+```sh
+docker compose exec burrow node --no-warnings server/src/load-test.ts
+```
+
+For voice seats, use LiveKit's own tool from your computer (install it with `winget install LiveKit.LiveKitCLI`
+on Windows, or `brew install livekit-cli`), with the key and secret from `.env`. This sits 10 pretend people
+at a fire, all talking, with 4 cameras on:
+
+```sh
+lk load-test --url wss://your-burrow-address --api-key KEY --api-secret SECRET --room loadtest --audio-publishers 10 --subscribers 10 --video-publishers 4 --video-resolution medium --layout 5x5 --duration 1m
+```
+
+Measured on a 4-core test machine (the load generators ran on the same machine, so a server on its own does a bit better):
+
+| Chat, one room, everyone sending a message every 5 seconds | Messages reach everyone (95%) | Server CPU |
+| --- | --- | --- |
+| 100 people | 7 ms | 9% of one core |
+| 200 people | 14 ms | 26% |
+| 300 people | 42 ms | 48% |
+| 400 people | 340 ms | 77% |
+| 500 people | 4 s, and some lost | maxed out |
+
+| Voice, everyone talking at once | LiveKit CPU | Sent out |
+| --- | --- | --- |
+| 10 at a fire | 22% of one core | 2 Mbps |
+| 25 at a fire | 67% | 12 Mbps |
+| 10 at a fire, 4 cameras | 27% | 22 Mbps |
+
+The $12 Lightsail box has 2 vCPUs and is a burstable plan, so expect around half of this for long stretches:
+a few hundred people chatting, or a couple of full fires with cameras, before it slows down. Bandwidth runs
+out before CPU for video: each camera at medium quality is about 0.5 Mbps for every person watching it.
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more), the rooms, burrows and organization update (headings and room order, topics, slow mode, announcement and archived rooms, invite links that run out, banners, rules and a welcome room, muting, events, group conversations and folders), and the voice and Campfire update (push to talk and hotkeys, voice sensitivity, soundboard, moving and muting people, AFK fire, seat limits, calls, listen together, kept fireside chat, music mode and a voice changer), and the notifications and presence update (away and Do not disturb, custom statuses, playing now, a mentions inbox, @everyone and @role mentions, quiet hours, the app icon count, alerts while Burrow is closed), password resets by email, the moderation update (timeouts, an audit log, reports, a word filter, bulk delete, read-only roles, more role permissions and upload limits per role), the video and streaming update (side by side, pop out, previews, chat over a stream, who's watching, camera backgrounds, tab sharing with sound, clips, drawing and go-live posts), and the profiles, friends and DMs update (display names, nicknames, profile cards, friends, blocking, username changes, devices, reset links, two-step login, passkeys, data export and account deletion).
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more), the rooms, burrows and organization update (headings and room order, topics, slow mode, announcement and archived rooms, invite links that run out, banners, rules and a welcome room, muting, events, group conversations and folders), and the voice and Campfire update (push to talk and hotkeys, voice sensitivity, soundboard, moving and muting people, AFK fire, seat limits, calls, listen together, kept fireside chat, music mode and a voice changer), and the notifications and presence update (away and Do not disturb, custom statuses, playing now, a mentions inbox, @everyone and @role mentions, quiet hours, the app icon count, alerts while Burrow is closed), password resets by email, the moderation update (timeouts, an audit log, reports, a word filter, bulk delete, read-only roles, more role permissions and upload limits per role), the video and streaming update (side by side, pop out, previews, chat over a stream, who's watching, camera backgrounds, tab sharing with sound, clips, drawing and go-live posts), the profiles, friends and DMs update (display names, nicknames, profile cards, friends, blocking, username changes, devices, reset links, two-step login, passkeys, data export and account deletion), and the speed and reliability update (clean reconnects, lazy-loaded pictures, video thumbnails and shrinking, the client split into parts, checks on every pull request and a load test).
 
 Ideas for later: text message encryption, sharing one program's sound on macOS.
 

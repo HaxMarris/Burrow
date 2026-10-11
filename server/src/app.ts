@@ -153,8 +153,37 @@ const MIME: Record<string, string> = {
   '.webmanifest': 'application/manifest+json',
 };
 
+/**
+ * Preparing SQL takes longer than running it, and the same few hundred queries run over and over
+ * (some once per person in a burrow), so each prepared statement is kept and reused.
+ */
+function withStatementCache(db: Db): Db {
+  const cache = new Map<string, ReturnType<Db['prepare']>>();
+  const prepare = (sql: string) => {
+    let st = cache.get(sql);
+    if (st) {
+      // Most recently used last, so the oldest go first when it's full.
+      cache.delete(sql);
+      cache.set(sql, st);
+      return st;
+    }
+    st = db.prepare(sql);
+    cache.set(sql, st);
+    // Queries with a list of ids in them differ each time; don't let those pile up.
+    if (cache.size > 1000) cache.delete(cache.keys().next().value!);
+    return st;
+  };
+  return new Proxy(db, {
+    get(target, key) {
+      if (key === 'prepare') return prepare;
+      const v = Reflect.get(target, key, target);
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+  });
+}
+
 export function createApp(opts: AppOptions): Server {
-  const { db } = opts;
+  const db = withStatementCache(opts.db);
   const now = () => Date.now();
 
   // ---- data helpers -------------------------------------------------------
