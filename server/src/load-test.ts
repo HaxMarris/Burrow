@@ -49,7 +49,7 @@ if (!base) {
   scratch = mkdtempSync(join(tmpdir(), 'burrow-load-'));
   const port = await freePort();
   child = spawn(process.execPath, ['--no-warnings', join(dirname(fileURLToPath(import.meta.url)), 'index.ts')], {
-    env: { ...process.env, PORT: String(port), DB_FILE: join(scratch, 'load.db'), BACKUP_KEEP: '0', REGISTRATION_CODE: code, LIVEKIT_API_KEY: '', SMTP_URL: '' },
+    env: { ...process.env, PORT: String(port), DB_FILE: join(scratch, 'load.db'), UPLOAD_DIR: join(scratch, 'uploads'), BACKUP_KEEP: '0', REGISTRATION_CODE: code, LIVEKIT_API_KEY: '', SMTP_URL: '' },
     stdio: ['ignore', 'ignore', 'inherit'],
   });
   base = `http://localhost:${port}`;

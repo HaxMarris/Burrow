@@ -103,7 +103,12 @@ async function joinVoice(channelId, { muted = false, deafened = false, rejoin = 
         renderStage();
         renderVoiceBar();
       })
-      .on(LK.RoomEvent.ParticipantConnected, renderStage)
+      .on(LK.RoomEvent.ParticipantConnected, (p) => {
+        renderStage();
+        // Two people sitting down at the same moment each see an empty fire and make their own key,
+        // so nobody says hello. Greeting each newcomer makes sure the keeper hears about everyone.
+        if (voice.crypto && !voice.crypto.pubs.has(p.identity)) sendCrypto(voice, { t: 'hello', pub: voice.crypto.pub }, p.identity);
+      })
       .on(LK.RoomEvent.TrackSubscribed, renderFire)
       .on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
         state.speaking = new Set(speakers.map((p) => Number(p.identity)));
