@@ -143,6 +143,13 @@ test('the GIF picker is off without a key', async () => {
 const uploadPicture = (serverId: number, token: string, data: Buffer, type = 'image/png') =>
   fetch(`${base}/api/servers/${serverId}/picture`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': type }, body: new Uint8Array(data) });
 
+// The server removes old files without waiting for it, so give the disk a moment to catch up.
+const picturesSoon = async (expected: string[]) => {
+  const dir = join(uploadDir, 'burrow-pictures');
+  for (let i = 0; i < 50 && JSON.stringify(readdirSync(dir)) !== JSON.stringify(expected); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(readdirSync(dir), expected);
+};
+
 test('burrow pictures', async () => {
   const host = await register('host');
   const helper = await register('helper');
@@ -170,15 +177,15 @@ test('burrow pictures', async () => {
   assert.match(second.icon, /\.gif$/);
   // The old picture is gone.
   assert.equal((await fetch(base + first.icon)).status, 404);
-  assert.deepEqual(readdirSync(join(uploadDir, 'burrow-pictures')), [second.icon.split('/').pop()]);
+  await picturesSoon([second.icon.split('/').pop()]);
 
   assert.equal((await call(`/api/servers/${burrow.id}/picture`, { method: 'DELETE', token: guest.token })).status, 403);
   assert.equal((await call(`/api/servers/${burrow.id}/picture`, { method: 'DELETE', token: helper.token })).data.icon, null);
-  assert.deepEqual(readdirSync(join(uploadDir, 'burrow-pictures')), []);
+  await picturesSoon([]);
 
   // Deleting the burrow deletes its picture.
   await uploadPicture(burrow.id, host.token, PNG);
   assert.equal(readdirSync(join(uploadDir, 'burrow-pictures')).length, 1);
   await call(`/api/servers/${burrow.id}/leave`, { method: 'POST', token: host.token });
-  assert.deepEqual(readdirSync(join(uploadDir, 'burrow-pictures')), []);
+  await picturesSoon([]);
 });
