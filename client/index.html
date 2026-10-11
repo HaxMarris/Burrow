@@ -406,6 +406,19 @@
     <div class="modal-card" id="modal-card"></div>
   </div>
 
-  <script src="app.js"></script>
+  <!-- The app, in parts that share one scope. Order matters: each may use what the ones before it set up. -->
+  <script src="js/core.js"></script>
+  <script src="js/burrows.js"></script>
+  <script src="js/chat.js"></script>
+  <script src="js/people.js"></script>
+  <script src="js/files.js"></script>
+  <script src="js/voice.js"></script>
+  <script src="js/campfire.js"></script>
+  <script src="js/voice-settings.js"></script>
+  <script src="js/presence.js"></script>
+  <script src="js/reading.js"></script>
+  <script src="js/chat-extras.js"></script>
+  <script src="js/organization.js"></script>
+  <script src="js/shell.js"></script>
 </body>
 </html>
