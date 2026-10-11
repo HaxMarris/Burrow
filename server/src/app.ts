@@ -295,8 +295,9 @@ export function createApp(opts: AppOptions): Server {
   /** Adds attachments, reactions, reply previews, polls, link previews and threads to a list of message rows. */
   const withAttachments = (rows: Json[]): Json[] => {
     if (!rows.length) return rows;
-    rows = rows.map(({ replyToId, stickerId, embedsOff, forwarded, pings, ...r }) => ({
+    rows = rows.map(({ replyToId, stickerId, embedsOff, forwarded, pings, live, ...r }) => ({
       ...r,
+      ...(live ? { live: JSON.parse(live as string) } : {}),
       pings: pings ? JSON.parse(pings as string) : null,
       pinnedAt: r.pinnedAt ?? null,
       replyTo: replyPreview(replyToId),
@@ -319,7 +320,7 @@ export function createApp(opts: AppOptions): Server {
 
   // Every message is read with these columns, then filled in by withAttachments.
   const MESSAGE_SELECT = `SELECT m.id, m.channel_id AS channelId, m.content, m.created_at AS createdAt, m.edited_at AS editedAt,
-      m.reply_to AS replyToId, m.pinned_at AS pinnedAt, m.forwarded, m.sticker_id AS stickerId, m.embeds_off AS embedsOff, m.pings,
+      m.reply_to AS replyToId, m.pinned_at AS pinnedAt, m.forwarded, m.sticker_id AS stickerId, m.embeds_off AS embedsOff, m.pings, m.live,
       u.id AS authorId, u.username AS author, ${avatarUrl('u.avatar')} AS authorAvatar
     FROM messages m JOIN users u ON u.id = m.author_id`;
 
@@ -340,7 +341,7 @@ export function createApp(opts: AppOptions): Server {
     const server = db
       .prepare(
         `SELECT id, name, kind, owner_id AS ownerId, invite_code AS inviteCode, dm_key AS dmKey, description, rules,
-                welcome_channel_id AS welcomeChannelId, afk_channel_id AS afkChannelId, afk_minutes AS afkMinutes,
+                welcome_channel_id AS welcomeChannelId, afk_channel_id AS afkChannelId, afk_minutes AS afkMinutes, live_channel_id AS liveChannelId,
                 CASE WHEN icon IS NULL THEN NULL ELSE '/api/burrow-pictures/' || icon END AS icon,
                 CASE WHEN banner IS NULL THEN NULL ELSE '/api/burrow-pictures/' || banner END AS banner
          FROM servers WHERE id = ?`,
@@ -513,6 +514,7 @@ export function createApp(opts: AppOptions): Server {
     if (prev === undefined && channelId === null) return;
     speaking.delete(userId);
     if (prev !== undefined) {
+      endLive(userId);
       inVoice.delete(userId);
       // The last one out puts the fire out: its chat (unless it's kept) and whatever was playing.
       if (!usersInVoice(prev).length) {
@@ -532,6 +534,45 @@ export function createApp(opts: AppOptions): Server {
       broadcastToChannel(channel, voiceStateEvent(channelId));
     }
   };
+  // Going live: sharing your screen posts "is live" in the burrow's go-live room, with a way to
+  // join, and it's marked as over when the share stops or they leave the fire.
+  const liveNow = new Map<number, number>(); // userId -> their go-live message
+  const RELIVE_MS = 5 * 60_000; // sharing again this soon picks the same post back up
+  function setLiveEnded(messageId: number, endedAt: number | null) {
+    db.prepare("UPDATE messages SET live = json_set(live, '$.endedAt', ?) WHERE id = ? AND live IS NOT NULL").run(endedAt, messageId);
+    const message = messageById(messageId);
+    const channel = message && channelById(message.channelId as number);
+    if (message && channel) broadcastToChannel(channel, { type: 'message_updated', message });
+  }
+  function endLive(userId: number) {
+    const messageId = liveNow.get(userId);
+    if (messageId === undefined) return;
+    liveNow.delete(userId);
+    setLiveEnded(messageId, now());
+  }
+  function goLive(user: User) {
+    const voiceId = inVoice.get(user.id);
+    if (voiceId === undefined || liveNow.has(user.id)) return;
+    const voice = channelById(voiceId);
+    if (!voice || !isBurrow(voice.serverId)) return;
+    const liveId = (db.prepare('SELECT live_channel_id FROM servers WHERE id = ?').get(voice.serverId) as { live_channel_id: number | null }).live_channel_id;
+    const target = liveId === null ? undefined : channelById(liveId);
+    if (!target || !canSee(target, user.id) || postProblem(target, user.id)) return;
+    const last = db
+      .prepare('SELECT id, live FROM messages WHERE channel_id = ? AND author_id = ? AND live IS NOT NULL ORDER BY id DESC LIMIT 1')
+      .get(target.id, user.id) as { id: number; live: string } | undefined;
+    const was = last && JSON.parse(last.live);
+    if (last && was.voiceChannelId === voiceId && was.endedAt && was.endedAt > now() - RELIVE_MS) {
+      liveNow.set(user.id, last.id);
+      return setLiveEnded(last.id, null);
+    }
+    try {
+      const message = postMessage(user, target.id, { content: '' }, { live: { voiceChannelId: voiceId, endedAt: null } });
+      liveNow.set(user.id, message.id as number);
+    } catch {
+      // Slow mode or the like: no announcement this time.
+    }
+  }
   const firesideHistory = (channel: Channel) =>
     channel.keepChat
       ? (db.prepare('SELECT id, user_id AS userId, author, content, created_at AS createdAt FROM fireside_messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?')
@@ -567,7 +608,7 @@ export function createApp(opts: AppOptions): Server {
     ).map((r) => r.user_id);
 
   type PollInput = { question: string; options: string[]; multi: boolean; closesAt: number | null };
-  type PostExtras = { forwarded?: Json; poll?: PollInput; scheduled?: boolean };
+  type PostExtras = { forwarded?: Json; poll?: PollInput; scheduled?: boolean; live?: Json };
 
   /**
    * Posts a message: text, files (some hidden as spoilers), a sticker, a reply, and for polls
@@ -609,7 +650,7 @@ export function createApp(opts: AppOptions): Server {
       if (!sticker || !isMember(sticker.server_id, user.id)) throw new HttpError(400, "That sticker isn't available");
       stickerId = Number(input.stickerId);
     }
-    if (!content.trim() && !usable.length && !stickerId && !extras.poll && !extras.forwarded) throw new HttpError(400, 'Message is empty');
+    if (!content.trim() && !usable.length && !stickerId && !extras.poll && !extras.forwarded && !extras.live) throw new HttpError(400, 'Message is empty');
     let replyId: number | null = null;
     const replyTo = input.replyTo;
     if (replyTo != null) {
@@ -620,8 +661,8 @@ export function createApp(opts: AppOptions): Server {
       replyId = Number(replyTo);
     }
     const r = db
-      .prepare('INSERT INTO messages (channel_id, author_id, content, created_at, reply_to, sticker_id, forwarded) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(channelId, user.id, content, now(), replyId, stickerId, extras.forwarded ? JSON.stringify(extras.forwarded) : null);
+      .prepare('INSERT INTO messages (channel_id, author_id, content, created_at, reply_to, sticker_id, forwarded, live) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(channelId, user.id, content, now(), replyId, stickerId, extras.forwarded ? JSON.stringify(extras.forwarded) : null, extras.live ? JSON.stringify(extras.live) : null);
     const messageId = Number(r.lastInsertRowid);
     const forWhom = recordMentions(channel, messageId, user.id, content, replyId);
     usable.forEach((id, position) =>
@@ -1562,7 +1603,7 @@ export function createApp(opts: AppOptions): Server {
   const roleName = (id: number) => (db.prepare('SELECT name FROM roles WHERE id = ?').get(id) as { name: string } | undefined)?.name ?? '';
   const BURROW_FIELDS: Record<string, string> = {
     name: 'name', description: 'description', welcomeChannelId: 'welcome room', afkChannelId: 'AFK fire', afkMinutes: 'AFK time',
-    rules: 'rules', uploadMb: 'upload limit', wordFilter: 'word filter',
+    rules: 'rules', uploadMb: 'upload limit', wordFilter: 'word filter', liveChannelId: 'go-live room',
   };
 
   /** Notes who did what, for the audit log. */
@@ -3342,10 +3383,16 @@ export function createApp(opts: AppOptions): Server {
       return serverSummary(serverId, user.id);
     }
     allowed(serverId, user, 'burrow');
-    const changes = Object.keys(body).filter((k) => ['name', 'description', 'welcomeChannelId', 'afkChannelId', 'afkMinutes', 'rules', 'uploadMb', 'wordFilter'].includes(k));
+    const changes = Object.keys(body).filter((k) => ['name', 'description', 'welcomeChannelId', 'afkChannelId', 'afkMinutes', 'rules', 'uploadMb', 'wordFilter', 'liveChannelId'].includes(k));
     if (changes.length) audit(serverId, user.id, 'burrow_edit', null, changes.map((k) => BURROW_FIELDS[k]).join(', '));
     if (body.uploadMb !== undefined) db.prepare('UPDATE servers SET upload_mb = ? WHERE id = ?').run(cleanUploadMb(body.uploadMb), serverId);
     if (body.wordFilter !== undefined) db.prepare('UPDATE servers SET word_filter = ? WHERE id = ?').run(cleanWordFilter(body.wordFilter), serverId);
+    if (body.liveChannelId !== undefined) {
+      const channel = body.liveChannelId === null ? null : channelById(Number(body.liveChannelId));
+      if (channel && (channel.serverId !== serverId || channel.kind !== 'text'))
+        throw new HttpError(400, 'Pick a text room in this burrow for go-live posts');
+      db.prepare('UPDATE servers SET live_channel_id = ? WHERE id = ?').run(channel?.id ?? null, serverId);
+    }
     if (body.name !== undefined) db.prepare('UPDATE servers SET name = ? WHERE id = ?').run(cleanName(body.name, 'Burrow name'), serverId);
     if (body.description !== undefined) {
       const text = typeof body.description === 'string' ? body.description.trim() : '';
@@ -3854,6 +3901,10 @@ export function createApp(opts: AppOptions): Server {
           if (channelId !== undefined) setVoice(user.id, channelId, flagsFrom(msg));
         } else if (msg.type === 'voice_leave') {
           setVoice(user.id, null);
+        } else if (msg.type === 'voice_live') {
+          // Started or stopped sharing their screen.
+          if (msg.live === true) goLive(user);
+          else endLive(user.id);
         } else if (msg.type === 'fireside_send') {
           const channelId = inVoice.get(user.id);
           if (channelId === undefined) throw new HttpError(400, 'Join the fire to talk there');

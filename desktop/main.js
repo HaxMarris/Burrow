@@ -6,6 +6,7 @@ const { startUpdateChecks } = require('./updater');
 const appAudio = require('./app-audio');
 const hotkeys = require('./hotkeys');
 const activity = require('./activity');
+const drawOverlay = require('./draw-overlay');
 
 // The page asks how long the computer has been left alone, to show you as away.
 ipcMain.on('idle-seconds', (e) => { e.returnValue = powerMonitor.getSystemIdleTime(); });
@@ -30,8 +31,11 @@ function createWindow() {
     },
   });
 
-  // What was last picked to share, so its sound can follow.
+  // What was last picked to share, so its sound can follow (and, for a whole screen, which one it is).
   let pickedSource = null;
+  let pickedDisplay = null;
+  // Friends drawing on the screen you're sharing.
+  ipcMain.on('draw-overlay', (_e, strokes) => drawOverlay.show(pickedDisplay, strokes));
   ipcMain.handle('app-audio-start', () => {
     if (!pickedSource) return null;
     return appAudio.start(pickedSource, (chunk) => { if (!win.isDestroyed()) win.webContents.send('app-audio-chunk', chunk); });
@@ -67,6 +71,8 @@ function createWindow() {
 
   win.on('closed', () => {
     appAudio.stop();
+    drawOverlay.close();
+    ipcMain.removeAllListeners('draw-overlay');
     hotkeys.stop();
     games.stop();
     ipcMain.removeAllListeners('activity-refresh');
@@ -101,6 +107,8 @@ function createWindow() {
       const source = sources.find((s) => s.id === id);
       if (!source) return cancel();
       pickedSource = source.id;
+      pickedDisplay = source.display_id || null;
+      drawOverlay.close();
       // Where the program's own sound can be shared, the page adds it itself. Otherwise Windows
       // can share all of the computer's sound; other systems share none.
       const loopback = request.audioRequested && process.platform === 'win32' && !appAudio.supported();
