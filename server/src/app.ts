@@ -4327,7 +4327,7 @@ export function createApp(opts: AppOptions): Server {
            FROM messages m JOIN channels c ON c.id = m.channel_id JOIN servers s ON s.id = c.server_id WHERE m.author_id = ? ORDER BY m.id`,
         )
         .all(user.id) as Json[]
-    ).map(({ kind, burrow, room, ...m }) => ({ ...m, place: kind === 'dm' ? placeOf(m.channelId as number, user.id)?.serverName ?? 'Direct message' : `${burrow} › #${room}` }));
+    ).map(({ kind, burrow, room, ...m }) => ({ ...m, id: m.id as number, place: kind === 'dm' ? placeOf(m.channelId as number, user.id)?.serverName ?? 'Direct message' : `${burrow} › #${room}` }));
     const files = db
       .prepare('SELECT a.id, a.name, a.type, a.size, a.message_id AS messageId FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.author_id = ? ORDER BY a.message_id, a.position')
       .all(user.id) as { id: string; name: string; type: string; size: number; messageId: number }[];
@@ -4344,28 +4344,34 @@ export function createApp(opts: AppOptions): Server {
     const write = async (chunks: Buffer[]) => {
       for (const c of chunks) if (!res.write(c)) await new Promise((r) => res.once('drain', r));
     };
-    const json = (v: unknown) => Buffer.from(JSON.stringify(v, null, 2));
-    const { id: _, blockedIds: __, ...account } = me;
-    await write(zip.add('account.json', json({ ...account, burrows, friends: friendsOf(user.id).friends.map((f) => f.username), exportedAt: new Date().toISOString() })));
-    await write(zip.add('messages.json', json(messages.map((m) => ({ ...m, files: byMessage.get((m as Json).id as number) ?? [] })))));
-    const pictures = db.prepare('SELECT avatar, banner FROM users WHERE id = ?').get(user.id) as { avatar: string | null; banner: string | null };
-    let total = 0;
-    const LIMIT = 3.5 * 1024 ** 3; // a plain zip can't go past 4 GB
-    const skipped: string[] = [];
-    const addFile = async (path: string, name: string) => {
-      const data = await readFile(path).catch(() => null);
-      if (!data) return;
-      if (total + data.length > LIMIT) return void skipped.push(name);
-      total += data.length;
-      await write(zip.add(name, data));
-    };
-    if (opts.uploadDir) {
-      if (pictures.avatar) await addFile(avatarPath(pictures.avatar), `profile/picture${extname(pictures.avatar)}`);
-      if (pictures.banner) await addFile(avatarPath(pictures.banner), `profile/banner${extname(pictures.banner)}`);
-      for (const f of files) await addFile(filePath(f.id), fileName(f));
+    try {
+      const json = (v: unknown) => Buffer.from(JSON.stringify(v, null, 2));
+      const { id: _, blockedIds: __, ...account } = me;
+      await write(zip.add('account.json', json({ ...account, burrows, friends: friendsOf(user.id).friends.map((f) => f.username), exportedAt: new Date().toISOString() })));
+      await write(zip.add('messages.json', json(messages.map((m) => ({ ...m, files: byMessage.get(m.id as number) ?? [] })))));
+      const pictures = db.prepare('SELECT avatar, banner FROM users WHERE id = ?').get(user.id) as { avatar: string | null; banner: string | null };
+      let total = 0;
+      const LIMIT = 3.5 * 1024 ** 3; // a plain zip can't go past 4 GB
+      const skipped: string[] = [];
+      const addFile = async (path: string, name: string) => {
+        const data = await readFile(path).catch(() => null);
+        if (!data) return;
+        if (total + data.length > LIMIT) return void skipped.push(name);
+        total += data.length;
+        await write(zip.add(name, data));
+      };
+      if (opts.uploadDir) {
+        if (pictures.avatar) await addFile(avatarPath(pictures.avatar), `profile/picture${extname(pictures.avatar)}`);
+        if (pictures.banner) await addFile(avatarPath(pictures.banner), `profile/banner${extname(pictures.banner)}`);
+        for (const f of files) await addFile(filePath(f.id), fileName(f));
+      }
+      if (skipped.length) await write(zip.add('files-left-out.txt', Buffer.from(`These files didn't fit in one zip:\n${skipped.join('\n')}\n`)));
+      res.end(zip.finish());
+    } catch (err) {
+      // Too late for an error message once the download has started, so cut it off.
+      console.error('Export failed:', err);
+      res.destroy();
     }
-    if (skipped.length) await write(zip.add('files-left-out.txt', Buffer.from(`These files didn't fit in one zip:\n${skipped.join('\n')}\n`)));
-    res.end(zip.finish());
   };
 
   // ---- HTTP plumbing ------------------------------------------------------
