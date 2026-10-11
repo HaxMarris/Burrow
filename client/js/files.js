@@ -491,7 +491,8 @@ function openImage(a, url) {
 function formatSize(n) {
   if (n < 1024) return n + ' B';
   if (n < 1048576) return Math.round(n / 1024) + ' KB';
-  return (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
+  if (n < 1073741824) return (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
+  return (n / 1073741824).toFixed(n < 10737418240 ? 1 : 0) + ' GB';
 }
 
 const FILE_ICON = '<svg viewBox="0 0 24 24"><path d="M6 2h8l6 6v14H6V2Zm8 1.5V9h5.5L14 3.5Z"/></svg>';

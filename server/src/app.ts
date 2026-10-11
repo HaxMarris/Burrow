@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { writeFile, mkdir, unlink, stat, copyFile, readFile } from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { extname, join, normalize } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { addModeratorRole, type Db } from './db.ts';
@@ -12,6 +12,7 @@ import { gifSearch, download, type GifOptions } from './gifs.ts';
 import { fetchEmbed, fetchImage, linksIn, type Embed, type EmbedOptions } from './embeds.ts';
 import { newVapidKeys, sendPush, vapidKeysWork, type VapidKeys } from './push.ts';
 import { looksLikeEmail, sendMail, type MailConfig } from './mail.ts';
+import { hosting, type HostingOptions } from './hosting.ts';
 import { checkTotp, hashRecovery, newRecoveryCodes, newTotpSecret, verifyAssertion, verifyRegistration, ZipWriter } from './account.ts';
 
 export interface AppOptions {
@@ -38,6 +39,8 @@ export interface AppOptions {
   /** Push services Burrow will send to. Tests add their own. */
   pushHosts?: string[];
   /** How long a mention waits unread before it's emailed (default 15 minutes). */
+  /** Backups, the admin page, updates and uptime (see hosting.ts). */
+  hosting?: HostingOptions;
 }
 
 type User = { id: number; username: string; displayName: string | null; avatar: string | null };
@@ -193,18 +196,19 @@ export function createApp(opts: AppOptions): Server {
     if (!token) return undefined;
     const row = db
       .prepare(
-        `SELECT u.id, u.username, u.display_name AS displayName, ${avatarUrl('u.avatar')} AS avatar, COALESCE(s.last_used_at, s.created_at) AS lastUsed
-         FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`,
+        `SELECT u.id, u.username, u.display_name AS displayName, ${avatarUrl('u.avatar')} AS avatar, COALESCE(s.last_used_at, s.created_at) AS lastUsed, u.bot
+         FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND u.deleted_at IS NULL`,
       )
-      .get(token) as (User & { lastUsed: number }) | undefined;
+      .get(token) as (User & { lastUsed: number; bot: number }) | undefined;
     if (!row) return undefined;
     const t = now();
-    if (t - row.lastUsed > SESSION_IDLE_MS) {
+    // A bot's token lasts until it's replaced; people's logins run out when unused.
+    if (!row.bot && t - row.lastUsed > SESSION_IDLE_MS) {
       db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
       return undefined;
     }
     if (t - row.lastUsed > 60 * 60 * 1000) db.prepare('UPDATE sessions SET last_used_at = ? WHERE token = ?').run(t, token);
-    const { lastUsed: _, ...user } = row;
+    const { lastUsed: _, bot: __, ...user } = row;
     return user;
   };
 
@@ -235,6 +239,11 @@ export function createApp(opts: AppOptions): Server {
 
   const USER_COLS = `id, username, display_name AS displayName, ${avatarUrl('avatar')} AS avatar`;
   const userById = (id: number) => db.prepare(`SELECT ${USER_COLS} FROM users WHERE id = ?`).get(id) as User | undefined;
+  /** Bots stay in the one burrow they were made for: no joining others, no DMs, no friends. */
+  const notBot = (user: User) => {
+    if ((db.prepare('SELECT bot FROM users WHERE id = ?').get(user.id) as { bot: number } | undefined)?.bot)
+      throw new HttpError(403, "Bots can't do that");
+  };
   /** The name someone goes by in a burrow: their nickname there, else their display name, else their username. */
   const nameSql = (userAlias: string, serverIdSql: string) =>
     `COALESCE((SELECT nn.nickname FROM members nn WHERE nn.server_id = ${serverIdSql} AND nn.user_id = ${userAlias}.id), ${userAlias}.display_name, ${userAlias}.username)`;
@@ -335,8 +344,9 @@ export function createApp(opts: AppOptions): Server {
   /** Adds attachments, reactions, reply previews, polls, link previews and threads to a list of message rows. */
   const withAttachments = (rows: Json[]): Json[] => {
     if (!rows.length) return rows;
-    rows = rows.map(({ replyToId, stickerId, embedsOff, forwarded, pings, live, ...r }) => ({
+    rows = rows.map(({ replyToId, stickerId, embedsOff, forwarded, pings, live, authorBot, ...r }) => ({
       ...r,
+      ...(authorBot ? { authorBot: true } : {}),
       ...(live ? { live: JSON.parse(live as string) } : {}),
       pings: pings ? JSON.parse(pings as string) : null,
       pinnedAt: r.pinnedAt ?? null,
@@ -362,7 +372,7 @@ export function createApp(opts: AppOptions): Server {
   const MESSAGE_SELECT = `SELECT m.id, m.channel_id AS channelId, m.content, m.created_at AS createdAt, m.edited_at AS editedAt,
       m.reply_to AS replyToId, m.pinned_at AS pinnedAt, m.forwarded, m.sticker_id AS stickerId, m.embeds_off AS embedsOff, m.pings, m.live,
       u.id AS authorId, ${nameSql('u', '(SELECT c.server_id FROM channels c WHERE c.id = m.channel_id)')} AS author, u.username AS authorUsername,
-      ${avatarUrl('u.avatar')} AS authorAvatar
+      ${avatarUrl('u.avatar')} AS authorAvatar, u.bot AS authorBot
     FROM messages m JOIN users u ON u.id = m.author_id`;
 
   const messageById = (id: number) => {
@@ -431,11 +441,11 @@ export function createApp(opts: AppOptions): Server {
     const members = db
       .prepare(
         `SELECT u.id, u.username, u.display_name AS displayName, m.nickname, u.accent, ${avatarUrl('u.avatar')} AS avatar,
-                u.deleted_at IS NOT NULL AS deleted, m.voice_muted AS voiceMuted, m.timeout_until AS timeoutUntil
+                u.deleted_at IS NOT NULL AS deleted, m.voice_muted AS voiceMuted, m.timeout_until AS timeoutUntil, u.bot
          FROM members m JOIN users u ON u.id = m.user_id
          WHERE m.server_id = ? ORDER BY u.username`,
       )
-      .all(serverId) as (User & { voiceMuted: number; timeoutUntil: number | null; deleted: number })[];
+      .all(serverId) as (User & { voiceMuted: number; timeoutUntil: number | null; deleted: number; bot: number })[];
     const accepted = (db.prepare('SELECT rules_accepted_at FROM members WHERE server_id = ? AND user_id = ?').get(serverId, viewerId) as
       | { rules_accepted_at: number | null }
       | undefined)?.rules_accepted_at;
@@ -458,7 +468,7 @@ export function createApp(opts: AppOptions): Server {
         const roleIds = memberRoles.filter((r) => r.user_id === m.id).map((r) => r.role_id);
         const host = server.kind === 'burrow' && m.id === server.ownerId;
         const powers = roleIds.some((id) => (roles.find((r) => r.id === id)?.perms.length ?? 0) > 0);
-        return { ...m, deleted: !!m.deleted, voiceMuted: !!m.voiceMuted, timeoutUntil: (m.timeoutUntil ?? 0) > now() ? m.timeoutUntil : null, roleIds, role: host ? 'host' : powers ? 'mod' : 'member', online: online.has(m.id), ...presenceOf(m.id) };
+        return { ...m, deleted: !!m.deleted, bot: !!m.bot, voiceMuted: !!m.voiceMuted, timeoutUntil: (m.timeoutUntil ?? 0) > now() ? m.timeoutUntil : null, roleIds, role: host ? 'host' : powers ? 'mod' : 'member', online: online.has(m.id), ...presenceOf(m.id) };
       }),
     };
   };
@@ -654,7 +664,48 @@ export function createApp(opts: AppOptions): Server {
     ).map((r) => r.user_id);
 
   type PollInput = { question: string; options: string[]; multi: boolean; closesAt: number | null };
-  type PostExtras = { forwarded?: Json; poll?: PollInput; scheduled?: boolean; live?: Json };
+  type PostExtras = { forwarded?: Json; poll?: PollInput; scheduled?: boolean; live?: Json; webhook?: boolean };
+
+  // ---- slash commands, worked out by the server so nobody can fake a dice roll
+
+  /**
+   * A message starting with one of these is changed before it's sent: /roll 2d6, /flip, /shrug,
+   * /me, /spoiler and /poll Question | answer | answer. Anything else starting with / is sent as
+   * it is, so a bot in the room can answer its own commands.
+   */
+  const slashCommand = (content: string): { content: string; poll?: PollInput } | null => {
+    const m = /^\/(\w+)(?:\s+([\s\S]*))?$/.exec(content.trim());
+    if (!m) return null;
+    const rest = (m[2] ?? '').trim();
+    switch (m[1].toLowerCase()) {
+      case 'roll': {
+        const d = /^(\d{0,2})d(\d{1,4})\s*([+-]\s*\d{1,4})?$/i.exec(rest || 'd6');
+        if (!d) throw new HttpError(400, 'Roll dice like /roll 2d6, /roll d20 or /roll 3d8+2');
+        const count = Math.max(1, Number(d[1] || 1)), sides = Number(d[2]), bonus = Number((d[3] ?? '0').replace(/\s/g, ''));
+        if (count > 20 || sides < 2) throw new HttpError(400, 'Up to 20 dice, with at least 2 sides');
+        const rolls = Array.from({ length: count }, () => randomInt(1, sides + 1));
+        const total = rolls.reduce((a, b) => a + b, 0) + bonus;
+        const shown = `${count}d${sides}${bonus ? (bonus > 0 ? `+${bonus}` : bonus) : ''}`;
+        const working = count > 1 || bonus ? `${rolls.join(' + ')}${bonus ? ` ${bonus > 0 ? '+' : '-'} ${Math.abs(bonus)}` : ''} = ` : '';
+        return { content: `🎲 rolled ${shown}: ${working}**${total}**` };
+      }
+      case 'flip':
+        return { content: `🪙 flipped a coin: **${randomInt(2) ? 'heads' : 'tails'}**` };
+      case 'shrug':
+        return { content: `${rest ? rest + ' ' : ''}¯\\_(ツ)_/¯` };
+      case 'me':
+        return rest ? { content: `*${rest}*` } : null;
+      case 'spoiler':
+        return rest ? { content: `||${rest}||` } : null;
+      case 'poll': {
+        const parts = rest.split('|').map((p) => p.trim()).filter(Boolean);
+        if (parts.length < 3) throw new HttpError(400, 'Make a poll like /poll Pizza or tacos? | Pizza | Tacos');
+        return { content: '', poll: makePoll({ question: parts[0], options: parts.slice(1) }) };
+      }
+      default:
+        return null;
+    }
+  };
 
   /**
    * Posts a message: text, files (some hidden as spoilers), a sticker, a reply, and for polls
@@ -662,9 +713,10 @@ export function createApp(opts: AppOptions): Server {
    */
   const postMessage = (user: User, channelId: number, input: Json, extras: PostExtras = {}) => {
     const channel = channelById(channelId);
-    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    // A webhook writes in the one room it was made for, whoever can see it.
+    if (!channel || (!extras.webhook && !canSee(channel, user.id))) throw new HttpError(404, 'Room not found');
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
-    const problem = postProblem(channel, user.id);
+    const problem = extras.webhook ? null : postProblem(channel, user.id);
     if (problem) throw new HttpError(403, problem);
     dmBlockCheck(channel.serverId, user.id);
     const flagged = filterCheck(channel, user.id, typeof input.content === 'string' ? input.content : '');
@@ -674,9 +726,17 @@ export function createApp(opts: AppOptions): Server {
       const wait = last === null ? 0 : Math.ceil((last + channel.slow * 1000 - now()) / 1000);
       if (wait > 0) throw new HttpError(429, `Slow mode is on. You can send another message in ${wait} second${wait === 1 ? '' : 's'}.`);
     }
-    let content = input.content ?? '';
-    if (typeof content !== 'string') throw new HttpError(400, 'Message is empty');
+    const raw = input.content ?? '';
+    if (typeof raw !== 'string') throw new HttpError(400, 'Message is empty');
+    let content = raw;
     if (content.length > MAX_MESSAGE_LENGTH) throw new HttpError(400, 'Message is too long');
+    if (content.startsWith('/') && !extras.forwarded && !extras.webhook) {
+      const command = slashCommand(content);
+      if (command) {
+        content = command.content;
+        if (command.poll) extras = { ...extras, poll: command.poll };
+      }
+    }
     const attachmentIds = input.attachmentIds;
     const ids = Array.isArray(attachmentIds) ? [...new Set(attachmentIds.map(String))] : [];
     if (ids.length > MAX_ATTACHMENTS) throw new HttpError(400, `At most ${MAX_ATTACHMENTS} files per message`);
@@ -735,17 +795,28 @@ export function createApp(opts: AppOptions): Server {
 
   // ---- HTTP routes --------------------------------------------------------
 
-  type Handler = (ctx: { user: User; params: string[]; body: Json; url: URL; token: string | undefined; ip: string; ua: string; host: string }) => unknown;
+  type Handler = (ctx: { user: User; params: string[]; body: Json; url: URL; token: string | undefined; ip: string; ua: string; host: string; secure: boolean }) => unknown;
   type Route = { method: string; pattern: RegExp; auth: boolean; handler: Handler };
   const routes: Route[] = [];
   const route = (method: string, path: string, handler: Handler, auth = true) =>
     routes.push({ method, pattern: new RegExp('^' + path.replace(/:code/g, '([\\w-]+)').replace(/:\w+/g, '(\\d+)') + '$'), auth, handler });
 
+  const admin = hosting({
+    db, rawDb: opts.db, route, fail: (status, message) => new HttpError(status, message),
+    hosting: opts.hosting, registrationCode: opts.registrationCode, uploadDir: opts.uploadDir, publicUrl: opts.publicUrl,
+    online, inVoice,
+    signOut: (userId) => {
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+      for (const ws of sockets.get(userId) ?? []) ws.close(4001, 'Signed out');
+    },
+  });
+
   route(
     'GET',
     '/api/config',
     () => ({
-      registrationCodeRequired: !!opts.registrationCode,
+      registrationCodeRequired: admin.signupMode() === 'code',
+      signupLinksOnly: admin.signupMode() === 'links',
       voice: !!opts.voice,
       maxUploadBytes: opts.uploadDir ? maxUpload : 0,
       gifs: !!gifs,
@@ -763,7 +834,9 @@ export function createApp(opts: AppOptions): Server {
       if (!/^[\w.-]+$/.test(username)) throw new HttpError(400, 'Username may only use letters, numbers, _ . -');
       if (typeof body.password !== 'string' || body.password.length < 8)
         throw new HttpError(400, 'Password must be at least 8 characters');
-      if (opts.registrationCode && !sameText(body.registrationCode, opts.registrationCode)) {
+      // A signup link, the registration code, or nothing at all, as the host chose on the admin page.
+      const link = admin.checkSignup(body);
+      if (link === 'code' && opts.registrationCode && !sameText(body.registrationCode, opts.registrationCode)) {
         failedTry([`register-ip:${ip}`], 60 * 60 * 1000);
         throw new HttpError(403, 'Invalid registration code');
       }
@@ -772,6 +845,7 @@ export function createApp(opts: AppOptions): Server {
       const r = db
         .prepare('INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)')
         .run(username, hashPassword(body.password), now());
+      if (link && link !== 'code') admin.useSignupLink(link);
       return startSession(userById(Number(r.lastInsertRowid))!, { ip, ua });
     },
     false,
@@ -906,6 +980,7 @@ export function createApp(opts: AppOptions): Server {
    * it starts a group conversation instead. You can only message people you share a burrow with.
    */
   route('POST', '/api/dms', ({ user, body }) => {
+    notBot(user);
     // A conversation you already have stays open to you, even if you no longer share a burrow.
     const ids = (Array.isArray(body.userIds) ? body.userIds : [body.userId]).map(Number);
     if (ids.length === 1 && ids[0] !== user.id) {
@@ -955,6 +1030,7 @@ export function createApp(opts: AppOptions): Server {
   };
 
   route('POST', '/api/servers', ({ user, body }) => {
+    notBot(user);
     const name = cleanName(body.name, 'Burrow name');
     const t = now();
     const r = db
@@ -969,6 +1045,7 @@ export function createApp(opts: AppOptions): Server {
 
   // The code can be pasted on its own or as a whole invite link.
   route('POST', '/api/join', ({ user, body }) => {
+    notBot(user);
     const { serverId, invite } = inviteTarget(body.inviteCode);
     if (db.prepare('SELECT 1 FROM bans WHERE server_id = ? AND user_id = ?').get(serverId, user.id))
       throw new HttpError(403, "You've been banned from this burrow");
@@ -2386,6 +2463,7 @@ export function createApp(opts: AppOptions): Server {
       emailVerified: !!r.email_verified,
       ...profileOf(user.id),
       twoStep: !!r.totp_secret,
+      ...(admin.isAdmin(user.id) ? { admin: true } : {}),
       recoveryCodesLeft: (JSON.parse(r.recovery_codes) as string[]).length,
       blockedIds: blockedBy(user.id),
     };
@@ -3000,6 +3078,140 @@ export function createApp(opts: AppOptions): Server {
     return postMessage(user, to.id, { content: content.slice(0, MAX_MESSAGE_LENGTH), attachmentIds, spoilerIds, stickerId: keepSticker ? sticker!.id : null }, { forwarded });
   });
 
+  // ---- bots and webhooks ----
+  //
+  // A bot is an account for one burrow that logs in with a token instead of a password and uses
+  // the same API and live connection as the app. A webhook is a web address that writes in one
+  // room as its own bot, for services that only know how to send a message (GitHub, a home
+  // server, a script). People who can edit the burrow make both.
+
+  const MAX_BOTS = 20; // bots and webhooks in one burrow
+  const botName = (value: unknown) => {
+    const name = cleanName(value, 'Name', 32);
+    if (/[\x00-\x1f]/.test(name)) throw new HttpError(400, "Names can't have control characters");
+    return name;
+  };
+  /** A bot account: a username from its name (made unique), never able to log in with a password. */
+  const makeBot = (serverId: number, name: string) => {
+    const base = name.toLowerCase().replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'bot';
+    let username = `${base}-bot`;
+    for (let n = 2; db.prepare('SELECT 1 FROM users WHERE username = ?').get(username); n++) username = `${base}-bot${n}`;
+    const r = db
+      .prepare('INSERT INTO users (username, display_name, password_hash, created_at, bot, bot_server_id) VALUES (?, ?, ?, ?, 1, ?)')
+      .run(username, name, `bot$${randomBytes(16).toString('base64url')}`, now(), serverId);
+    const id = Number(r.lastInsertRowid);
+    db.prepare('INSERT INTO members (server_id, user_id, joined_at) VALUES (?, ?, ?)').run(serverId, id, now());
+    return id;
+  };
+  const newBotToken = (userId: number) => {
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+    const token = newToken();
+    db.prepare("INSERT INTO sessions (token, user_id, created_at, last_used_at, device) VALUES (?, ?, ?, ?, 'Bot')").run(token, userId, now(), now());
+    return token;
+  };
+  const removeBot = (serverId: number, userId: number) => {
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+    for (const ws of sockets.get(userId) ?? []) ws.close(4001, 'Signed out');
+    db.prepare('DELETE FROM webhooks WHERE user_id = ?').run(userId);
+    // Its messages stay, under its name.
+    db.prepare('UPDATE users SET deleted_at = ? WHERE id = ?').run(now(), userId);
+    removeMember(serverId, userId);
+  };
+  const botsOf = (serverId: number) => ({
+    bots: db
+      .prepare(`SELECT u.id, u.username, u.display_name AS name, u.created_at AS createdAt,
+                  (SELECT MAX(COALESCE(s.last_used_at, s.created_at)) FROM sessions s WHERE s.user_id = u.id) AS lastUsed
+                FROM users u WHERE u.bot = 1 AND u.bot_server_id = ? AND u.deleted_at IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM webhooks w WHERE w.user_id = u.id) ORDER BY u.id`)
+      .all(serverId),
+    webhooks: db
+      .prepare(`SELECT w.id, w.channel_id AS channelId, u.display_name AS name, u.id AS userId, w.created_at AS createdAt
+                FROM webhooks w JOIN users u ON u.id = w.user_id WHERE w.server_id = ? ORDER BY w.id`)
+      .all(serverId),
+  });
+  const botCount = (serverId: number) =>
+    (db.prepare('SELECT COUNT(*) AS n FROM users WHERE bot = 1 AND bot_server_id = ? AND deleted_at IS NULL').get(serverId) as { n: number }).n;
+  const webhookUrl = (host: string, secure: boolean, id: number, token: string) =>
+    `${(opts.publicUrl || `${secure ? 'https' : 'http'}://${host}`).replace(/\/$/, '')}/api/webhooks/${id}/${token}`;
+
+  route('GET', '/api/servers/:id/bots', ({ user, params }) => {
+    const serverId = Number(params[0]);
+    allowed(serverId, user, 'burrow');
+    return botsOf(serverId);
+  });
+  route('POST', '/api/servers/:id/bots', ({ user, params, body }) => {
+    const serverId = Number(params[0]);
+    allowed(serverId, user, 'burrow');
+    if (botCount(serverId) >= MAX_BOTS) throw new HttpError(400, `A burrow can have up to ${MAX_BOTS} bots and webhooks`);
+    const id = makeBot(serverId, botName(body.name));
+    audit(serverId, user.id, 'bot_add', id);
+    sendServerUpdate(serverId);
+    return { ...botsOf(serverId), token: newBotToken(id), botId: id };
+  });
+  const ownBot = (serverId: number, botId: number) => {
+    const bot = db.prepare('SELECT id FROM users WHERE id = ? AND bot = 1 AND bot_server_id = ? AND deleted_at IS NULL').get(botId, serverId);
+    if (!bot) throw new HttpError(404, 'No such bot');
+  };
+  route('POST', '/api/servers/:id/bots/:id/token', ({ user, params }) => {
+    const [serverId, botId] = params.map(Number);
+    allowed(serverId, user, 'burrow');
+    ownBot(serverId, botId);
+    for (const ws of sockets.get(botId) ?? []) ws.close(4001, 'Signed out');
+    return { token: newBotToken(botId) };
+  });
+  route('DELETE', '/api/servers/:id/bots/:id', ({ user, params }) => {
+    const [serverId, botId] = params.map(Number);
+    allowed(serverId, user, 'burrow');
+    ownBot(serverId, botId);
+    removeBot(serverId, botId);
+    audit(serverId, user.id, 'bot_remove', botId);
+    return botsOf(serverId);
+  });
+
+  route('POST', '/api/channels/:id/webhooks', ({ user, params, body, host, secure }) => {
+    const channel = channelById(Number(params[0]));
+    if (!channel || channel.kind !== 'text' || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    allowed(channel.serverId, user, 'burrow');
+    if (botCount(channel.serverId) >= MAX_BOTS) throw new HttpError(400, `A burrow can have up to ${MAX_BOTS} bots and webhooks`);
+    const botId = makeBot(channel.serverId, botName(body.name));
+    const token = randomBytes(24).toString('base64url');
+    const r = db
+      .prepare('INSERT INTO webhooks (server_id, channel_id, user_id, token_hash, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(channel.serverId, channel.id, botId, createHash('sha256').update(token).digest('hex'), user.id, now());
+    audit(channel.serverId, user.id, 'webhook_add', botId, `#${channel.name}`);
+    sendServerUpdate(channel.serverId);
+    return { ...botsOf(channel.serverId), url: webhookUrl(host, secure, Number(r.lastInsertRowid), token) };
+  });
+  route('DELETE', '/api/webhooks/:id', ({ user, params }) => {
+    const hook = db.prepare('SELECT server_id AS serverId, user_id AS userId FROM webhooks WHERE id = ?').get(Number(params[0])) as
+      | { serverId: number; userId: number }
+      | undefined;
+    if (!hook) throw new HttpError(404, 'No such webhook');
+    allowed(hook.serverId, user, 'burrow');
+    removeBot(hook.serverId, hook.userId);
+    audit(hook.serverId, user.id, 'webhook_remove', hook.userId);
+    return botsOf(hook.serverId);
+  });
+
+  // Posting to a webhook: { "content": "…" } (Discord style) or { "text": "…" } (Slack style).
+  const hookTries = new Map<number, { count: number; until: number }>();
+  route('POST', '/api/webhooks/:id/:code', ({ params, body }) => {
+    const id = Number(params[0]);
+    const hook = db.prepare('SELECT channel_id AS channelId, user_id AS userId, token_hash AS hash FROM webhooks WHERE id = ?').get(id) as
+      | { channelId: number; userId: number; hash: string }
+      | undefined;
+    if (!hook || !sameText(createHash('sha256').update(params[1]).digest('hex'), hook.hash)) throw new HttpError(404, 'No such webhook');
+    const t = now();
+    const tries = hookTries.get(id);
+    if (tries && tries.until > t && tries.count >= 30) throw new HttpError(429, 'Slow down: at most 30 messages a minute');
+    if (!tries || tries.until <= t) hookTries.set(id, { count: 1, until: t + 60_000 });
+    else tries.count++;
+    const text = typeof body.content === 'string' ? body.content : typeof body.text === 'string' ? body.text : '';
+    if (!text.trim()) throw new HttpError(400, 'Send { "content": "your message" }');
+    const message = postMessage(userById(hook.userId)!, hook.channelId, { content: text.slice(0, MAX_MESSAGE_LENGTH) }, { webhook: true });
+    return { id: message.id };
+  }, false);
+
   // ---- polls ----
 
   const MAX_POLL_OPTIONS = 10;
@@ -3012,7 +3224,7 @@ export function createApp(opts: AppOptions): Server {
     return { question: p.question, options, multi: !!p.multi, closesAt, closed: closesAt !== null && closesAt <= now() };
   };
 
-  route('POST', '/api/channels/:id/polls', ({ user, params, body }) => {
+  const makePoll = (body: Json): PollInput => {
     const question = cleanName(body.question, 'Question', 300);
     const options = (Array.isArray(body.options) ? body.options : []).map((o) => (typeof o === 'string' ? o.trim() : '')).filter(Boolean);
     if (options.length < 2) throw new HttpError(400, 'A poll needs at least two answers');
@@ -3021,9 +3233,11 @@ export function createApp(opts: AppOptions): Server {
     if (new Set(options.map((o) => o.toLowerCase())).size !== options.length) throw new HttpError(400, 'Each answer must be different');
     const hours = Number(body.hours) || 0;
     if (hours < 0 || hours > 24 * 30) throw new HttpError(400, 'A poll can run for up to 30 days');
-    const poll = { question, options, multi: body.multi === true, closesAt: hours ? now() + hours * 3600_000 : null };
-    return postMessage(user, Number(params[0]), { content: '', replyTo: body.replyTo }, { poll });
-  });
+    return { question, options, multi: body.multi === true, closesAt: hours ? now() + hours * 3600_000 : null };
+  };
+
+  route('POST', '/api/channels/:id/polls', ({ user, params, body }) =>
+    postMessage(user, Number(params[0]), { content: '', replyTo: body.replyTo }, { poll: makePoll(body) }));
 
   // Your answer (or answers) to a poll; an empty list takes your vote back.
   route('POST', '/api/messages/:id/vote', ({ user, params, body }) => {
@@ -4026,6 +4240,7 @@ export function createApp(opts: AppOptions): Server {
 
   // Asks someone to be friends, by username or id. If they already asked you, you're friends.
   route('POST', '/api/friends', ({ user, body }) => {
+    notBot(user);
     checkTries([`friend:${user.id}`], 30);
     failedTry([`friend:${user.id}`], 60 * 60 * 1000); // every request counts, so nobody is flooded
     const target = (
@@ -4576,7 +4791,8 @@ export function createApp(opts: AppOptions): Server {
         const body = req.method === 'GET' ? {} : await readBody(req);
         if (url.pathname === '/api/logout') body.token = token;
         const ua = String(req.headers['user-agent'] ?? '');
-        return send(res, 200, await r.handler({ user: user!, params: m.slice(1), body, url, token, ip: clientIp(req), ua, host: String(req.headers.host ?? '') }));
+        const secure = req.headers['x-forwarded-proto'] === 'https' || !!(req.socket as { encrypted?: boolean }).encrypted;
+        return send(res, 200, await r.handler({ user: user!, params: m.slice(1), body, url, token, ip: clientIp(req), ua, host: String(req.headers.host ?? ''), secure }));
       }
       throw new HttpError(404, 'Not found');
     } catch (err) {

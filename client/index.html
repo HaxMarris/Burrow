@@ -231,6 +231,7 @@
           <button type="button" class="icon-btn" id="reply-cancel" title="Cancel reply (Esc)">×</button>
         </div>
         <div id="mention-box" class="mention-box hidden" role="listbox"></div>
+        <div id="command-box" class="mention-box hidden" role="listbox" aria-label="Commands"></div>
         <div id="gif-picker" class="gif-picker hidden" role="dialog" aria-label="Send a GIF">
           <input type="search" id="gif-search" placeholder="Search KLIPY" autocomplete="off" enterkeyhint="search" />
           <div id="gif-grid" class="gif-grid"></div>
@@ -386,6 +387,7 @@
     <button role="menuitem" id="account-btn">Your account</button>
     <button role="menuitem" id="saved-btn">Saved messages</button>
     <button role="menuitem" id="scheduled-btn">Scheduled messages</button>
+    <button role="menuitem" id="admin-btn" class="hidden">Server admin</button>
     <button role="menuitem" id="theme-toggle">Switch to dark</button>
     <button role="menuitem" id="logout" class="danger-item">Log out</button>
   </div>
@@ -419,6 +421,7 @@
   <script src="js/reading.js"></script>
   <script src="js/chat-extras.js"></script>
   <script src="js/organization.js"></script>
+  <script src="js/hosting.js"></script>
   <script src="js/shell.js"></script>
 </body>
 </html>

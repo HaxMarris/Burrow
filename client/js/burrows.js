@@ -526,6 +526,7 @@ function renderMembers() {
         name.textContent = nameOfPerson(m);
         const color = roleColor(s, m.id);
         if (color) name.style.color = color;
+        if (m.bot) name.insertAdjacentHTML('beforeend', ' <span class="bot-tag">BOT</span>');
         text.append(name);
         const sub = presenceLine(m);
         if (sub) {
