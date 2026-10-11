@@ -30,7 +30,7 @@
 
   const vars = (p) => Object.entries(p).map(([k, v]) => `--${k}: ${v};`).join(' ');
 
-  /** Use a theme color ({ h: 0-360, s: 0-100 }), or null for Burrow's own forest colors. */
+  /** Use a theme color ({ h: 0-360, s: 0-100 }), or null for Peiskos's own ember colors. */
   function applyThemeColor(color) {
     let tag = document.getElementById('theme-color');
     if (!color) return tag?.remove();
@@ -47,7 +47,7 @@
   window.applyThemeColor = applyThemeColor;
 
   /**
-   * How Burrow looks for you on this device: compact messages, text size (the whole app is
+   * How Peiskos looks for you on this device: compact messages, text size (the whole app is
    * scaled, as zooming does) and less motion. Applied here too, so the first paint is right.
    */
   function applyDisplay() {

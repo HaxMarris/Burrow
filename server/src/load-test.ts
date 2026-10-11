@@ -142,7 +142,7 @@ const addPeople = async (count: number) => {
 const pct = (sorted: number[], q: number) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] : 0);
 const mb = (b: number) => `${Math.round(b / 1048576)} MB`;
 
-console.log(`Burrow load test against ${child ? 'a throwaway server' : base}. ${cpus().length} CPU, ${mb(totalmem())} memory.`);
+console.log(`Peiskos load test against ${child ? 'a throwaway server' : base}. ${cpus().length} CPU, ${mb(totalmem())} memory.`);
 console.log(`Everyone in one room, each sending a message every ${every}s; ${seconds}s per step.\n`);
 console.log('people  msgs/s  delivered  reach p50  p95    p99    room load p95  server CPU  server memory');
 

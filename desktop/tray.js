@@ -38,7 +38,7 @@ function setOpenAtLogin(on) {
       if (!on) return fs.rmSync(file, { force: true });
       const exe = process.env.APPIMAGE || process.execPath;
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, `[Desktop Entry]\nType=Application\nName=Burrow\nExec="${exe}" --hidden\nX-GNOME-Autostart-enabled=true\n`);
+      fs.writeFileSync(file, `[Desktop Entry]\nType=Application\nName=Peiskos\nExec="${exe}" --hidden\nX-GNOME-Autostart-enabled=true\n`);
     } catch {}
     return;
   }
@@ -82,11 +82,11 @@ function createTray(showWindow) {
   } catch {
     return null; // some Linux desktops have no tray
   }
-  tray.setToolTip('Burrow');
+  tray.setToolTip('Peiskos');
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Open Burrow', click: showWindow },
+    { label: 'Open Peiskos', click: showWindow },
     { type: 'separator' },
-    { label: 'Quit Burrow', click: () => { app.isQuitting = true; app.quit(); } },
+    { label: 'Quit Peiskos', click: () => { app.isQuitting = true; app.quit(); } },
   ]));
   tray.on('click', showWindow);
   return tray;
@@ -95,7 +95,7 @@ function createTray(showWindow) {
 function setUnread(count) {
   if (!tray || tray.isDestroyed()) return;
   tray.setImage(count ? pictures.dotted : pictures.plain);
-  tray.setToolTip(count ? `Burrow (${count} unread)` : 'Burrow');
+  tray.setToolTip(count ? `Peiskos (${count} unread)` : 'Peiskos');
 }
 
 const active = () => !!tray && !tray.isDestroyed();

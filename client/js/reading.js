@@ -557,7 +557,7 @@ function timeModal(title, intro, pick, extra = '') {
 }
 
 function openRemind(m) {
-  timeModal('Remind me', "It's saved, and Burrow brings it back at the time you pick.", async (remindAt) => {
+  timeModal('Remind me', "It's saved, and Peiskos brings it back at the time you pick.", async (remindAt) => {
     await api(`/api/messages/${m.id}/save`, { method: 'POST', body: { remindAt } });
     toast(`I'll remind you ${formatTime(new Date(remindAt)).replace(/^(Today|Yesterday)/, (w) => w.toLowerCase())}.`);
   });
@@ -597,7 +597,7 @@ async function openSaved() {
 // ---- moderation: reports, the audit log, bulk delete
 
 function openReport(m) {
-  modal(`<h2>Report to moderators</h2><p class="muted small">The people who manage messages in this burrow will see this message and your reason.</p>
+  modal(`<h2>Report to moderators</h2><p class="muted small">The people who manage messages in this hearth will see this message and your reason.</p>
     <label>Reason (optional)<input id="report-reason" maxlength="200" placeholder="What's wrong with it?"></label>
     <div class="modal-row"><button class="btn secondary" data-close>Cancel</button><button class="btn danger" id="report-send">Report</button></div>`);
   $('#report-send').onclick = async () => {
@@ -669,7 +669,7 @@ const AUDIT_LABELS = {
   voice_mute: (e) => `muted ${e.target} at the fire`,
   voice_unmute: (e) => `unmuted ${e.target} at the fire`,
   voice_move: (e) => `moved ${e.target} (${e.detail})`,
-  burrow_edit: (e) => `changed the burrow's ${e.detail}`,
+  burrow_edit: (e) => `changed the hearth's ${e.detail}`,
   invite_reset: () => 'made a new invite code',
   bot_add: (e) => `added the bot ${e.target}`,
   bot_remove: (e) => `removed the bot ${e.target}`,
@@ -678,7 +678,7 @@ const AUDIT_LABELS = {
 };
 
 async function openAudit(serverId) {
-  modal(`<h2>Audit log</h2><p class="muted small">Who did what in this burrow, newest first.</p>
+  modal(`<h2>Audit log</h2><p class="muted small">Who did what in this hearth, newest first.</p>
     <div id="audit-list" class="audit-list"><p class="muted">Loading…</p></div>
     <div class="modal-row"><button class="btn secondary hidden" id="audit-more">Show older</button><button class="btn secondary" data-close>Close</button></div>`);
   const list = $('#audit-list');

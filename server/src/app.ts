@@ -915,9 +915,9 @@ export function createApp(opts: AppOptions): Server {
   route('POST', '/api/me/favorites', ({ user, body }) => {
     if (!Array.isArray(body.serverIds)) throw new HttpError(400, 'serverIds must be a list');
     const ids = [...new Set(body.serverIds.map(Number))];
-    if (ids.length > MAX_FAVORITES) throw new HttpError(400, `You can favorite up to ${MAX_FAVORITES} burrows`);
+    if (ids.length > MAX_FAVORITES) throw new HttpError(400, `You can favorite up to ${MAX_FAVORITES} hearths`);
     const isBurrow = db.prepare("SELECT 1 FROM members m JOIN servers s ON s.id = m.server_id WHERE m.user_id = ? AND m.server_id = ? AND s.kind = 'burrow'");
-    for (const id of ids) if (!isBurrow.get(user.id, id)) throw new HttpError(404, 'Burrow not found');
+    for (const id of ids) if (!isBurrow.get(user.id, id)) throw new HttpError(404, 'Hearth not found');
     db.exec('BEGIN');
     try {
       db.prepare('UPDATE members SET favorite = NULL WHERE user_id = ?').run(user.id);
@@ -968,7 +968,7 @@ export function createApp(opts: AppOptions): Server {
   const dmPeople = (user: User, ids: unknown) => {
     const list = [...new Set((Array.isArray(ids) ? ids : []).map(Number))].filter((id) => id !== user.id);
     for (const id of list) {
-      if (!sharesBurrow(user.id, id) && !areFriends(user.id, id)) throw new HttpError(403, 'You can only message friends and people who share a burrow with you');
+      if (!sharesBurrow(user.id, id) && !areFriends(user.id, id)) throw new HttpError(403, 'You can only message friends and people who share a hearth with you');
       if (blockedEitherWay(user.id, id)) throw new HttpError(403, "You can't message this person");
     }
     return list;
@@ -1031,7 +1031,7 @@ export function createApp(opts: AppOptions): Server {
 
   route('POST', '/api/servers', ({ user, body }) => {
     notBot(user);
-    const name = cleanName(body.name, 'Burrow name');
+    const name = cleanName(body.name, 'Hearth name');
     const t = now();
     const r = db
       .prepare('INSERT INTO servers (name, owner_id, invite_code, created_at) VALUES (?, ?, ?, ?)')
@@ -1048,7 +1048,7 @@ export function createApp(opts: AppOptions): Server {
     notBot(user);
     const { serverId, invite } = inviteTarget(body.inviteCode);
     if (db.prepare('SELECT 1 FROM bans WHERE server_id = ? AND user_id = ?').get(serverId, user.id))
-      throw new HttpError(403, "You've been banned from this burrow");
+      throw new HttpError(403, "You've been banned from this hearth");
     if (!isMember(serverId, user.id)) {
       db.prepare('INSERT INTO members (server_id, user_id, joined_at) VALUES (?, ?, ?)').run(serverId, user.id, now());
       if (invite) db.prepare('UPDATE invites SET uses = uses + 1 WHERE code = ?').run(invite);
@@ -1063,7 +1063,7 @@ export function createApp(opts: AppOptions): Server {
     const owner = db.prepare("SELECT owner_id FROM servers WHERE id = ? AND kind = 'burrow'").get(serverId) as
       | { owner_id: number }
       | undefined;
-    if (!owner || !isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
+    if (!owner || !isMember(serverId, user.id)) throw new HttpError(404, 'Hearth not found');
     if (owner.owner_id === user.id) deleteBurrow(serverId);
     else removeMember(serverId, user.id);
     return { ok: true };
@@ -1097,7 +1097,7 @@ export function createApp(opts: AppOptions): Server {
   const allowed = (serverId: number, user: User, perm: Perm) => {
     const kind = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind;
     const me = kind === 'burrow' ? standing(serverId, user.id) : null;
-    if (!me) throw new HttpError(404, 'Burrow not found');
+    if (!me) throw new HttpError(404, 'Hearth not found');
     if (!me.perms.has(perm)) throw new HttpError(403, "Your roles don't allow that");
     return me;
   };
@@ -1159,7 +1159,7 @@ export function createApp(opts: AppOptions): Server {
     const serverId = Number(params[0]);
     const me = allowed(serverId, user, 'roles');
     const count = (db.prepare('SELECT COUNT(*) AS n, MAX(position) AS last FROM roles WHERE server_id = ?').get(serverId) as { n: number; last: number | null });
-    if (count.n >= MAX_ROLES) throw new HttpError(400, `A burrow can have at most ${MAX_ROLES} roles`);
+    if (count.n >= MAX_ROLES) throw new HttpError(400, `A hearth can have at most ${MAX_ROLES} roles`);
     // New roles start at the bottom, below everyone's.
     const name = cleanName(body.name, 'Role name', 32);
     audit(serverId, user.id, 'role_create', null, name);
@@ -1216,7 +1216,7 @@ export function createApp(opts: AppOptions): Server {
     const [serverId, targetId] = params.map(Number);
     const me = allowed(serverId, user, 'roles');
     const target = standing(serverId, targetId);
-    if (!target) throw new HttpError(404, "They aren't in this burrow");
+    if (!target) throw new HttpError(404, "They aren't in this hearth");
     if (targetId !== user.id && target.rank <= me.rank) throw new HttpError(403, "You can't change their roles");
     const wanted = new Set(roleList(serverId, body.roleIds));
     const changeable = (id: number) => roleById(id)!.position > me.rank;
@@ -1237,7 +1237,7 @@ export function createApp(opts: AppOptions): Server {
     const [serverId, targetId] = params.map(Number);
     const me = allowed(serverId, user, body.ban ? 'ban' : 'remove');
     const target = standing(serverId, targetId);
-    if (!target) throw new HttpError(404, "They aren't in this burrow");
+    if (!target) throw new HttpError(404, "They aren't in this hearth");
     if (target.host || target.rank <= me.rank || targetId === user.id) throw new HttpError(403, "You can't remove them");
     if (body.ban) db.prepare('INSERT OR IGNORE INTO bans (server_id, user_id, banned_at) VALUES (?, ?, ?)').run(serverId, targetId, now());
     audit(serverId, user.id, body.ban ? 'ban' : 'remove', targetId);
@@ -1334,7 +1334,7 @@ export function createApp(opts: AppOptions): Server {
     if (body.archived !== undefined && channel.kind === 'text') {
       if (body.archived && !channel.archivedAt) {
         const open = db.prepare("SELECT COUNT(*) AS n FROM channels WHERE server_id = ? AND kind = 'text' AND archived_at IS NULL").get(channel.serverId) as { n: number };
-        if (open.n <= 1) throw new HttpError(400, 'A burrow needs at least one text room that isn\'t archived');
+        if (open.n <= 1) throw new HttpError(400, 'A hearth needs at least one text room that isn\'t archived');
       }
       db.prepare('UPDATE channels SET archived_at = ? WHERE id = ?').run(body.archived ? channel.archivedAt ?? now() : null, channel.id);
     }
@@ -1349,7 +1349,7 @@ export function createApp(opts: AppOptions): Server {
     const threadMessage = channel.kind === 'thread' ? manageableThread(channel, user) : null;
     if (channel.kind !== 'thread') allowed(channel.serverId, user, 'rooms');
     const textRooms = db.prepare("SELECT COUNT(*) AS n FROM channels WHERE server_id = ? AND kind = 'text'").get(channel.serverId) as { n: number };
-    if (channel.kind === 'text' && textRooms.n <= 1) throw new HttpError(400, 'A burrow needs at least one text room');
+    if (channel.kind === 'text' && textRooms.n <= 1) throw new HttpError(400, 'A hearth needs at least one text room');
     if (channel.kind === 'voice') closeVoiceRoom(channel.id);
     if (channel.kind !== 'thread') audit(channel.serverId, user.id, 'room_delete', null, `#${channel.name}`);
     removeFiles(
@@ -1388,7 +1388,7 @@ export function createApp(opts: AppOptions): Server {
   const voiceTarget = (serverId: number, user: User, targetId: number) => {
     const me = allowed(serverId, user, 'voice');
     const target = standing(serverId, targetId);
-    if (!target) throw new HttpError(404, "They aren't in this burrow");
+    if (!target) throw new HttpError(404, "They aren't in this hearth");
     if (targetId !== user.id && (target.host || target.rank <= me.rank)) throw new HttpError(403, "You can't do that to them");
     return target;
   };
@@ -1404,7 +1404,7 @@ export function createApp(opts: AppOptions): Server {
     const from = channelById(inVoice.get(targetId) ?? -1);
     if (!to || to.kind !== 'voice' || !canSee(to, user.id)) throw new HttpError(404, 'Room not found');
     voiceTarget(to.serverId, user, targetId);
-    if (!from || from.serverId !== to.serverId) throw new HttpError(400, "They aren't at a fire in this burrow");
+    if (!from || from.serverId !== to.serverId) throw new HttpError(400, "They aren't at a fire in this hearth");
     if (!canSee(to, targetId)) throw new HttpError(403, "They can't see that room");
     if (from.id !== to.id) {
       audit(to.serverId, user.id, 'voice_move', targetId, `#${from.name} › #${to.name}`);
@@ -1486,7 +1486,7 @@ export function createApp(opts: AppOptions): Server {
     const emoji = soundEmoji(url.searchParams.get('emoji'));
     const check = () => {
       const count = (db.prepare('SELECT COUNT(*) AS n FROM sounds WHERE server_id = ?').get(serverId) as { n: number }).n;
-      if (count >= MAX_SOUNDS) throw new HttpError(400, `A burrow can have up to ${MAX_SOUNDS} sounds`);
+      if (count >= MAX_SOUNDS) throw new HttpError(400, `A hearth can have up to ${MAX_SOUNDS} sounds`);
     };
     check();
     const tooBig = new HttpError(413, `Sounds can be at most ${MAX_SOUND_BYTES / 1024} KB`);
@@ -1797,7 +1797,7 @@ export function createApp(opts: AppOptions): Server {
     const [serverId, targetId] = params.map(Number);
     const me = allowed(serverId, user, 'timeout');
     const target = standing(serverId, targetId);
-    if (!target) throw new HttpError(404, "They aren't in this burrow");
+    if (!target) throw new HttpError(404, "They aren't in this hearth");
     if (target.host || target.rank <= me.rank || targetId === user.id) throw new HttpError(403, "You can't time them out");
     const minutes = Math.floor(Number(body.minutes) || 0);
     if (minutes < 0 || minutes > MAX_TIMEOUT_MINUTES) throw new HttpError(400, 'A timeout can last up to a week');
@@ -1864,7 +1864,7 @@ export function createApp(opts: AppOptions): Server {
     const filter = text ? wordFilterOf(channel.serverId) : null;
     if (!filter || can(channel.serverId, userId, 'messages')) return null;
     const word = filteredWord(filter, text);
-    if (word && filter.action === 'block') throw new HttpError(400, "Your message has a word this burrow doesn't allow");
+    if (word && filter.action === 'block') throw new HttpError(400, "Your message has a word this hearth doesn't allow");
     return word;
   };
 
@@ -1884,7 +1884,7 @@ export function createApp(opts: AppOptions): Server {
   route('POST', '/api/messages/:id/report', ({ user, params, body }) => {
     const { channel } = visibleMessage(user, Number(params[0]));
     const message = messageById(Number(params[0]))!;
-    if (!isBurrow(channel.serverId)) throw new HttpError(400, 'Only messages in burrows can be reported');
+    if (!isBurrow(channel.serverId)) throw new HttpError(400, 'Only messages in hearths can be reported');
     if (db.prepare('SELECT 1 FROM reports WHERE message_id = ? AND reporter_id = ? AND resolved_at IS NULL').get(message.id as number, user.id))
       throw new HttpError(409, "You've already reported this message");
     const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
@@ -1988,7 +1988,7 @@ export function createApp(opts: AppOptions): Server {
     if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
     const limit = uploadLimitFor(channel.serverId, user.id);
-    if (!limit) throw new HttpError(403, "Your roles can't share files in this burrow");
+    if (!limit) throw new HttpError(403, "Your roles can't share files in this hearth");
     const tooBig = () => new HttpError(413, `You can share files up to ${Math.round(limit / 1048576)} MB here`);
     const declared = Number(req.headers['content-length']);
     if (declared > limit) throw tooBig();
@@ -2186,7 +2186,7 @@ export function createApp(opts: AppOptions): Server {
   const handleBurrowPictureUpload = async (req: IncomingMessage, res: ServerResponse, serverId: number, column: PictureColumn = 'icon') => {
     const user = pictureUploader(req);
     allowed(serverId, user, 'burrow');
-    const file = await savePicture(req, 'burrow-pictures', column === 'icon' ? 'Burrow pictures' : 'Banners');
+    const file = await savePicture(req, 'burrow-pictures', column === 'icon' ? 'Hearth pictures' : 'Banners');
     // They may have lost the right (or the burrow may be gone) while it uploaded.
     try {
       allowed(serverId, user, 'burrow');
@@ -2505,7 +2505,7 @@ export function createApp(opts: AppOptions): Server {
         const start = Math.floor(Number(q.start)), end = Math.floor(Number(q.end));
         const ok = (m: number) => Number.isFinite(m) && m >= 0 && m < 1440;
         if (!ok(start) || !ok(end) || start === end) throw new HttpError(400, 'Pick when quiet hours start and end');
-        if (!validTimeZone(q.timeZone)) throw new HttpError(400, "That time zone isn't one Burrow knows");
+        if (!validTimeZone(q.timeZone)) throw new HttpError(400, "That time zone isn't one Peiskos knows");
         db.prepare('UPDATE users SET quiet_start = ?, quiet_end = ?, time_zone = ? WHERE id = ?').run(start, end, q.timeZone as string, user.id);
       }
     }
@@ -2715,10 +2715,10 @@ export function createApp(opts: AppOptions): Server {
     const code = String(randomBytes(4).readUInt32BE() % 1_000_000).padStart(6, '0');
     db.prepare('UPDATE users SET email = ?, email_verified = 0, email_code = ?, email_code_expires = ? WHERE id = ?').run(email, code, now() + 30 * 60 * 1000, user.id);
     try {
-      await mailTo(email, `Your Burrow code: ${code}`, `Hi ${user.username},\n\nYour code to confirm this email address on Burrow is ${code}. It works for 30 minutes.\n\nIf you didn't ask for this, you can ignore this email.`);
+      await mailTo(email, `Your Peiskos code: ${code}`, `Hi ${user.username},\n\nYour code to confirm this email address on Peiskos is ${code}. It works for 30 minutes.\n\nIf you didn't ask for this, you can ignore this email.`);
     } catch (err) {
       console.error('Sending email failed:', err);
-      throw new HttpError(502, "Burrow couldn't send the email. Check the address, or ask whoever runs this server.");
+      throw new HttpError(502, "Peiskos couldn't send the email. Check the address, or ask whoever runs this server.");
     }
     return meJson(user);
   });
@@ -2759,8 +2759,8 @@ export function createApp(opts: AppOptions): Server {
       if (!u?.email || !u.email_verified) return answer;
       const code = String(randomBytes(4).readUInt32BE() % 1_000_000).padStart(6, '0');
       db.prepare('UPDATE users SET reset_code = ?, reset_expires = ?, reset_tries = 0 WHERE id = ?').run(hashCode(code), now() + RESET_MINUTES * 60 * 1000, u.id);
-      const link = opts.publicUrl ? `\n\nOpen Burrow: ${opts.publicUrl}` : '';
-      await mailTo(u.email, `Your Burrow password code: ${code}`, `Hi ${u.username},\n\nSomeone (hopefully you) asked to reset your Burrow password. Your code is ${code}. It works for ${RESET_MINUTES} minutes.${link}\n\nIf it wasn't you, ignore this email: your password stays the same.`).catch((err) =>
+      const link = opts.publicUrl ? `\n\nOpen Peiskos: ${opts.publicUrl}` : '';
+      await mailTo(u.email, `Your Peiskos password code: ${code}`, `Hi ${u.username},\n\nSomeone (hopefully you) asked to reset your Peiskos password. Your code is ${code}. It works for ${RESET_MINUTES} minutes.${link}\n\nIf it wasn't you, ignore this email: your password stays the same.`).catch((err) =>
         console.error('Sending a password reset email failed:', err),
       );
       return answer;
@@ -3142,7 +3142,7 @@ export function createApp(opts: AppOptions): Server {
   route('POST', '/api/servers/:id/bots', ({ user, params, body }) => {
     const serverId = Number(params[0]);
     allowed(serverId, user, 'burrow');
-    if (botCount(serverId) >= MAX_BOTS) throw new HttpError(400, `A burrow can have up to ${MAX_BOTS} bots and webhooks`);
+    if (botCount(serverId) >= MAX_BOTS) throw new HttpError(400, `A hearth can have up to ${MAX_BOTS} bots and webhooks`);
     const id = makeBot(serverId, botName(body.name));
     audit(serverId, user.id, 'bot_add', id);
     sendServerUpdate(serverId);
@@ -3172,7 +3172,7 @@ export function createApp(opts: AppOptions): Server {
     const channel = channelById(Number(params[0]));
     if (!channel || channel.kind !== 'text' || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
     allowed(channel.serverId, user, 'burrow');
-    if (botCount(channel.serverId) >= MAX_BOTS) throw new HttpError(400, `A burrow can have up to ${MAX_BOTS} bots and webhooks`);
+    if (botCount(channel.serverId) >= MAX_BOTS) throw new HttpError(400, `A hearth can have up to ${MAX_BOTS} bots and webhooks`);
     const botId = makeBot(channel.serverId, botName(body.name));
     const token = randomBytes(24).toString('base64url');
     const r = db
@@ -3305,7 +3305,7 @@ export function createApp(opts: AppOptions): Server {
     const name = emojiName(url.searchParams.get('name'));
     const check = () => {
       const count = (db.prepare('SELECT COUNT(*) AS n FROM custom_emoji WHERE server_id = ? AND kind = ?').get(serverId, kind) as { n: number }).n;
-      if (count >= MAX_EMOJI[kind]) throw new HttpError(400, `A burrow can have up to ${MAX_EMOJI[kind]} ${kind === 'sticker' ? 'stickers' : 'emoji'}`);
+      if (count >= MAX_EMOJI[kind]) throw new HttpError(400, `A hearth can have up to ${MAX_EMOJI[kind]} ${kind === 'sticker' ? 'stickers' : 'emoji'}`);
       if (db.prepare('SELECT 1 FROM custom_emoji WHERE server_id = ? AND kind = ? AND name = ?').get(serverId, kind, name))
         throw new HttpError(409, `There's already ${kind === 'sticker' ? 'a sticker' : 'an emoji'} called ${name}`);
     };
@@ -3603,7 +3603,7 @@ export function createApp(opts: AppOptions): Server {
     }
     const left = timeoutLeft(channel.serverId, userId);
     if (left) return `You're timed out for ${left}`;
-    if (!rulesOk(channel.serverId, userId)) return "Accept the burrow's rules first";
+    if (!rulesOk(channel.serverId, userId)) return "Accept the hearth's rules first";
     return null;
   };
 
@@ -3623,7 +3623,7 @@ export function createApp(opts: AppOptions): Server {
   // All messages, only @mentions, or nothing; and muting for a while (or until turned back on).
   route('POST', '/api/notify', ({ user, body }) => {
     const serverId = Number(body.serverId);
-    if (!isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
+    if (!isMember(serverId, user.id)) throw new HttpError(404, 'Hearth not found');
     const channelId = body.channelId == null ? 0 : Number(body.channelId);
     if (channelId) {
       const channel = channelById(channelId);
@@ -3654,7 +3654,7 @@ export function createApp(opts: AppOptions): Server {
     const serverId = Number(params[0]);
     allowed(serverId, user, 'rooms');
     const count = db.prepare('SELECT COUNT(*) AS n, MAX(position) AS last FROM room_groups WHERE server_id = ?').get(serverId) as { n: number; last: number | null };
-    if (count.n >= 30) throw new HttpError(400, 'A burrow can have at most 30 headings');
+    if (count.n >= 30) throw new HttpError(400, 'A hearth can have at most 30 headings');
     db.prepare('INSERT INTO room_groups (server_id, name, position) VALUES (?, ?, ?)').run(serverId, cleanName(body.name, 'Heading', 32), (count.last ?? 0) + 1);
     sendServerUpdate(serverId);
     return serverSummary(serverId, user.id);
@@ -3739,10 +3739,10 @@ export function createApp(opts: AppOptions): Server {
     if (body.liveChannelId !== undefined) {
       const channel = body.liveChannelId === null ? null : channelById(Number(body.liveChannelId));
       if (channel && (channel.serverId !== serverId || channel.kind !== 'text'))
-        throw new HttpError(400, 'Pick a text room in this burrow for go-live posts');
+        throw new HttpError(400, 'Pick a text room in this hearth for go-live posts');
       db.prepare('UPDATE servers SET live_channel_id = ? WHERE id = ?').run(channel?.id ?? null, serverId);
     }
-    if (body.name !== undefined) db.prepare('UPDATE servers SET name = ? WHERE id = ?').run(cleanName(body.name, 'Burrow name'), serverId);
+    if (body.name !== undefined) db.prepare('UPDATE servers SET name = ? WHERE id = ?').run(cleanName(body.name, 'Hearth name'), serverId);
     if (body.description !== undefined) {
       const text = typeof body.description === 'string' ? body.description.trim() : '';
       if (text.length > MAX_DESCRIPTION) throw new HttpError(400, `The description can be at most ${MAX_DESCRIPTION} characters`);
@@ -3756,7 +3756,7 @@ export function createApp(opts: AppOptions): Server {
     }
     if (body.afkChannelId !== undefined) {
       const channel = body.afkChannelId === null ? null : channelById(Number(body.afkChannelId));
-      if (channel && (channel.serverId !== serverId || channel.kind !== 'voice')) throw new HttpError(400, 'The AFK fire must be one of this burrow\'s voice rooms');
+      if (channel && (channel.serverId !== serverId || channel.kind !== 'voice')) throw new HttpError(400, 'The AFK fire must be one of this hearth\'s voice rooms');
       db.prepare('UPDATE servers SET afk_channel_id = ? WHERE id = ?').run(channel?.id ?? null, serverId);
     }
     if (body.afkMinutes !== undefined) {
@@ -3781,7 +3781,7 @@ export function createApp(opts: AppOptions): Server {
 
   route('POST', '/api/servers/:id/rules/accept', ({ user, params }) => {
     const serverId = Number(params[0]);
-    if (!isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
+    if (!isMember(serverId, user.id)) throw new HttpError(404, 'Hearth not found');
     db.prepare('UPDATE members SET rules_accepted_at = ? WHERE server_id = ? AND user_id = ?').run(now(), serverId, user.id);
     const server = serverSummary(serverId, user.id);
     sendTo([user.id], { type: 'server_updated', server });
@@ -3792,9 +3792,9 @@ export function createApp(opts: AppOptions): Server {
   route('POST', '/api/servers/:id/transfer', ({ user, params, body }) => {
     const serverId = Number(params[0]);
     const me = standing(serverId, user.id);
-    if (!me?.host) throw new HttpError(403, 'Only the host can hand the burrow over');
+    if (!me?.host) throw new HttpError(403, 'Only the host can hand the hearth over');
     const to = Number(body.userId);
-    if (to === user.id || !isMember(serverId, to)) throw new HttpError(400, "They aren't in this burrow");
+    if (to === user.id || !isMember(serverId, to)) throw new HttpError(400, "They aren't in this hearth");
     db.prepare('UPDATE servers SET owner_id = ? WHERE id = ?').run(to, serverId);
     accessChanged(serverId);
     return serverSummary(serverId, user.id);
@@ -3832,20 +3832,20 @@ export function createApp(opts: AppOptions): Server {
   // Anyone in a burrow can make an invite; people who can edit the burrow see and cancel everyone's.
   route('GET', '/api/servers/:id/invites', ({ user, params }) => {
     const serverId = Number(params[0]);
-    if (!standing(serverId, user.id) || isGroupDm(serverId)) throw new HttpError(404, 'Burrow not found');
+    if (!standing(serverId, user.id) || isGroupDm(serverId)) throw new HttpError(404, 'Hearth not found');
     return invitesOf(serverId, user);
   });
 
   route('POST', '/api/servers/:id/invites', ({ user, params, body }) => {
     const serverId = Number(params[0]);
     const kind = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind;
-    if (kind !== 'burrow' || !isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
+    if (kind !== 'burrow' || !isMember(serverId, user.id)) throw new HttpError(404, 'Hearth not found');
     const expiresIn = body.expiresIn == null ? null : Math.floor(Number(body.expiresIn));
     if (expiresIn !== null && !(expiresIn >= 60 && expiresIn <= 30 * 86400)) throw new HttpError(400, 'Invites can last from a minute to 30 days');
     const maxUses = body.maxUses == null ? null : Math.floor(Number(body.maxUses));
     if (maxUses !== null && !(maxUses >= 1 && maxUses <= 1000)) throw new HttpError(400, 'Invites can be used from 1 to 1000 times');
     const live = (db.prepare('SELECT COUNT(*) AS n FROM invites WHERE server_id = ? AND (expires_at IS NULL OR expires_at > ?)').get(serverId, now()) as { n: number }).n;
-    if (live >= 100) throw new HttpError(400, 'This burrow has too many invites. Cancel some first.');
+    if (live >= 100) throw new HttpError(400, 'This hearth has too many invites. Cancel some first.');
     const code = newInviteCode();
     db.prepare('INSERT INTO invites (code, server_id, created_by, created_at, expires_at, max_uses) VALUES (?, ?, ?, ?, ?, ?)').run(
       code, serverId, user.id, now(), expiresIn === null ? null : now() + expiresIn * 1000, maxUses,
@@ -3941,7 +3941,7 @@ export function createApp(opts: AppOptions): Server {
     }
     if (!partial || body.channelId !== undefined) {
       const c = body.channelId == null ? null : channelById(Number(body.channelId));
-      if (c && (c.serverId !== serverId || !canSee(c, user.id))) throw new HttpError(400, "That room isn't in this burrow");
+      if (c && (c.serverId !== serverId || !canSee(c, user.id))) throw new HttpError(400, "That room isn't in this hearth");
       out.channel_id = c?.id ?? null;
     }
     return out;
@@ -3957,9 +3957,9 @@ export function createApp(opts: AppOptions): Server {
   route('POST', '/api/servers/:id/events', ({ user, params, body }) => {
     const serverId = Number(params[0]);
     const kind = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind;
-    if (kind !== 'burrow' || !isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
+    if (kind !== 'burrow' || !isMember(serverId, user.id)) throw new HttpError(404, 'Hearth not found');
     const upcoming = (db.prepare('SELECT COUNT(*) AS n FROM events WHERE server_id = ? AND starts_at > ?').get(serverId, now()) as { n: number }).n;
-    if (upcoming >= 50) throw new HttpError(400, 'This burrow has 50 events coming up already');
+    if (upcoming >= 50) throw new HttpError(400, 'This hearth has 50 events coming up already');
     const e = cleanEvent(serverId, user, body);
     const r = db
       .prepare('INSERT INTO events (server_id, channel_id, title, details, starts_at, created_by, created_at, reminded) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
@@ -4167,7 +4167,7 @@ export function createApp(opts: AppOptions): Server {
   // Your name in one burrow. Empty goes back to your display name.
   route('PATCH', '/api/servers/:id/nickname', ({ user, params, body }) => {
     const serverId = Number(params[0]);
-    if (!isBurrow(serverId) || !isMember(serverId, user.id)) throw new HttpError(404, 'Burrow not found');
+    if (!isBurrow(serverId) || !isMember(serverId, user.id)) throw new HttpError(404, 'Hearth not found');
     const nick = typeof body.nickname === 'string' ? body.nickname.replace(/\s+/g, ' ').trim() : '';
     if (nick.length > 32) throw new HttpError(400, 'Keep your nickname to 32 characters');
     db.prepare('UPDATE members SET nickname = ? WHERE server_id = ? AND user_id = ?').run(nick || null, serverId, user.id);
@@ -4342,7 +4342,7 @@ export function createApp(opts: AppOptions): Server {
   const deviceName = (ua: string | null) => {
     if (!ua) return 'Unknown device';
     const os = /iPhone|iPad/.test(ua) ? (/iPad/.test(ua) ? 'iPad' : 'iPhone') : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X|Macintosh/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : '';
-    const app = /Electron|Burrow\//.test(ua) ? 'Burrow app' : /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /OPR\//.test(ua) ? 'Opera' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : /node/i.test(ua) ? 'Script' : 'Browser';
+    const app = /Electron|Burrow\//.test(ua) ? 'Peiskos app' : /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /OPR\//.test(ua) ? 'Opera' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : /node/i.test(ua) ? 'Script' : 'Browser';
     return os ? `${app} on ${os}` : app;
   };
   route('GET', '/api/me/sessions', ({ user, token }) =>
@@ -4426,8 +4426,8 @@ export function createApp(opts: AppOptions): Server {
     confirmIdentity(user, body, { needCode: false });
     const secret = newTotpSecret();
     db.prepare('UPDATE users SET totp_pending = ? WHERE id = ?').run(secret, user.id);
-    const label = encodeURIComponent(`Burrow:${user.username}`);
-    return { secret, uri: `otpauth://totp/${label}?secret=${secret}&issuer=Burrow&digits=6&period=30` };
+    const label = encodeURIComponent(`Peiskos:${user.username}`);
+    return { secret, uri: `otpauth://totp/${label}?secret=${secret}&issuer=Peiskos&digits=6&period=30` };
   });
   route('POST', '/api/me/two-step/enable', ({ user, body }) => {
     const r = db.prepare('SELECT totp_pending FROM users WHERE id = ?').get(user.id) as { totp_pending: string | null };
@@ -4488,7 +4488,7 @@ export function createApp(opts: AppOptions): Server {
     const challenge = newChallenge(`add:${user.id}`, rpId, user.id);
     return {
       challenge,
-      rp: { name: 'Burrow', id: rpId },
+      rp: { name: 'Peiskos', id: rpId },
       user: { id: Buffer.from(String(user.id)).toString('base64url'), name: user.username, displayName: user.displayName || user.username },
       pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -8 }, { type: 'public-key', alg: -257 }],
       authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'preferred' },

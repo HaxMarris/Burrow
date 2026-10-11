@@ -127,7 +127,7 @@ test('full chat flow', async () => {
 test('serves the client', async () => {
   const res = await fetch(base + '/');
   assert.equal(res.status, 200);
-  assert.match(await res.text(), /<title>Burrow<\/title>/);
+  assert.match(await res.text(), /<title>Peiskos<\/title>/);
   const traversal = await fetch(base + '/..%2f..%2fserver/package.json');
   assert.doesNotMatch(await traversal.text(), /burrow-chat-server/);
 });

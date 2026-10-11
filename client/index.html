@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Burrow</title>
+  <title>Peiskos</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-  <meta name="theme-color" content="#2f5743" />
+  <meta name="theme-color" content="#c4561c" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-title" content="Burrow" />
+  <meta name="apple-mobile-web-app-title" content="Peiskos" />
   <link rel="stylesheet" href="style.css" />
   <script src="theme.js"></script>
 </head>
@@ -30,15 +30,24 @@
           <path d="M-20 800 L60 560 L140 800Z M90 800 L170 610 L250 800Z M380 800 L470 540 L560 800Z M500 800 L570 620 L640 800Z" />
           <ellipse cx="300" cy="800" rx="170" ry="90" />
         </g>
-        <ellipse cx="300" cy="790" rx="46" ry="34" fill="var(--scene-hole)" />
+        <defs>
+          <radialGradient id="scene-glow"><stop offset="0" stop-color="var(--glow)" stop-opacity=".6" /><stop offset="1" stop-color="var(--glow)" stop-opacity="0" /></radialGradient>
+        </defs>
+        <circle cx="300" cy="690" r="150" fill="url(#scene-glow)" />
+        <g fill="var(--scene-hole)">
+          <rect x="250" y="712" width="100" height="16" rx="8" transform="rotate(-12 300 720)" />
+          <rect x="250" y="712" width="100" height="16" rx="8" transform="rotate(12 300 720)" />
+        </g>
+        <path d="M54 8C58 26 76 38 76 60A26 26 0 0 1 24 60C24 46 32 38 38 30C40 38 44 42 48 44C50 32 52 20 54 8Z" transform="translate(300 724) scale(.95) translate(-50 -86)" fill="var(--ember)" />
+        <path d="M54 8C58 26 76 38 76 60A26 26 0 0 1 24 60C24 46 32 38 38 30C40 38 44 42 48 44C50 32 52 20 54 8Z" transform="translate(300 724) scale(.5) translate(-50 -86)" fill="var(--glow)" />
       </svg>
-      <div class="auth-brand"><span class="logo-mark"></span>Burrow</div>
+      <div class="auth-brand"><span class="logo-mark"></span>Peiskos</div>
       <p class="auth-tagline">A cozy corner of the internet for you and your friends.</p>
     </div>
     <div class="auth-side">
       <form id="reset-form" class="auth-card hidden">
         <h1>New password</h1>
-        <p class="muted" id="reset-subtitle">Burrow emails a code to the address you confirmed in your account settings.</p>
+        <p class="muted" id="reset-subtitle">Peiskos emails a code to the address you confirmed in your account settings.</p>
         <label>Username <input id="reset-username" autocomplete="username" required /></label>
         <div id="reset-step2" class="reset-step2 hidden">
           <label>Code from the email <input id="reset-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="123456" /></label>
@@ -101,8 +110,8 @@
     <a class="skip-link" href="#composer-input">Skip to the message box</a>
     <div id="offline-bar" class="offline-bar hidden" role="status">You're offline. Showing what was saved on this device; messages you write go out when you're back.</div>
     <header class="topbar">
-      <div class="brand"><span class="logo-mark"></span><span class="brand-name">Burrow</span></div>
-      <nav class="burrow-nav" id="burrow-nav" aria-label="Your burrows"></nav>
+      <div class="brand"><span class="logo-mark"></span><span class="brand-name">Peiskos</span></div>
+      <nav class="burrow-nav" id="burrow-nav" aria-label="Your hearths"></nav>
       <button class="burrow-switch" id="burrow-switch" aria-haspopup="dialog" aria-expanded="false">
         <span class="tile" id="switch-tile"></span>
         <span class="switch-name" id="switch-name"></span>
@@ -126,10 +135,10 @@
       <div id="burrow-banner" class="burrow-banner hidden"></div>
       <div class="side-head">
         <div class="side-title">
-          <h2 id="server-name">No burrow yet</h2>
+          <h2 id="server-name">No hearth yet</h2>
           <p id="server-desc" class="server-desc hidden"></p>
         </div>
-        <button class="icon-btn" id="server-menu-btn" title="Burrow settings and invite">
+        <button class="icon-btn" id="server-menu-btn" title="Hearth settings and invite">
           <svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm8.9 3-1.6-.4a7.4 7.4 0 0 0-.7-1.7l.9-1.4-1.9-1.9-1.4.9a7.4 7.4 0 0 0-1.7-.7L13 3.1h-2l-.4 1.7a7.4 7.4 0 0 0-1.7.7l-1.4-.9-1.9 1.9.9 1.4a7.4 7.4 0 0 0-.7 1.7l-1.7.4v2l1.7.4c.2.6.4 1.2.7 1.7l-.9 1.4 1.9 1.9 1.4-.9c.5.3 1.1.5 1.7.7l.4 1.7h2l.4-1.7c.6-.2 1.2-.4 1.7-.7l1.4.9 1.9-1.9-.9-1.4c.3-.5.5-1.1.7-1.7l1.6-.4v-2Z"/></svg>
         </button>
       </div>
@@ -350,8 +359,8 @@
       <div id="empty-state" class="empty-state hidden">
         <div class="empty-illustration"><span class="logo-mark big"></span></div>
         <h2>Nothing here yet</h2>
-        <p class="muted">Dig a new burrow for your friends, or join one with an invite code.</p>
-        <button id="empty-add" class="btn">Create or join a burrow</button>
+        <p class="muted">Light a new hearth for your friends, or join one with an invite code.</p>
+        <button id="empty-add" class="btn">Create or join a hearth</button>
       </div>
     </main>
 
@@ -365,7 +374,7 @@
 
     <nav class="tabbar" aria-label="Main">
       <button class="tab" id="tab-burrows">
-        <svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3v-10.5Z"/></svg>Burrows
+        <svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3v-10.5Z"/></svg>Hearths
       </button>
       <button class="tab" id="tab-messages">
         <svg viewBox="0 0 24 24"><path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9l-5 4V5a1 1 0 0 1 1-1Z"/></svg>Messages
@@ -400,8 +409,8 @@
     <button role="menuitem" id="logout" class="danger-item">Log out</button>
   </div>
 
-  <!-- Burrow switcher: the phone's burrow list, and the desktop's "more" list -->
-  <div id="switcher" class="switcher hidden" role="dialog" aria-label="Switch burrow"></div>
+  <!-- Hearth switcher: the phone's hearth list, and the desktop's "more" list -->
+  <div id="switcher" class="switcher hidden" role="dialog" aria-label="Switch hearth"></div>
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
   <div id="ring" class="ring-card hidden" role="alertdialog" aria-label="Incoming call">

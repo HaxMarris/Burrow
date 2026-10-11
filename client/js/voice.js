@@ -40,7 +40,7 @@ async function joinVoice(channelId, { muted = false, deafened = false, rejoin = 
     const LK = await loadLivekit();
     const { url, token, canSpeak = true } = await api(`/api/channels/${channelId}/voice`, { method: 'POST' });
     if (state.voice !== voice) return;
-    if (!LK.isE2EESupported()) throw new Error("this app can't encrypt voice. Update Burrow or use a current browser.");
+    if (!LK.isE2EESupported()) throw new Error("this app can't encrypt voice. Update Peiskos or use a current browser.");
     // Muted for everyone by a moderator: your mic stays off until they let you speak.
     voice.serverMuted = !canSpeak;
     if (voice.serverMuted) voice.muted = true;
@@ -161,7 +161,7 @@ async function joinVoice(channelId, { muted = false, deafened = false, rejoin = 
     // Still offline: keep trying quietly rather than showing an error each time.
     if (rejoin && state.rejoin) return scheduleRejoin(state.rejoin);
     const denied = err?.name === 'NotAllowedError' || /permission/i.test(err?.message ?? '');
-    alert(denied ? 'Burrow needs microphone access for voice. Allow it in your system settings and try again.'
+    alert(denied ? 'Peiskos needs microphone access for voice. Allow it in your system settings and try again.'
                  : `Couldn't join voice: ${err?.message || err}`);
   }
 }
@@ -390,7 +390,7 @@ function nameOf(userId, fallback = '?') {
 }
 
 function mediaError(err, what) {
-  if (err?.name === 'NotAllowedError') return `Burrow needs permission to use your ${what}. Allow it in your system settings and try again.`;
+  if (err?.name === 'NotAllowedError') return `Peiskos needs permission to use your ${what}. Allow it in your system settings and try again.`;
   if (err?.name === 'NotFoundError') return `No ${what} found.`;
   if (err?.name === 'NotReadableError') return `Your ${what} is busy. Close other apps using it and try again.`;
   return `Couldn't start your ${what}: ${err?.message || err}`;

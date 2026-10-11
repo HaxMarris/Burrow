@@ -657,7 +657,7 @@ function voiceSettings() {
   const pct = (v) => Math.round(v * 100);
   const outputNote = isAppleMobile
     ? 'Sound plays wherever your iPhone or iPad sends it. To switch to AirPods or a speaker, use Control Center.'
-    : "This browser can't pick where sound plays, so it uses your system's choice. Chrome, Edge and the Burrow desktop app can pick.";
+    : "This browser can't pick where sound plays, so it uses your system's choice. Chrome, Edge and the Peiskos desktop app can pick.";
   return `<h3>Voice and video</h3>
     <div class="voice-settings">
       <label>Microphone<select id="vs-audioinput"></select></label>
@@ -867,7 +867,8 @@ function openVoiceSettings() {
 // Your own theme color, on a color wheel: the angle is the hue, the distance from the middle is
 // how strong it is. theme.js turns it into the actual colors for light and dark.
 const THEME_PRESETS = [
-  { name: 'Forest', color: null },
+  { name: 'Glød', color: null },
+  { name: 'Forest', color: { h: 147, s: 45 } },
   { name: 'Fjord', color: { h: 205, s: 70 } },
   { name: 'Heather', color: { h: 280, s: 55 } },
   { name: 'Cloudberry', color: { h: 32, s: 85 } },
@@ -875,11 +876,11 @@ const THEME_PRESETS = [
   { name: 'Slate', color: { h: 215, s: 10 } },
 ];
 const savedThemeColor = () => { try { return JSON.parse(store.get('themeColor')); } catch { return null; } };
-const FOREST_GREEN = { h: 147, s: 45 }; // where the dot sits for Burrow's own colors
+const OWN_EMBER = { h: 21, s: 75 }; // where the dot sits for Peiskos's own colors
 
 function themeSettings() {
   const chip = (p, i) => {
-    const c = p.color ?? FOREST_GREEN;
+    const c = p.color ?? OWN_EMBER;
     return `<button type="button" class="swatch" data-preset="${i}" title="${p.name}" style="background: hsl(${c.h} ${c.s}% 42%)"></button>`;
   };
   return `<h3>Theme color</h3>
@@ -887,8 +888,8 @@ function themeSettings() {
       <div class="wheel" id="theme-wheel" tabindex="0" role="slider" aria-label="Theme color"><span class="wheel-dot" id="theme-dot"></span></div>
       <div class="theme-side">
         <div class="color-row">${THEME_PRESETS.map(chip).join('')}</div>
-        <span class="small muted">Drag around the wheel to pick a color; nearer the middle is softer. It works with both light and dark, and only changes Burrow for you.</span>
-        <div><button type="button" class="btn secondary" id="theme-reset">Back to forest green</button></div>
+        <span class="small muted">Drag around the wheel to pick a color; nearer the middle is softer. It works with both light and dark, and only changes Peiskos for you.</span>
+        <div><button type="button" class="btn secondary" id="theme-reset">Back to ember</button></div>
       </div>
     </div>`;
 }
@@ -897,12 +898,12 @@ function wireThemeSettings() {
   const wheel = $('#theme-wheel');
   let color = savedThemeColor();
   const show = () => {
-    const c = color ?? FOREST_GREEN;
+    const c = color ?? OWN_EMBER;
     const r = (c.s / 100) * 50, a = (c.h * Math.PI) / 180;
     $('#theme-dot').style.left = `${50 + Math.sin(a) * r}%`;
     $('#theme-dot').style.top = `${50 - Math.cos(a) * r}%`;
     $('#theme-dot').style.background = `hsl(${c.h} ${c.s}% 50%)`;
-    wheel.setAttribute('aria-valuetext', color ? `hue ${Math.round(c.h)}, strength ${Math.round(c.s)}%` : 'forest green');
+    wheel.setAttribute('aria-valuetext', color ? `hue ${Math.round(c.h)}, strength ${Math.round(c.s)}%` : 'ember');
   };
   const use = (c, save) => {
     color = c;
@@ -921,7 +922,7 @@ function wireThemeSettings() {
   wheel.onpointermove = (e) => { if (wheel.hasPointerCapture(e.pointerId)) pick(e); };
   wheel.onpointerup = () => use(color, true);
   wheel.onkeydown = (e) => {
-    const c = { ...(color ?? FOREST_GREEN) };
+    const c = { ...(color ?? OWN_EMBER) };
     if (e.key === 'ArrowLeft') c.h = (c.h + 355) % 360;
     else if (e.key === 'ArrowRight') c.h = (c.h + 5) % 360;
     else if (e.key === 'ArrowUp') c.s = Math.min(100, c.s + 5);

@@ -1,9 +1,9 @@
-// Burrow's service worker: it shows alerts that arrive while Burrow is closed (on a phone
+// Peiskos's service worker: it shows alerts that arrive while Peiskos is closed (on a phone
 // that's the home-screen app), and opens the right conversation when one is tapped. It keeps
-// a copy of the app's own files so Burrow still opens with no connection (it always loads
-// fresh from your server when it can), and catches things shared to Burrow from other apps.
+// a copy of the app's own files so Peiskos still opens with no connection (it always loads
+// fresh from your server when it can), and catches things shared to Peiskos from other apps.
 
-const APP_CACHE = 'burrow-app-v1';
+const APP_CACHE = 'burrow-app-v2';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil((async () => {
@@ -60,7 +60,7 @@ self.addEventListener('push', (e) => {
     if (typeof m.badge === 'number' && self.navigator.setAppBadge) {
       await (m.badge ? self.navigator.setAppBadge(m.badge) : self.navigator.clearAppBadge()).catch(() => {});
     }
-    await self.registration.showNotification(m.title || 'Burrow', {
+    await self.registration.showNotification(m.title || 'Peiskos', {
       body: m.body || '',
       tag: m.tag,
       renotify: !!m.tag,

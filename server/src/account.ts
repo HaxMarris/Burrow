@@ -160,7 +160,7 @@ export function coseToJwk(cose: Map<Cbor, Cbor>): { jwk: JsonWebKey; alg: number
   if (kty === 2 && alg === -7 && cose.get(-1) === 1) return { jwk: { kty: 'EC', crv: 'P-256', x: bytes(-2), y: bytes(-3) }, alg };
   if (kty === 3 && alg === -257) return { jwk: { kty: 'RSA', n: bytes(-1), e: bytes(-2) }, alg };
   if (kty === 1 && alg === -8 && cose.get(-1) === 6) return { jwk: { kty: 'OKP', crv: 'Ed25519', x: bytes(-2) }, alg };
-  throw new Error("This passkey uses a kind of key Burrow doesn't know");
+  throw new Error("This passkey uses a kind of key Peiskos doesn't know");
 }
 
 export type AuthData = { rpIdHash: Buffer; flags: number; signCount: number; credentialId?: Buffer; publicKey?: Map<Cbor, Cbor> };

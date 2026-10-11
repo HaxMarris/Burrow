@@ -256,7 +256,7 @@ function openStickers() {
   const channelId = state.channelId;
   const groups = stickerGroups();
   modal(`<h2>Stickers</h2>
-    ${groups.length ? '' : `<p class="muted">No stickers yet. People who can manage emoji add them in a burrow's settings.</p>`}
+    ${groups.length ? '' : `<p class="muted">No stickers yet. People who can manage emoji add them in a hearth's settings.</p>`}
     <div id="sticker-groups"></div>
     <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
   $('#sticker-groups').replaceChildren(...groups.flatMap((s) => {
@@ -550,7 +550,7 @@ async function sendVoice(r, seconds) {
   const type = (r.rec.mimeType || r.chunks[0]?.type || 'audio/webm').split(';')[0];
   const ext = { 'audio/webm': 'webm', 'audio/ogg': 'ogg', 'audio/mp4': 'm4a' }[type] ?? 'webm';
   const file = new File(r.chunks, `voice-message.${ext}`, { type });
-  if (file.size > uploadLimit()) return alert(uploadLimit() ? 'That recording is too big to send.' : "Your roles can't share files in this burrow.");
+  if (file.size > uploadLimit()) return alert(uploadLimit() ? 'That recording is too big to send.' : "Your roles can't share files in this hearth.");
   const replyTo = state.channelId === r.channelId ? state.replyTo : null;
   if (replyTo) setReply(null);
   try {

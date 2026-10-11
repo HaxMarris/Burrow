@@ -36,7 +36,7 @@ const app = createApp({
     heartbeatUrl: process.env.HEARTBEAT_URL || undefined,
   },
   maxUploadBytes: Number(process.env.MAX_UPLOAD_MB ?? 25) * 1024 * 1024,
-  mail: process.env.SMTP_URL ? { url: process.env.SMTP_URL, from: process.env.MAIL_FROM || `Burrow <${decodeURIComponent(new URL(process.env.SMTP_URL).username).includes('@') ? decodeURIComponent(new URL(process.env.SMTP_URL).username) : 'burrow@localhost'}>` } : undefined,
+  mail: process.env.SMTP_URL ? { url: process.env.SMTP_URL, from: process.env.MAIL_FROM || `Peiskos <${decodeURIComponent(new URL(process.env.SMTP_URL).username).includes('@') ? decodeURIComponent(new URL(process.env.SMTP_URL).username) : 'burrow@localhost'}>` } : undefined,
   publicUrl: process.env.PUBLIC_URL || undefined,
   pushContact: process.env.PUSH_CONTACT || undefined,
   gifs: process.env.KLIPY_API_KEY ? { apiKey: process.env.KLIPY_API_KEY, rating: process.env.GIF_RATING || undefined } : undefined,

@@ -441,11 +441,11 @@ $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') clos
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
 function openAddServer(focus) {
-  modal(`<h2>Find a burrow</h2>
-    <p class="muted">A burrow is a shared space for a group of friends, with its own rooms.</p>
+  modal(`<h2>Find a hearth</h2>
+    <p class="muted">A hearth is a shared space for a group of friends, with its own rooms.</p>
     <form id="create-form">
       <label>Dig a new one<input id="new-server-name" placeholder="e.g. Friday Night Crew" maxlength="64" required /></label>
-      <button type="submit" class="btn">Create burrow</button>
+      <button type="submit" class="btn">Create hearth</button>
     </form>
     <div class="or">or</div>
     <form id="join-form">
@@ -505,7 +505,7 @@ $('#server-menu-btn').onclick = () => {
       <button class="btn" id="open-invites">Invite people</button>
       <button class="btn secondary" id="open-notify" aria-haspopup="menu">Notifications: ${n.muted ? 'muted' : { all: 'all messages', mentions: 'only @mentions', none: 'nothing' }[n.level]}</button>
       ${s.rules ? '<button class="btn secondary" id="open-rules">Rules</button>' : ''}
-      ${can(s, 'burrow') ? '<button class="btn secondary" id="open-edit">Edit burrow</button>' : ''}
+      ${can(s, 'burrow') ? '<button class="btn secondary" id="open-edit">Edit hearth</button>' : ''}
       ${can(s, 'messages') ? `<button class="btn secondary" id="open-reports">Reports${s.openReports ? ` · ${s.openReports}` : ''}</button>` : ''}
       ${can(s, 'audit') ? '<button class="btn secondary" id="open-audit">Audit log</button>' : ''}
       ${can(s, 'burrow') ? '<button class="btn secondary" id="open-bots">Bots and webhooks</button>' : ''}
@@ -515,7 +515,7 @@ $('#server-menu-btn').onclick = () => {
     </div>
     ${can(s, 'ban') ? '<div id="ban-list"></div>' : ''}
     <div class="modal-row">
-      <button class="btn danger" id="leave-server">${owner ? 'Delete burrow' : 'Leave burrow'}</button>
+      <button class="btn danger" id="leave-server">${owner ? 'Delete hearth' : 'Leave hearth'}</button>
       <button class="btn secondary" data-close>Close</button>
     </div>`);
   if (can(s, 'ban')) renderBans(s);
