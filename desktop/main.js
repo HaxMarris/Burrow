@@ -4,6 +4,7 @@ const { app, BrowserWindow, shell, Menu, desktopCapturer, ipcMain } = require('e
 const path = require('node:path');
 const { startUpdateChecks } = require('./updater');
 const appAudio = require('./app-audio');
+const hotkeys = require('./hotkeys');
 
 // The page asks once, at start, whether it can share just one program's sound.
 ipcMain.on('app-audio-supported', (e) => { e.returnValue = appAudio.supported(); });
@@ -33,8 +34,26 @@ function createWindow() {
   });
   ipcMain.on('app-audio-stop', () => appAudio.stop());
   win.webContents.on('did-start-navigation', (e) => { if (e.isMainFrame && !e.isSameDocument) appAudio.stop(); });
+  // Voice hotkeys that work while another program is in front.
+  ipcMain.handle('hotkeys-set', (_e, binds) => hotkeys.set(binds, (name, down) => {
+    if (!win.isDestroyed()) win.webContents.send('hotkey', name, down);
+  }));
+  ipcMain.on('hotkeys-permission', () => hotkeys.askPermission());
+  win.webContents.on('did-start-navigation', (e) => { if (e.isMainFrame && !e.isSameDocument) hotkeys.stop(); });
+
+  // YouTube's player (listen together) won't play without knowing which site it's on, and an
+  // app page has no web address of its own to tell it.
+  win.webContents.session.webRequest.onBeforeSendHeaders({ urls: ['https://www.youtube-nocookie.com/*'] }, (details, callback) => {
+    const headers = details.requestHeaders;
+    if (!headers.Referer || headers.Referer.startsWith('file:')) headers.Referer = 'https://github.com/HaxMarris/Burrow';
+    callback({ requestHeaders: headers });
+  });
+
   win.on('closed', () => {
     appAudio.stop();
+    hotkeys.stop();
+    ipcMain.removeHandler('hotkeys-set');
+    ipcMain.removeAllListeners('hotkeys-permission');
     ipcMain.removeHandler('app-audio-start');
     ipcMain.removeAllListeners('app-audio-stop');
   });

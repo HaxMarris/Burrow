@@ -1,4 +1,4 @@
-// The one bridge between the app window and Electron: picking what to share on screen, and its sound.
+// The one bridge between the app window and Electron: picking what to share on screen, its sound, and voice hotkeys.
 const { contextBridge, ipcRenderer } = require('electron');
 
 const appAudioSupported = ipcRenderer.sendSync('app-audio-supported');
@@ -18,4 +18,13 @@ contextBridge.exposeInMainWorld('burrowDesktop', {
     stop: () => ipcRenderer.send('app-audio-stop'),
     onChunk: (fn) => ipcRenderer.on('app-audio-chunk', (_e, chunk) => fn(chunk)),
   } : null,
+  /**
+   * Push to talk, mute and deafen keys heard even while another program is in front.
+   * set(binds) resolves to { global, needsPermission }; set(null) stops listening.
+   */
+  hotkeys: {
+    set: (binds) => ipcRenderer.invoke('hotkeys-set', binds),
+    onKey: (fn) => ipcRenderer.on('hotkey', (_e, name, down) => fn(name, down)),
+    askPermission: () => ipcRenderer.send('hotkeys-permission'),
+  },
 });

@@ -117,7 +117,7 @@ test('moderators from before custom roles keep their powers', async () => {
   old.close();
   const db = openDb(file);
   const roles = db.prepare('SELECT id, name, perms FROM roles WHERE server_id = 1').all() as any[];
-  assert.deepEqual(roles.map((r) => [r.name, r.perms]), [['Moderator', 'rooms,messages,remove,ban']]);
+  assert.deepEqual(roles.map((r) => [r.name, r.perms]), [['Moderator', 'rooms,messages,remove,ban,voice']]);
   assert.deepEqual(db.prepare('SELECT user_id FROM member_roles').all().map((r: any) => r.user_id), [2]);
   db.close();
 });

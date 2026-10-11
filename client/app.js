@@ -385,8 +385,58 @@ function handleEvent(ev) {
     case 'voice_state':
       if (state.voice?.channelId === ev.channelId) voiceSounds(ev.channelId, ev.userIds);
       for (const s of state.servers.values())
-        for (const c of s.channels) if (c.id === ev.channelId) Object.assign(c, { voiceUsers: ev.userIds, voiceMuted: ev.muted, voiceDeafened: ev.deafened });
+        for (const c of s.channels)
+          if (c.id === ev.channelId)
+            Object.assign(c, { voiceUsers: ev.userIds, voiceMuted: ev.muted, voiceDeafened: ev.deafened, voiceServerMuted: ev.serverMuted ?? [], voiceSpeaking: ev.speaking ?? [] });
+      checkRinging(ev.channelId, ev.userIds);
       renderChannels();
+      renderCallButton();
+      break;
+    case 'voice_speaking':
+      for (const s of state.servers.values())
+        for (const c of s.channels)
+          if (c.id === ev.channelId) {
+            const talking = new Set(c.voiceSpeaking ?? []);
+            if (ev.speaking) talking.add(ev.userId);
+            else talking.delete(ev.userId);
+            c.voiceSpeaking = [...talking];
+          }
+      // The fire you're at already knows, straight from the voice server.
+      if (state.voice?.channelId !== ev.channelId) renderChannels();
+      break;
+    case 'voice_move': {
+      if (!state.voice) break;
+      const to = roomById(ev.channelId)?.c;
+      const { muted, deafened } = state.voice;
+      joinVoice(ev.channelId, { muted: muted || !!ev.afk, deafened });
+      toast(ev.afk ? `You were away for a while, so you were moved to ${to?.name ?? 'the AFK fire'}.` : `${ev.by} moved you to ${to?.name ?? 'another fire'}.`);
+      break;
+    }
+    case 'voice_kicked':
+      if (state.voice) leaveVoice();
+      toast(`${ev.by} took you out of the fire.`);
+      break;
+    case 'server_muted': {
+      const s = state.servers.get(ev.serverId);
+      if (s) s.serverMuted = ev.muted;
+      if (state.voice && fireServer()?.id === ev.serverId) applyServerMute(ev.muted);
+      toast(ev.muted ? `A moderator muted you in ${s?.name ?? 'a burrow'}.` : `You can speak again in ${s?.name ?? 'the burrow'}.`);
+      break;
+    }
+    case 'soundboard':
+      onBoardSound(ev);
+      break;
+    case 'listen_state':
+      onListenState(ev);
+      break;
+    case 'ring':
+      onRing(ev);
+      break;
+    case 'ring_stop':
+      if (ringing?.serverId === ev.serverId) stopRinging();
+      break;
+    case 'ring_declined':
+      if (state.voice && roomById(state.voice.channelId)?.s?.id === ev.serverId) toast(`${ev.username} can't talk right now.`);
       break;
     case 'fireside_history':
       if (state.voice?.channelId !== ev.channelId) break;
@@ -814,18 +864,22 @@ function renderChannels() {
     const ids = c.voiceUsers ?? [];
     li.className = (i === 0 ? 'fire-card' : 'voice-room') + (joined ? ' joined' : '');
     const streamer = ids.find((id) => state.voice?.channelId === c.id && state.sharing.get(id)?.screen);
-    const sub = !ids.length ? 'Nobody here yet'
-      : `${ids.length} gathered` + (streamer ? ` · ${nameOf(streamer)} is sharing` : '');
+    // Who's talking: straight from the voice server at your own fire, or as the burrow hears it at others.
+    const talking = (id) => (joined ? state.speaking.has(id) : !!c.voiceSpeaking?.includes(id));
+    const seats = c.userLimit ? ` of ${c.userLimit} seats` : ' gathered';
+    const sub = !ids.length ? (c.userLimit ? `${c.userLimit} seats, all open` : 'Nobody here yet')
+      : `${ids.length}${seats}` + (streamer ? ` · ${nameOf(streamer)} is sharing` : '');
+    if (ids.some((id) => talking(id) && !c.voiceMuted?.includes(id))) li.classList.add('talking');
     li.innerHTML = i === 0
       ? `<div class="voice-room-name"><span class="fire-badge">${FIRE_ICON}</span><span class="fire-text"><span class="room-name">${escapeHtml(c.name)}</span><span class="fire-sub">${escapeHtml(sub)}</span></span>${c.private ? LOCK_ICON : ''}</div>`
-      : `<div class="voice-room-name">${FIRE_ICON.replace('<svg', '<svg class="voice-icon"')}<span class="room-name">${escapeHtml(c.name)}</span>${c.private ? LOCK_ICON : ''}</div>`;
+      : `<div class="voice-room-name">${FIRE_ICON.replace('<svg', '<svg class="voice-icon"')}<span class="room-name">${escapeHtml(c.name)}</span>${c.userLimit ? `<span class="seat-count">${ids.length}/${c.userLimit}</span>` : ''}${c.private ? LOCK_ICON : ''}</div>`;
     if (can(s, 'rooms')) li.firstChild.append(roomSettingsButton(c));
     li.title = joined ? 'Open the fire' : 'Join voice';
     li.onclick = () => (joined ? goToVoice() : joinVoice(c.id));
     const people = ids.map((id) => {
       const name = s.members.find((m) => m.id === id)?.username ?? '?';
       const row = document.createElement('div');
-      row.className = 'voice-person' + (state.speaking.has(id) ? ' speaking' : '');
+      row.className = 'voice-person' + (talking(id) ? ' speaking' : '');
       const av = document.createElement('span');
       av.className = 'avatar xs';
       setAvatar(av, name, avatarOf(id));
@@ -833,7 +887,8 @@ function renderChannels() {
       label.textContent = name;
       row.append(av, label);
       // Deafened says more than muted, so it's the one shown.
-      if (c.voiceDeafened?.includes(id)) row.insertAdjacentHTML('beforeend', DEAFENED_ICON);
+      if (c.voiceServerMuted?.includes(id)) row.insertAdjacentHTML('beforeend', SERVER_MUTED_ICON);
+      else if (c.voiceDeafened?.includes(id)) row.insertAdjacentHTML('beforeend', DEAFENED_ICON);
       else if (state.mutedInVoice.has(id) || c.voiceMuted?.includes(id)) row.insertAdjacentHTML('beforeend', MUTED_ICON);
       const sharing = joined ? state.sharing.get(id) : null;
       if (sharing?.camera) row.insertAdjacentHTML('beforeend', `<span class="cam-tag" title="Camera on">${CAMERA_ICON}</span>`);
@@ -843,7 +898,7 @@ function renderChannels() {
         if (v !== 1) row.insertAdjacentHTML('beforeend', `<span class="volume-tag">${Math.round(v * 100)}%</span>`);
         row.classList.add('adjustable');
         row.title = `${name}'s volume`;
-        row.onclick = (e) => { e.stopPropagation(); openVolume(row, id, name); };
+        row.onclick = (e) => { e.stopPropagation(); openVolume(row, id, name, s, c); };
       }
       return row;
     });
@@ -1503,7 +1558,8 @@ $('#server-menu-btn').onclick = () => {
       ${s.rules ? '<button class="btn secondary" id="open-rules">Rules</button>' : ''}
       ${can(s, 'burrow') ? '<button class="btn secondary" id="open-edit">Edit burrow</button>' : ''}
       ${can(s, 'roles') ? `<button class="btn secondary" id="open-roles">Roles${s.roles.length ? ` · ${s.roles.length}` : ''}</button>` : ''}
-      ${can(s, 'emoji') && state.maxUploadBytes ? `<button class="btn secondary" id="open-emoji">Emoji and stickers${s.emoji?.length ? ` · ${s.emoji.length}` : ''}</button>` : ''}
+      ${can(s, 'emoji') && state.maxUploadBytes ? `<button class="btn secondary" id="open-emoji">Emoji and stickers${s.emoji?.length ? ` · ${s.emoji.length}` : ''}</button>
+        <button class="btn secondary" id="open-sounds">Soundboard${s.sounds?.length ? ` · ${s.sounds.length}` : ''}</button>` : ''}
     </div>
     ${can(s, 'ban') ? '<div id="ban-list"></div>' : ''}
     <div class="modal-row">
@@ -1517,6 +1573,7 @@ $('#server-menu-btn').onclick = () => {
   $('#open-edit')?.addEventListener('click', () => openEditBurrow(s.id));
   $('#open-roles')?.addEventListener('click', () => openRoles(s.id));
   $('#open-emoji')?.addEventListener('click', () => openEmojiManager(s.id));
+  $('#open-sounds')?.addEventListener('click', () => openSounds(s.id));
   $('#leave-server').onclick = async () => {
     if (owner && !confirm(`Delete "${s.name}" and all its messages for everyone?`)) return;
     try {
@@ -1613,8 +1670,9 @@ const PERMS = [
   ['remove', 'Remove people', 'Take people out of the burrow (they can come back with the invite)'],
   ['ban', 'Ban people', "Remove people for good, and see and lift bans"],
   ['roles', 'Manage roles', 'Make, change and hand out the roles below their own'],
-  ['burrow', 'Edit the burrow', "Change its name, pictures, description, welcome room and rules, and manage invites and events"],
-  ['emoji', 'Manage emoji', "Add, rename and remove the burrow's own emoji and stickers"],
+  ['burrow', 'Edit the burrow', "Change its name, pictures, description, welcome room, rules and AFK fire, and manage invites and events"],
+  ['emoji', 'Manage emoji and sounds', "Add, rename and remove the burrow's own emoji, stickers and soundboard sounds"],
+  ['voice', 'Manage voice', 'Move people between fires, mute them for everyone, disconnect them, and sit at a full fire'],
 ];
 const ROLE_COLORS = ['#4f8a5b', '#2f7d74', '#3f6fa8', '#7a5aa6', '#b0527a', '#c2553d', '#c98a2b', '#8a8f87'];
 
@@ -1629,7 +1687,7 @@ const roleColor = (s, userId) => (isDm(s) ? null : rolesOf(s, s?.members.find((m
 /** Whether the ⋯ menu has anything for this person. */
 const canActOn = (s, m) => {
   if (can(s, 'roles') && (m.id === state.me.id || rankOf(s, m) > rankOf(s, me(s)))) return true;
-  return m.id !== state.me.id && (can(s, 'remove') || can(s, 'ban')) && rankOf(s, m) > rankOf(s, me(s));
+  return m.id !== state.me.id && (can(s, 'remove') || can(s, 'ban') || can(s, 'voice')) && rankOf(s, m) > rankOf(s, me(s));
 };
 
 function leaveVoiceIfGone() {
@@ -1684,7 +1742,7 @@ function openRoomSettings(c) {
       <div id="room-posters" class="${c.announce ? '' : 'hidden'}">
         <p class="small muted">The host and people who manage rooms can always post. Which roles can too?</p>
         ${s.roles?.length ? `<ul class="access-list" id="post-roles">${s.roles.map((r) => `<li><label class="check"><input type="checkbox" value="${r.id}" ${postRoles.includes(r.id) ? 'checked' : ''} /> ${roleDot(r.color)}${escapeHtml(r.name)}</label></li>`).join('')}</ul>` : '<p class="small muted">This burrow has no roles yet.</p>'}
-      </div>` : ''}
+      </div>` : c.kind === 'voice' ? voiceRoomSettings(c) : ''}
       ${privacyFields(s, c.private, c.memberIds ?? [], c.roleIds ?? [])}
       <div class="error" id="modal-error"></div>
       <div class="modal-row">
@@ -1711,7 +1769,7 @@ function openRoomSettings(c) {
       slow: Number($('#room-slow').value),
       announce: $('#room-announce').checked,
       postRoleIds: [...document.querySelectorAll('#post-roles input:checked')].map((i) => Number(i.value)),
-    } : {};
+    } : c.kind === 'voice' ? { userLimit: Number($('#room-seats').value), keepChat: $('#room-keep-chat').checked } : {};
     try {
       const updated = await api(`/api/channels/${c.id}`, { method: 'PATCH', body: { name: $('#room-name').value, ...extra, ...readPrivacyFields() } });
       state.servers.set(updated.id, updated);
@@ -1741,6 +1799,7 @@ function openMemberMenu(s, m) {
     <p class="muted">${isHost(s, m.id) ? 'Host of' : current.length ? `${current.map((r) => escapeHtml(r.name)).join(', ')} in` : 'Member of'} ${escapeHtml(s.name)}</p>
     ${editRoles ? `<h4>Roles</h4><ul class="access-list" id="member-roles">${roles.map((r) => `<li><label class="check"><input type="checkbox" value="${r.id}" ${m.roleIds.includes(r.id) ? 'checked' : ''} ${r.position > myRank ? '' : 'disabled'} /> ${roleDot(r.color)}${escapeHtml(r.name)}</label></li>`).join('')}</ul>
       <button class="btn" id="member-save-roles">Save roles</button>` : ''}
+    ${removable && can(s, 'voice') ? `<button class="btn secondary" id="member-voice-mute">${m.voiceMuted ? 'Let them speak in voice' : 'Mute in voice for everyone'}</button>` : ''}
     ${removable && can(s, 'remove') ? '<button class="btn secondary" id="member-remove">Remove from burrow</button>' : ''}
     ${removable && can(s, 'ban') ? '<button class="btn danger" id="member-ban">Ban from burrow</button>' : ''}
     ${removable && (can(s, 'remove') || can(s, 'ban')) ? `<p class="small muted">Removed people can come back with the invite code. Banned people can't, until they're unbanned in the burrow's settings.</p>` : ''}
@@ -1752,6 +1811,7 @@ function openMemberMenu(s, m) {
   };
   if (editRoles) $('#member-save-roles').onclick = () =>
     act('roles', { roleIds: [...document.querySelectorAll('#member-roles input:checked')].map((i) => Number(i.value)) });
+  $('#member-voice-mute')?.addEventListener('click', () => act('voice-mute', { muted: !m.voiceMuted }));
   $('#member-remove')?.addEventListener('click', () => confirm(`Remove ${m.username} from ${s.name}?`) && act('remove', { ban: false }));
   $('#member-ban')?.addEventListener('click', () => confirm(`Ban ${m.username} from ${s.name}?`) && act('remove', { ban: true }));
 }
@@ -1930,6 +1990,8 @@ function renderDmList() {
     items.push(hint);
   }
   $('#channel-list').replaceChildren(...items);
+  // Calls show in the conversation itself, not as a burrow's Campfire.
+  $('#fire-main').replaceChildren();
   $('#voice-list').replaceChildren();
   $('#voice-section').classList.add('hidden');
 }
@@ -2479,11 +2541,12 @@ function loadLivekit() {
   return livekitLoading;
 }
 
-async function joinVoice(channelId) {
+// muted: start with your mic off (moved to the AFK fire). deafened: keep it on when moved.
+async function joinVoice(channelId, { muted = false, deafened = false } = {}) {
   if (state.voice?.channelId === channelId) return;
   if (!state.voiceEnabled) return alert('Voice is not set up on this server yet.');
   leaveVoice(true);
-  const voice = { channelId, room: null, muted: false, deafened: false };
+  const voice = { channelId, room: null, muted: muted || deafened, deafened, mutedBeforeDeafen: muted };
   state.voice = voice;
   state.fireside = { channelId, messages: [], unread: 0 };
   // Made now, while the click still counts, or some browsers start it paused.
@@ -2492,10 +2555,13 @@ async function joinVoice(channelId) {
   goToVoice(); // sit down at the fire
   try {
     const LK = await loadLivekit();
-    const { url, token } = await api(`/api/channels/${channelId}/voice`, { method: 'POST' });
+    const { url, token, canSpeak = true } = await api(`/api/channels/${channelId}/voice`, { method: 'POST' });
     if (state.voice !== voice) return;
     if (!LK.isE2EESupported()) throw new Error("this app can't encrypt voice. Update Burrow or use a current browser.");
-    const quality = VOICE_QUALITY[voicePrefs.quality] ?? VOICE_QUALITY.high;
+    // Muted for everyone by a moderator: your mic stays off until they let you speak.
+    voice.serverMuted = !canSpeak;
+    if (voice.serverMuted) voice.muted = true;
+    if (voice.muted) state.mutedInVoice.add(state.me.id);
     const vc = await createVoiceCrypto(LK);
     voice.crypto = vc;
     const room = new LK.Room({
@@ -2505,7 +2571,7 @@ async function joinVoice(channelId) {
       videoCaptureDefaults: { deviceId: await deviceIdFor('videoinput') },
       ...(canPickOutput ? { audioOutput: { deviceId: await deviceIdFor('audiooutput') } } : {}),
       // Opus at a higher bitrate than LiveKit's 48 kbps default; silence still costs almost nothing (DTX).
-      publishDefaults: { audioPreset: { maxBitrate: quality.bitrate }, dtx: true, red: true },
+      publishDefaults: micPublishOptions(),
       // Mixing through Web Audio lets people be turned up past 100%.
       webAudioMix: true,
       // Only download video someone is looking at, at the size it's shown.
@@ -2529,7 +2595,11 @@ async function joinVoice(channelId) {
         if (track.kind !== 'audio') return renderStage();
         track.detach().forEach((el) => el.remove());
       })
-      .on(LK.RoomEvent.TrackPublished, renderStage)
+      .on(LK.RoomEvent.TrackPublished, (pub, p) => {
+        // A mic sent again (after a moderator lets someone speak) can arrive unmuted without saying so.
+        if (pub.source === LK.Track.Source.Microphone) setMuted(p, pub.isMuted);
+        renderStage();
+      })
       .on(LK.RoomEvent.TrackUnpublished, renderStage)
       .on(LK.RoomEvent.LocalTrackPublished, renderStage)
       .on(LK.RoomEvent.LocalTrackUnpublished, (pub) => {
@@ -2541,6 +2611,10 @@ async function joinVoice(channelId) {
       .on(LK.RoomEvent.TrackSubscribed, renderFire)
       .on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
         state.speaking = new Set(speakers.map((p) => Number(p.identity)));
+        // Tell the burrow, so people outside the fire can see who's talking.
+        const talking = state.speaking.has(state.me.id);
+        if (talking !== !!voice.talking && state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: 'voice_speaking', speaking: talking }));
+        voice.talking = talking;
         renderChannels();
         renderStage();
       })
@@ -2556,18 +2630,48 @@ async function joinVoice(channelId) {
     await room.setE2EEEnabled(true);
     startKeyExchange(voice);
     await room.startAudio();
-    await room.localParticipant.setMicrophoneEnabled(true);
+    if (!voice.serverMuted) await startMic(voice);
     if (state.voice !== voice) return room.disconnect();
-    // Burrow's noise filter works on your voice before it's encrypted and sent.
-    if (wantsMicProcessor()) await micTrack()?.setProcessor(micProcessor(voice)).catch((err) => console.warn("Couldn't start the noise filter:", err));
+    if (voice.deafened) applyAllVolumes();
     state.ws?.send(JSON.stringify({ type: 'voice_join', channelId, ...voiceFlags() }));
     renderVoiceBar();
+    renderChannels();
+    syncHotkeys();
     playSound('join');
   } catch (err) {
     if (state.voice === voice) leaveVoice(true);
     const denied = err?.name === 'NotAllowedError' || /permission/i.test(err?.message ?? '');
     alert(denied ? 'Burrow needs microphone access for voice. Allow it in your system settings and try again.'
                  : `Couldn't join voice: ${err?.message || err}`);
+  }
+}
+
+/**
+ * Turns your microphone on and sends it, through Burrow's noise filter, voice changer and gate
+ * (all before it's encrypted). Started muted, it's set up and then turned straight off.
+ */
+async function startMic(voice) {
+  const lp = voice.room.localParticipant;
+  await lp.setMicrophoneEnabled(true, micConstraints(), micPublishOptions());
+  if (state.voice !== voice) return;
+  if (wantsMicProcessor()) await micTrack()?.setProcessor(micProcessor(voice)).catch((err) => console.warn("Couldn't start the noise filter:", err));
+  if (voice.muted) await lp.setMicrophoneEnabled(false);
+}
+
+/** Music mode switched mid-call: your mic is sent again, as stereo or as voice. */
+async function republishMic() {
+  const voice = state.voice;
+  const lp = voice?.room?.localParticipant;
+  if (!lp || voice.serverMuted) return;
+  const pub = lp.getTrackPublication(window.LivekitClient.Track.Source.Microphone);
+  try {
+    if (pub?.track) await lp.unpublishTrack(pub.track, true);
+    voice.room.options.audioCaptureDefaults = { ...voice.room.options.audioCaptureDefaults, ...micConstraints() };
+    voice.room.options.publishDefaults = { ...voice.room.options.publishDefaults, ...micPublishOptions() };
+    if (wantsMicProcessor()) voice.micCtx ??= newMicContext();
+    await startMic(voice);
+  } catch (err) {
+    console.warn("Couldn't switch music mode:", err);
   }
 }
 
@@ -2590,6 +2694,8 @@ function leaveVoice(quiet) {
   state.fireside = { channelId: null, messages: [], unread: 0 };
   state.firesideOpen = false;
   renderFireside();
+  stopListen();
+  pttHeld = false;
   stopAppAudio(voice);
   voice.room?.disconnect();
   clearTimeout(voice.crypto?.retry);
@@ -2603,9 +2709,11 @@ function leaveVoice(quiet) {
   if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: 'voice_leave' }));
   renderVoiceBar();
   renderChannels();
+  syncHotkeys();
 }
 
 function setMicMuted(voice, muted) {
+  if (voice.serverMuted) muted = true; // a moderator's mute wins
   voice.muted = muted;
   voice.room.localParticipant.setMicrophoneEnabled(!muted);
   if (muted) state.mutedInVoice.add(state.me.id);
@@ -2615,6 +2723,7 @@ function setMicMuted(voice, muted) {
 function toggleMute() {
   const voice = state.voice;
   if (!voice?.room) return;
+  if (voice.serverMuted) return toast('A moderator muted you here. They can let you speak again.');
   // Unmuting while deafened turns your sound back on too, like Discord.
   if (voice.deafened && voice.muted) setDeafened(voice, false);
   setMicMuted(voice, !voice.muted);
@@ -2639,6 +2748,7 @@ function toggleDeafen() {
 function setDeafened(voice, deafened) {
   voice.deafened = deafened;
   applyAllVolumes();
+  syncListen(); // the video you're listening to goes quiet too
 }
 
 /** Muted or deafened changed: tell the burrow, and redraw. */
@@ -2656,12 +2766,16 @@ function renderVoiceBar(status) {
   if (!voice) return;
   const ch = [...state.servers.values()].flatMap((s) => s.channels).find((c) => c.id === voice.channelId);
   const sealed = voice.crypto?.index >= 0;
-  $('#voice-status').textContent = status ?? (sealed ? 'Voice connected' : 'Securing voice…');
-  $('#voice-status').classList.toggle('ok', !status && sealed);
+  // With push to talk, the status says how to talk, and when you are.
+  const ptt = voicePrefs.mode === 'ptt' && !voice.muted && sealed && !status;
+  $('#voice-status').textContent = status ?? (!sealed ? 'Securing voice…' : voice.serverMuted ? 'Muted by a moderator'
+    : ptt ? (pttHeld ? 'Talking' : `Hold ${keyLabel(voicePrefs.keys.ptt)} to talk`) : 'Voice connected');
+  $('#voice-status').classList.toggle('ok', !status && sealed && !voice.serverMuted);
+  $('#voice-status').classList.toggle('talking', ptt && pttHeld);
   $('#voice-lock').classList.toggle('hidden', !!status || !sealed);
-  $('#voice-room-name').textContent = ch?.name ?? '';
+  $('#voice-room-name').textContent = fireName(ch);
   $('#voice-mute').classList.toggle('on', voice.muted);
-  $('#voice-mute').title = voice.muted ? 'Unmute' : 'Mute';
+  $('#voice-mute').title = voice.serverMuted ? 'A moderator muted you' : voice.muted ? 'Unmute' : 'Mute';
   $('#voice-deafen').classList.toggle('on', voice.deafened);
   $('#voice-deafen').title = voice.deafened ? 'Undeafen' : 'Deafen (hear nobody, and mute)';
   $('#voice-deafen').innerHTML = voice.deafened ? HEADPHONES_OFF : HEADPHONES_ON;
@@ -2682,6 +2796,9 @@ function renderVoiceBar(status) {
     to.disabled = from.disabled;
   }
   $('#fire-lock').classList.toggle('hidden', !!status || !sealed);
+  // Direct-message calls have no soundboard (sounds belong to a burrow).
+  $('#fire-board').parentElement.classList.toggle('hidden', !fireServer() || isDm(fireServer()));
+  for (const id of ['#fire-board', '#fire-listen']) $(id).disabled = !voice.room || !!status;
   renderFire(status);
 }
 
@@ -3039,13 +3156,14 @@ function renderFire(status) {
   const ids = [...(ch?.voiceUsers ?? [])];
   if (!ids.includes(state.me.id)) ids.push(state.me.id);
   const s = [...state.servers.values()].find((x) => x.channels.includes(ch));
-  $('#stage-title').textContent = ch && s && !isDm(s) ? `${s.name}'s ${ch.name}` : ch?.name ?? 'Campfire';
+  $('#stage-title').textContent = ch && s && !isDm(s) ? `${s.name}'s ${ch.name}` : ch ? fireName(ch) : 'Campfire';
   const streamer = ids.find((id) => id !== state.me.id && state.sharing.get(id)?.screen);
   $('#fire-count').textContent = (typeof status === 'string' ? status : !room ? 'Connecting…' : `${ids.length} gathered`)
     + (streamer ? ` · ${nameOf(streamer)} is sharing` : '');
 
-  // Seats are spread evenly around the fire, starting at the top. A small fire keeps a few open seats.
-  const total = Math.max(5, ids.length);
+  // Seats are spread evenly around the fire, starting at the top. A small fire keeps a few open
+  // seats; one with a seat limit shows all of its seats (up to a dozen).
+  const total = Math.max(ch?.userLimit && ch.userLimit <= 12 ? ch.userLimit : 5, ids.length);
   const ring = $('#fire-ring');
   ring.classList.toggle('crowded', total > 8);
   // How far from the fire the seats are, as a share of the circle's width and height (narrower on phones).
@@ -3080,7 +3198,8 @@ function renderFire(status) {
     const camTrack = camPub && !camPub.isMuted ? camPub.track ?? null : null;
     const sharing = state.sharing.get(id);
     const deafened = ch?.voiceDeafened?.includes(id);
-    const muted = state.mutedInVoice.has(id) || ch?.voiceMuted?.includes(id);
+    const modMuted = ch?.voiceServerMuted?.includes(id);
+    const muted = modMuted || state.mutedInVoice.has(id) || ch?.voiceMuted?.includes(id);
     const speaking = state.speaking.has(id) && !muted;
 
     // The face: their camera if it's on, else their picture. Clicking someone else changes how loud they are.
@@ -3103,7 +3222,7 @@ function renderFire(status) {
         setAvatar(av, name, avatarOf(id));
         button.append(av);
         if (!me) {
-          button.onclick = (e) => { e.stopPropagation(); openVolume(button, id, name); };
+          button.onclick = (e) => { e.stopPropagation(); openVolume(button, id, name, fireServer(), roomById(state.voice?.channelId)?.c); };
           button.title = `${name}'s volume`;
         }
       }
@@ -3118,7 +3237,7 @@ function renderFire(status) {
     seat.el.className = 'seat' + (me ? ' me' : '') + (speaking ? ' speaking' : '') + (camTrack ? ' has-video' : '');
     seat.el.querySelector('.seat-name').textContent = me ? `${name} (you)` : name;
     const v = me ? 1 : volumeFor(id);
-    const statusText = deafened ? 'Deafened' : muted ? 'Muted' : speaking ? 'Talking' : camTrack ? 'Camera on' : v !== 1 ? `${Math.round(v * 100)}% volume` : '';
+    const statusText = modMuted ? 'Muted by a moderator' : deafened ? 'Deafened' : muted ? 'Muted' : speaking ? 'Talking' : camTrack ? 'Camera on' : v !== 1 ? `${Math.round(v * 100)}% volume` : '';
     const statusEl = seat.el.querySelector('.seat-status');
     statusEl.textContent = statusText;
     statusEl.className = 'seat-status' + (speaking ? ' talking' : '');
@@ -3475,7 +3594,8 @@ function setVolume(userId, value) {
   if (p) applyVolume(p, window.LivekitClient.Track.Source.Microphone, value);
 }
 
-function openVolume(anchor, userId, name) {
+// With the burrow and the voice room they're in, people who manage voice get their tools too.
+function openVolume(anchor, userId, name, s = null, c = null) {
   closeVolume();
   const pop = document.createElement('div');
   pop.className = 'volume-pop';
@@ -3485,6 +3605,7 @@ function openVolume(anchor, userId, name) {
     <input type="range" id="volume-range" min="0" max="200" step="5" value="${pct}" aria-label="${escapeHtml(name)}'s volume" />
     <div class="volume-foot"><span class="small muted">Only changes it for you</span><button class="link-btn" id="volume-reset">Reset</button></div>`;
   pop.onclick = (e) => e.stopPropagation();
+  voiceModTools(pop, s, c, userId, name);
   document.body.append(pop);
   const r = anchor.getBoundingClientRect();
   pop.style.left = `${Math.min(r.left, window.innerWidth - pop.offsetWidth - 8)}px`;
@@ -3514,6 +3635,7 @@ const SOUNDS = {
   message: { pref: 'messages', notes: [[987.8, 0, 0.12], [1318.5, 0.07, 0.2]] },
   join: { pref: 'voice', notes: [[523.3, 0, 0.14], [784, 0.09, 0.22]] },
   leave: { pref: 'voice', notes: [[784, 0, 0.14], [523.3, 0.09, 0.22]] },
+  ring: { pref: 'voice', notes: [[659.3, 0, 0.25], [830.6, 0.3, 0.25], [659.3, 0.6, 0.25], [830.6, 0.9, 0.35]] },
 };
 let soundCtx = null;
 let lastMessageSound = 0;
@@ -3576,23 +3698,119 @@ const NOISE_LEVELS = {
   strongest: { label: 'Strongest', model: 'gtcrn', hint: 'Takes out even more noise, but your voice sounds a little flatter.' },
 };
 const voicePrefs = (() => {
-  const defaults = { quality: 'high', noise: 'strong', inputVolume: 1, outputVolume: 1 };
+  const defaults = {
+    quality: 'high', noise: 'strong', inputVolume: 1, outputVolume: 1,
+    mode: 'voice', // or 'ptt': push to talk
+    sensitivity: null, // dB your voice must pass to be sent; null: send whenever the mic hears something
+    fx: 'off', // voice changer
+    music: false, // stereo, no filters, higher bitrate
+    soundboard: true, soundboardVolume: 0.6, listenVolume: 0.6,
+    keys: { ptt: { code: 'Backquote' }, mute: { code: 'KeyM', ctrl: true, shift: true }, deafen: { code: 'KeyD', ctrl: true, shift: true } },
+  };
   try {
     const saved = JSON.parse(store.get('voicePrefs')) ?? {};
     // Noise suppression used to be just on or off.
     if (saved.noiseSuppression === false && !saved.noise) saved.noise = 'off';
     delete saved.noiseSuppression;
-    return { ...defaults, ...saved };
+    return { ...defaults, ...saved, keys: { ...defaults.keys, ...saved.keys } };
   } catch { return defaults; }
 })();
 const saveVoicePrefs = () => store.set('voicePrefs', JSON.stringify(voicePrefs));
 
-/** What the browser itself does to your microphone. The stronger filters replace its noise filter rather than stack on it. */
+/**
+ * What the browser itself does to your microphone. The stronger filters replace its noise filter
+ * rather than stack on it. Music mode turns it all off and keeps both channels.
+ */
 function micConstraints() {
+  if (voicePrefs.music) return { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2 };
   const level = voicePrefs.noise;
-  return { echoCancellation: true, noiseSuppression: level === 'light', autoGainControl: level !== 'off' };
+  return { echoCancellation: true, noiseSuppression: level === 'light', autoGainControl: level !== 'off', channelCount: 1 };
 }
-const wantsMicProcessor = () => !!NOISE_LEVELS[voicePrefs.noise]?.model || voicePrefs.inputVolume !== 1;
+/** How your voice is sent: Opus at your quality, or in music mode stereo at 128 kbps that never cuts out. */
+function micPublishOptions() {
+  const quality = VOICE_QUALITY[voicePrefs.quality] ?? VOICE_QUALITY.high;
+  return voicePrefs.music
+    ? { audioPreset: { maxBitrate: Math.max(128_000, quality.bitrate) }, forceStereo: true, dtx: false, red: false }
+    : { audioPreset: { maxBitrate: quality.bitrate }, dtx: true, red: true };
+}
+const noiseModel = () => (voicePrefs.music ? null : NOISE_LEVELS[voicePrefs.noise]?.model ?? null);
+const voiceFx = () => (voicePrefs.music ? VOICE_FX.off : VOICE_FX[voicePrefs.fx] ?? VOICE_FX.off);
+/** Push to talk, or a sensitivity you set: your voice goes through Burrow's gate. */
+const wantsGate = () => voicePrefs.mode === 'ptt' || (voicePrefs.sensitivity !== null && !voicePrefs.music);
+const wantsMicProcessor = () => !!noiseModel() || voiceFx() !== VOICE_FX.off || voicePrefs.inputVolume !== 1 || wantsGate();
+
+// The voice changer. Each one is a few Web Audio nodes (and the pitch shifter in voice-worklet.js)
+// between your noise filter and your volume, so what's sent and encrypted is the changed voice.
+const VOICE_FX = {
+  off: { label: 'Off' },
+  deeper: { label: 'Deeper', pitch: 0.75 },
+  higher: { label: 'Higher', pitch: 1.4 },
+  robot: { label: 'Robot', robot: true },
+  echo: { label: 'Echo', echo: true },
+  radio: { label: 'Radio', radio: true },
+  cave: { label: 'Cave', cave: true },
+};
+
+/** Builds the voice changer: an input and an output node, and a way to tear it down. */
+async function fxNodes(ctx, fx) {
+  const input = ctx.createGain(), output = ctx.createGain();
+  const parts = [input, output];
+  const stops = [];
+  if (fx.pitch) {
+    const pitch = new AudioWorkletNode(ctx, 'burrow-pitch', { numberOfInputs: 1, outputChannelCount: [1], processorOptions: { ratio: fx.pitch } });
+    input.connect(pitch).connect(output);
+    parts.push(pitch);
+  } else if (fx.robot) {
+    // Ring modulation: your voice multiplied by a low hum, which gives it the metal edge.
+    const ring = ctx.createGain();
+    ring.gain.value = 0;
+    const osc = ctx.createOscillator();
+    osc.frequency.value = 55;
+    osc.connect(ring.gain);
+    osc.start();
+    stops.push(() => osc.stop());
+    const lift = ctx.createGain();
+    lift.gain.value = 1.6;
+    input.connect(ring).connect(lift).connect(output);
+    parts.push(ring, osc, lift);
+  } else if (fx.echo || fx.cave) {
+    input.connect(output); // the dry voice
+    const wet = ctx.createGain();
+    if (fx.echo) {
+      const delay = ctx.createDelay(1);
+      delay.delayTime.value = 0.28;
+      const feedback = ctx.createGain();
+      feedback.gain.value = 0.35;
+      wet.gain.value = 0.5;
+      input.connect(delay).connect(feedback).connect(delay);
+      delay.connect(wet).connect(output);
+      parts.push(delay, feedback, wet);
+    } else {
+      // A made-up echoey room: a burst of noise that dies away over two seconds.
+      const length = Math.round(ctx.sampleRate * 2);
+      const impulse = ctx.createBuffer(1, length, ctx.sampleRate);
+      const data = impulse.getChannelData(0);
+      for (let i = 0; i < length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / length) ** 3;
+      const verb = ctx.createConvolver();
+      verb.buffer = impulse;
+      wet.gain.value = 0.45;
+      input.connect(verb).connect(wet).connect(output);
+      parts.push(verb, wet);
+    }
+  } else if (fx.radio) {
+    const low = ctx.createBiquadFilter(), high = ctx.createBiquadFilter(), crush = ctx.createWaveShaper();
+    low.type = 'highpass';
+    low.frequency.value = 500;
+    high.type = 'lowpass';
+    high.frequency.value = 3200;
+    const curve = new Float32Array(1024);
+    for (let i = 0; i < curve.length; i++) { const x = (i / (curve.length - 1)) * 2 - 1; curve[i] = Math.tanh(3 * x); }
+    crush.curve = curve;
+    input.connect(low).connect(high).connect(crush).connect(output);
+    parts.push(low, high, crush);
+  } else input.connect(output);
+  return { input, output, destroy() { stops.forEach((f) => f()); parts.forEach((n) => n.disconnect()); } };
+}
 
 // ---- devices
 
@@ -3676,38 +3894,69 @@ async function noiseFilter(ctx, model) {
  * your voice still goes through, just unfiltered.
  */
 async function micChain(ctx, track) {
-  const model = NOISE_LEVELS[voicePrefs.noise]?.model;
+  const model = noiseModel();
   let filter = null;
   if (model) {
     try { filter = await noiseFilter(ctx, model); } catch (err) { console.warn(`Couldn't load the ${model} noise filter:`, err); }
   }
+  const channels = voicePrefs.music ? 2 : 1;
+  const needsWorklet = wantsGate() || !!voiceFx().pitch;
+  if (needsWorklet) {
+    try { await ctx.audioWorklet.addModule('voice-worklet.js'); } catch (err) { console.warn("Couldn't load the voice gate:", err); }
+  }
+  let fx = null;
+  try { fx = await fxNodes(ctx, voiceFx()); } catch (err) { console.warn("Couldn't start the voice changer:", err); fx = await fxNodes(ctx, VOICE_FX.off); }
   const gain = ctx.createGain();
   gain.gain.value = voicePrefs.inputVolume;
+  let gate = null;
+  if (wantsGate()) {
+    try { gate = new AudioWorkletNode(ctx, 'burrow-gate', { outputChannelCount: [channels] }); } catch (err) { console.warn("Couldn't start the voice gate:", err); }
+  }
   const out = ctx.createMediaStreamDestination();
-  out.channelCount = 1;
-  filter?.connect(gain);
-  gain.connect(out);
+  out.channelCount = channels;
+  filter?.connect(fx.input);
+  fx.output.connect(gain);
+  if (gate) gain.connect(gate).connect(out);
+  else gain.connect(out);
   let source = null;
   const chain = {
     track: out.stream.getAudioTracks()[0],
     filtered: !!filter,
-    gain,
+    gain, // how loud you are before the gate, for the level meter
+    gated: !!gate,
     setInput(t) {
       source?.disconnect();
       source = ctx.createMediaStreamSource(new MediaStream([t]));
-      source.connect(filter ?? gain);
+      source.connect(filter ?? fx.input);
     },
     setVolume(v) { gain.gain.setTargetAtTime(v, ctx.currentTime, 0.02); },
+    /** Push to talk held or not, and the sensitivity, for the gate. */
+    setGate(settings) { gate?.port.postMessage(settings); },
     destroy() {
       source?.disconnect();
       filter?.port.postMessage('destroy');
       filter?.disconnect();
+      fx.destroy();
       gain.disconnect();
+      gate?.disconnect();
       chain.track.stop();
     },
   };
+  chain.setGate(gateSettings());
   chain.setInput(track);
   return chain;
+}
+
+let pttHeld = false; // your push-to-talk key is down
+/** What the gate needs to know: push to talk and whether it's held, or the sensitivity. */
+const gateSettings = () => ({
+  ptt: voicePrefs.mode === 'ptt',
+  held: pttHeld,
+  threshold: voicePrefs.music ? null : voicePrefs.sensitivity,
+});
+function updateGate() {
+  state.voice?.micChain?.setGate(gateSettings());
+  micTest?.chain?.setGate(gateSettings());
 }
 
 /** The same chain as a LiveKit track processor, so what's sent (and encrypted) is the filtered voice. */
@@ -3737,7 +3986,16 @@ function micProcessor(voice) {
 
 const micTrack = () => state.voice?.room?.localParticipant.getTrackPublication(window.LivekitClient.Track.Source.Microphone)?.audioTrack;
 
-/** The noise level changed mid-call: new browser settings, and the filter swapped. */
+/** Push to talk or the sensitivity changed: the gate is told, or put in (or taken out) if it wasn't there. */
+function applyGateChange() {
+  const chain = state.voice?.micChain;
+  if (chain && chain.gated === wantsGate()) updateGate();
+  else applyNoiseLevel();
+  if (micTest) startMicTest();
+  renderVoiceBar();
+}
+
+/** The noise level (or the voice changer) changed mid-call: new browser settings, and the filter swapped. */
 async function applyNoiseLevel() {
   const voice = state.voice, track = micTrack();
   if (!voice || !track) return;
@@ -3776,7 +4034,8 @@ async function startMicTest() {
     if (micTest !== test) return stopMicTest(test);
     const analyser = test.ctx.createAnalyser();
     analyser.fftSize = 1024;
-    test.ctx.createMediaStreamSource(new MediaStream([test.chain.track])).connect(analyser);
+    // The meter shows how loud you are before the gate, so you can see where your sensitivity sits.
+    test.chain.gain.connect(analyser);
     const samples = new Float32Array(analyser.fftSize);
     const draw = () => {
       analyser.getFloatTimeDomainData(samples);
@@ -3860,7 +4119,7 @@ function voiceSettings() {
     <div class="voice-settings">
       <label>Microphone<select id="vs-audioinput"></select></label>
       <div class="mic-test">
-        <div class="level-meter" title="How loud you are, after the noise filter"><span id="vs-level"></span></div>
+        <div class="level-meter" title="How loud you are, after the noise filter"><span id="vs-level"></span><i id="vs-line" class="${voicePrefs.mode !== 'ptt' && voicePrefs.sensitivity !== null ? '' : 'hidden'}" style="left:${((voicePrefs.sensitivity ?? -45) + 60) * (100 / 60)}%"></i></div>
         <button type="button" class="btn secondary" id="vs-test">Test</button>
       </div>
       <label class="check"><input type="checkbox" id="vs-loopback" /> Hear yourself while testing (wear headphones)</label>
@@ -3870,10 +4129,35 @@ function voiceSettings() {
       <label>Noise isolation
         <select id="vs-noise">${Object.entries(NOISE_LEVELS).map(([k, n]) => `<option value="${k}" ${voicePrefs.noise === k ? 'selected' : ''}>${n.label}</option>`).join('')}</select></label>
       <span class="small muted" id="vs-noise-hint">${NOISE_LEVELS[voicePrefs.noise]?.hint ?? ''}</span>
+      <div class="vs-group">
+        <span class="vs-label">How you talk</span>
+        <div class="kind-choice">
+          <label><input type="radio" name="vs-mode" value="voice" ${voicePrefs.mode !== 'ptt' ? 'checked' : ''} /> When you speak</label>
+          <label><input type="radio" name="vs-mode" value="ptt" ${voicePrefs.mode === 'ptt' ? 'checked' : ''} /> Push to talk</label>
+        </div>
+        <div class="key-row ${voicePrefs.mode === 'ptt' ? '' : 'hidden'}" id="vs-ptt-row"><span>Hold to talk</span><button type="button" class="btn secondary key-btn" id="vs-key-ptt">${escapeHtml(keyLabel(voicePrefs.keys.ptt))}</button></div>
+        <div class="${voicePrefs.mode === 'ptt' ? 'hidden' : ''}" id="vs-sens-row">
+          <label class="check"><input type="checkbox" id="vs-sens-on" ${voicePrefs.sensitivity !== null ? 'checked' : ''} /> Only send my voice when it's louder than the line</label>
+          <input type="range" id="vs-sens" min="-60" max="0" step="1" value="${voicePrefs.sensitivity ?? -45}" ${voicePrefs.sensitivity === null ? 'disabled' : ''} aria-label="Sensitivity" />
+          <span class="small muted">Press Test and talk: the bar should pass the line when you speak, and stay under it when you don't.</span>
+        </div>
+      </div>
+      <label>Voice changer
+        <select id="vs-fx">${Object.entries(VOICE_FX).map(([k, f]) => `<option value="${k}" ${voicePrefs.fx === k ? 'selected' : ''}>${f.label}</option>`).join('')}</select>
+        <span class="small muted">Changes how you sound to everyone. Test it with "Hear yourself".</span></label>
+      <label class="check"><input type="checkbox" id="vs-music" ${voicePrefs.music ? 'checked' : ''} /> Music mode</label>
+      <span class="small muted">For playing music or an instrument: stereo at 128 kbps, with noise isolation, the voice changer and echo removal off. Use headphones.</span>
       ${canPickOutput ? '<label>Speakers or headset<select id="vs-audiooutput"></select></label>' : `<span class="small muted">${outputNote}</span>`}
       <label>Everyone's volume <span class="range-value" id="vs-out-val">${pct(voicePrefs.outputVolume)}%</span>
         <input type="range" id="vs-out" min="0" max="200" step="5" value="${pct(voicePrefs.outputVolume)}" /></label>
       <button type="button" class="link-btn" id="vs-chime">Play a test sound</button>
+      <label class="check"><input type="checkbox" id="vs-board" ${voicePrefs.soundboard ? 'checked' : ''} /> Play soundboard sounds</label>
+      <div class="vs-group">
+        <span class="vs-label">Hotkeys</span>
+        <div class="key-row"><span>Mute</span><button type="button" class="btn secondary key-btn" id="vs-key-mute">${escapeHtml(keyLabel(voicePrefs.keys.mute))}</button></div>
+        <div class="key-row"><span>Deafen</span><button type="button" class="btn secondary key-btn" id="vs-key-deafen">${escapeHtml(keyLabel(voicePrefs.keys.deafen))}</button></div>
+        <span class="small muted" id="vs-hotkey-note"></span>
+      </div>
       <label>Camera<select id="vs-videoinput"></select></label>
       <video id="vs-preview" class="cam-preview hidden" autoplay muted playsinline></video>
       <div class="mic-test"><button type="button" class="btn secondary" id="vs-cam">Preview camera</button><span class="small muted" id="vs-cam-status"></span></div>
@@ -3946,6 +4230,51 @@ function wireVoiceSettings() {
     if (micTest) startMicTest();
   };
   $('#vs-chime').onclick = () => playSound('join', true);
+  $('#vs-board').onchange = (e) => { voicePrefs.soundboard = e.target.checked; saveVoicePrefs(); };
+  for (const r of document.querySelectorAll('#modal-card [name="vs-mode"]')) r.onchange = () => {
+    voicePrefs.mode = r.value;
+    saveVoicePrefs();
+    $('#vs-ptt-row').classList.toggle('hidden', r.value !== 'ptt');
+    $('#vs-sens-row').classList.toggle('hidden', r.value === 'ptt');
+    $('#vs-line').classList.toggle('hidden', r.value === 'ptt' || voicePrefs.sensitivity === null);
+    if (state.voice && wantsMicProcessor()) state.voice.micCtx ??= newMicContext();
+    applyGateChange();
+    syncHotkeys();
+  };
+  const showLine = () => {
+    $('#vs-line').style.left = `${(Number($('#vs-sens').value) + 60) * (100 / 60)}%`;
+    $('#vs-line').classList.toggle('hidden', voicePrefs.sensitivity === null || voicePrefs.mode === 'ptt');
+  };
+  $('#vs-sens-on').onchange = (e) => {
+    voicePrefs.sensitivity = e.target.checked ? Number($('#vs-sens').value) : null;
+    $('#vs-sens').disabled = !e.target.checked;
+    saveVoicePrefs();
+    showLine();
+    if (state.voice && wantsMicProcessor()) state.voice.micCtx ??= newMicContext();
+    applyGateChange();
+  };
+  $('#vs-sens').oninput = () => {
+    voicePrefs.sensitivity = Number($('#vs-sens').value);
+    showLine();
+    updateGate();
+  };
+  $('#vs-sens').onchange = saveVoicePrefs;
+  $('#vs-fx').onchange = (e) => {
+    voicePrefs.fx = e.target.value;
+    saveVoicePrefs();
+    if (state.voice && wantsMicProcessor()) state.voice.micCtx ??= newMicContext();
+    applyNoiseLevel();
+    if (micTest) startMicTest();
+  };
+  $('#vs-music').onchange = (e) => {
+    voicePrefs.music = e.target.checked;
+    saveVoicePrefs();
+    if (state.voice && wantsMicProcessor()) state.voice.micCtx ??= newMicContext();
+    republishMic();
+    if (micTest) startMicTest();
+  };
+  for (const name of ['ptt', 'mute', 'deafen']) $(`#vs-key-${name}`).onclick = (e) => captureKey(name, e.currentTarget);
+  renderHotkeyNote();
   $('#vs-cam').onclick = () => (cameraPreview ? stopCameraPreview() : startCameraPreview());
   $('#voice-quality').onchange = (e) => { voicePrefs.quality = e.target.value; saveVoicePrefs(); };
   // Whatever closes the settings stops the test and the preview.
@@ -4051,6 +4380,640 @@ function wireSoundSettings() {
   $('#sound-test').onclick = () => playSound('message', true);
 }
 
+// ---------------------------------------------------------------- push to talk and hotkeys
+//
+// A key is kept as where it sits on the keyboard (KeyboardEvent.code, so it works with any
+// layout) plus any Ctrl, Shift, Alt or Cmd held with it; the mouse's side buttons count too.
+// In a browser they work while Burrow is in front. The desktop app hears them everywhere, even in
+// a game, but only while you're in a voice room.
+
+const isMac = /Mac/.test(navigator.platform);
+const KEY_NAMES = {
+  Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: "'",
+  Comma: ',', Period: '.', Slash: '/', Space: 'Space', CapsLock: 'Caps Lock', Mouse4: 'Mouse back', Mouse5: 'Mouse forward',
+  ControlLeft: 'Left Ctrl', ControlRight: 'Right Ctrl', ShiftLeft: 'Left Shift', ShiftRight: 'Right Shift',
+  AltLeft: isMac ? 'Left Option' : 'Left Alt', AltRight: isMac ? 'Right Option' : 'Right Alt', MetaLeft: isMac ? 'Left Cmd' : 'Left Win', MetaRight: isMac ? 'Right Cmd' : 'Right Win',
+};
+function keyLabel(k) {
+  if (!k) return 'Not set';
+  const name = /^Key[A-Z]$/.test(k.code) ? k.code.slice(3) : /^Digit\d$/.test(k.code) ? k.code.slice(5) : KEY_NAMES[k.code] ?? k.code.replace(/^Numpad/, 'Num ');
+  return [k.ctrl && 'Ctrl', k.alt && (isMac ? 'Option' : 'Alt'), k.shift && 'Shift', k.meta && (isMac ? 'Cmd' : 'Win'), name].filter(Boolean).join('+');
+}
+const MODIFIER_CODES = /^(Control|Shift|Alt|Meta)(Left|Right)$/;
+function keyFromEvent(e) {
+  if (e.type.startsWith('mouse')) return { code: `Mouse${e.button + 1}` };
+  // A modifier on its own (say Left Ctrl as push to talk) is a key by itself.
+  if (MODIFIER_CODES.test(e.code)) return { code: e.code };
+  return { code: e.code, ...(e.ctrlKey && { ctrl: true }), ...(e.altKey && { alt: true }), ...(e.shiftKey && { shift: true }), ...(e.metaKey && { meta: true }) };
+}
+const sameKey = (a, b) => !!a && !!b && a.code === b.code && !!a.ctrl === !!b.ctrl && !!a.alt === !!b.alt && !!a.shift === !!b.shift && !!a.meta === !!b.meta;
+
+const desktopHotkeys = window.burrowDesktop?.hotkeys ?? null;
+let hotkeyStatus = { global: false, needsPermission: false }; // from the desktop app
+let capturingKey = null; // which key is being picked in the settings
+
+/** Hands your keys to the desktop app while you're in voice (and takes them back after). */
+async function syncHotkeys() {
+  if (!desktopHotkeys) return;
+  const binds = state.voice && !capturingKey
+    ? { ptt: voicePrefs.mode === 'ptt' ? voicePrefs.keys.ptt : null, mute: voicePrefs.keys.mute, deafen: voicePrefs.keys.deafen }
+    : null;
+  try { hotkeyStatus = (await desktopHotkeys.set(binds)) ?? { global: false }; } catch { hotkeyStatus = { global: false }; }
+  renderHotkeyNote();
+}
+desktopHotkeys?.onKey((name, down) => {
+  if (capturingKey) return;
+  if (name === 'ptt') setPtt(down);
+  else if (down && name === 'mute') toggleMute();
+  else if (down && name === 'deafen') toggleDeafen();
+});
+
+function setPtt(down) {
+  if (pttHeld === down) return;
+  pttHeld = down;
+  updateGate();
+  if (down) markActive();
+  if (state.voice) renderVoiceBar();
+}
+
+const typingInto = (el) => !!el?.closest?.('input, textarea, select, [contenteditable="true"]');
+function onHotkey(e, down) {
+  if (capturingKey || hotkeyStatus.global) return; // the desktop app hears them itself
+  const key = keyFromEvent(e);
+  const { keys } = voicePrefs;
+  if (voicePrefs.mode === 'ptt' && keys.ptt && key.code === keys.ptt.code && (state.voice || micTest)) {
+    // Letting go counts whatever else is held; pressing needs the same combination.
+    if (down && !sameKey(key, keys.ptt)) return;
+    // A plain typing key still types in a text box.
+    if (typingInto(e.target) && !keys.ptt.ctrl && !keys.ptt.alt && !keys.ptt.meta && e.key?.length === 1) return;
+    e.preventDefault();
+    if (!e.repeat) setPtt(down);
+    return;
+  }
+  if (!down || !state.voice || e.repeat) return;
+  if (sameKey(key, keys.mute)) { e.preventDefault(); toggleMute(); }
+  else if (sameKey(key, keys.deafen)) { e.preventDefault(); toggleDeafen(); }
+}
+document.addEventListener('keydown', (e) => onHotkey(e, true), true);
+document.addEventListener('keyup', (e) => onHotkey(e, false), true);
+// The side buttons would otherwise go back and forward in the browser.
+const sideButton = (e) => e.button >= 3 && voicePrefs.mode === 'ptt' && voicePrefs.keys.ptt?.code === `Mouse${e.button + 1}` && (state.voice || micTest);
+document.addEventListener('mousedown', (e) => { if (e.button >= 3) onHotkey(e, true); }, true);
+document.addEventListener('mouseup', (e) => { if (sideButton(e)) e.preventDefault(); if (e.button >= 3) onHotkey(e, false); }, true);
+document.addEventListener('auxclick', (e) => { if (sideButton(e)) e.preventDefault(); }, true);
+// A browser can't tell when a key is let go somewhere else.
+window.addEventListener('blur', () => { if (!hotkeyStatus.global) setPtt(false); });
+
+/** The key picker in the settings: press any key, or Escape to keep the old one. */
+function captureKey(name, button) {
+  capturingKey = name;
+  syncHotkeys();
+  button.textContent = 'Press a key…';
+  button.classList.add('capturing');
+  const done = (key) => {
+    document.removeEventListener('keydown', onKeyDown, true);
+    document.removeEventListener('mousedown', onMouse, true);
+    capturingKey = null;
+    if (key) {
+      voicePrefs.keys[name] = key;
+      saveVoicePrefs();
+    }
+    button.textContent = keyLabel(voicePrefs.keys[name]);
+    button.classList.remove('capturing');
+    syncHotkeys();
+  };
+  const onKeyDown = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === 'Escape') return done(null);
+    // Ctrl, Shift and friends wait for the key they go with, unless that's the whole thing (push to talk).
+    if (MODIFIER_CODES.test(e.code) && name !== 'ptt') return;
+    done(keyFromEvent(e));
+  };
+  const onMouse = (e) => {
+    if (e.button < 3) return;
+    e.preventDefault();
+    done(keyFromEvent(e));
+  };
+  document.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('mousedown', onMouse, true);
+}
+
+function renderHotkeyNote() {
+  const note = $('#vs-hotkey-note');
+  if (!note) return;
+  if (!desktopHotkeys) note.textContent = 'These work while Burrow is in front. In the desktop app they work everywhere, even in games.';
+  else if (hotkeyStatus.needsPermission) {
+    note.innerHTML = 'To hear your keys in other apps, allow Burrow in System Settings › Privacy &amp; Security › Accessibility. <button type="button" class="link-btn" id="vs-allow-keys">Open it</button>';
+    $('#vs-allow-keys').onclick = () => desktopHotkeys.askPermission?.();
+  } else note.textContent = hotkeyStatus.global ? 'These work everywhere while you\'re in voice, even in games.'
+    : state.voice ? 'These work while Burrow is in front.' : 'These work everywhere while you\'re in voice, even in games.';
+}
+
+// Talking or touching the app counts as being here, for the AFK fire.
+let lastActiveSent = 0;
+function markActive() {
+  if (!state.voice || Date.now() - lastActiveSent < 60_000 || state.ws?.readyState !== WebSocket.OPEN) return;
+  lastActiveSent = Date.now();
+  state.ws.send(JSON.stringify({ type: 'voice_active' }));
+}
+document.addEventListener('pointerdown', markActive, true);
+document.addEventListener('keydown', markActive, true);
+
+// ---------------------------------------------------------------- managing voice: moving people, muting them for everyone, the AFK fire
+
+const SEAT_CHOICES = [0, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 50, 99];
+const AFK_CHOICES = [[1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, '1 hour']];
+const SERVER_MUTED_ICON = MUTED_ICON.replace('class="muted-icon"', 'class="muted-icon server-muted"').replace('aria-label="Muted"', 'aria-label="Muted by a moderator"');
+
+/** The name a voice room goes by: its own, or "Call with Sam" in a direct message. */
+function fireName(c) {
+  const s = c && [...state.servers.values()].find((x) => x.channels.includes(c));
+  return s && isDm(s) ? `Call with ${dmTitle(s)}` : c?.name ?? '';
+}
+
+/** Whether you can move, mute or disconnect this person in this burrow. */
+const canManageVoice = (s, userId) => {
+  if (!can(s, 'voice')) return false;
+  const m = s.members.find((x) => x.id === userId);
+  return !!m && (userId === state.me.id || (!isHost(s, userId) && rankOf(s, m) > rankOf(s, me(s))));
+};
+
+/** The moderator part of someone's volume pop-up. */
+function voiceModTools(pop, s, c, userId, name) {
+  if (!s || !c || !canManageVoice(s, userId)) return;
+  const muted = c.voiceServerMuted?.includes(userId);
+  const fires = s.channels.filter((x) => x.kind === 'voice' && x.id !== c.id);
+  const box = document.createElement('div');
+  box.className = 'volume-mod';
+  box.innerHTML = `${userId !== state.me.id ? `<button type="button" class="btn secondary" data-act="mute">${muted ? 'Let them speak' : 'Mute for everyone'}</button>` : ''}
+    ${fires.length ? `<label class="small">Move to<select data-act="move"><option value="">Pick a fire</option>${fires.map((f) => `<option value="${f.id}">${escapeHtml(f.name)}</option>`).join('')}</select></label>` : ''}
+    ${userId !== state.me.id ? '<button type="button" class="btn danger" data-act="kick">Disconnect</button>' : ''}`;
+  const run = async (f) => { try { await f(); closeVolume(); } catch (err) { alertError(err); } };
+  box.querySelector('[data-act="mute"]')?.addEventListener('click', () => run(() => api(`/api/servers/${s.id}/members/${userId}/voice-mute`, { method: 'POST', body: { muted: !muted } })));
+  box.querySelector('[data-act="move"]')?.addEventListener('change', (e) => {
+    if (!e.target.value) return;
+    const to = Number(e.target.value);
+    run(() => (userId === state.me.id ? joinVoice(to) : api('/api/voice/move', { method: 'POST', body: { userId, channelId: to } })));
+  });
+  box.querySelector('[data-act="kick"]')?.addEventListener('click', () => run(() => api('/api/voice/disconnect', { method: 'POST', body: { userId } })));
+  if (box.children.length) pop.append(box);
+}
+
+/** Muted (or let speak again) by a moderator, while you're at one of the burrow's fires. */
+function applyServerMute(muted) {
+  const voice = state.voice;
+  if (!voice?.room) return;
+  if (muted) {
+    voice.mutedBeforeServer = voice.muted;
+    voice.serverMuted = true;
+    setMicMuted(voice, true);
+  } else {
+    voice.serverMuted = false;
+    const hasMic = !!voice.room.localParticipant.getTrackPublication(window.LivekitClient.Track.Source.Microphone)?.track;
+    voice.muted = !!voice.mutedBeforeServer || voice.deafened;
+    if (hasMic) setMicMuted(voice, voice.muted);
+    else startMic(voice).catch((err) => console.warn("Couldn't turn your mic back on:", err));
+  }
+  voiceChanged();
+}
+
+function voiceRoomSettings(c) {
+  return `<label>Seats<select id="room-seats">${SEAT_CHOICES.map((n) => `<option value="${n}" ${n === (c.userLimit ?? 0) ? 'selected' : ''}>${n ? `${n} people` : 'No limit'}</option>`).join('')}</select>
+      <span class="small muted">When it's full, only people who manage voice can sit down, or move others in.</span></label>
+    <label class="check"><input type="checkbox" id="room-keep-chat" ${c.keepChat ? 'checked' : ''} /> Keep the fireside chat after everyone leaves</label>`;
+}
+
+function afkSettings(s) {
+  const fires = s.channels.filter((c) => c.kind === 'voice');
+  if (fires.length < 2) return '';
+  return `<label>AFK fire
+      <select id="burrow-afk"><option value="">None</option>${fires.map((c) => `<option value="${c.id}" ${c.id === s.afkChannelId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}</select>
+      <span class="small muted">People who haven't talked or touched Burrow for a while are moved here, muted.</span></label>
+    <label>Move them after<select id="burrow-afk-minutes">${AFK_CHOICES.map(([v, l]) => `<option value="${v}" ${v === (s.afkMinutes ?? 15) ? 'selected' : ''}>${l}</option>`).join('')}</select></label>`;
+}
+
+// ---------------------------------------------------------------- the soundboard
+//
+// Each burrow's short clips. Anyone at one of its fires can play one; everyone there hears it.
+// Each app fetches the clip and plays it itself, at your own soundboard volume.
+
+const SOUND_ICON = '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-9 9v5a3 3 0 0 0 3 3h1v-7H5v-1a7 7 0 0 1 14 0v1h-2v7h1a3 3 0 0 0 3-3v-5a9 9 0 0 0-9-9Zm-1 7h2v8h-2v-8Zm-3 3h2v5H8v-5Zm6 0h2v5h-2v-5Z"/></svg>';
+const MAX_SOUND_SECONDS = 10;
+const soundBuffers = new Map(); // url -> Promise<AudioBuffer>
+
+function audioOut() {
+  if (!soundCtx) {
+    soundCtx = new AudioContext();
+    setChimeOutput();
+  }
+  if (soundCtx.state === 'suspended') soundCtx.resume().catch(() => {});
+  return soundCtx;
+}
+
+async function playClip(url, volume) {
+  const ctx = audioOut();
+  if (!soundBuffers.has(url)) {
+    const loading = fetch(state.serverUrl + url)
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.arrayBuffer(); })
+      .then((b) => ctx.decodeAudioData(b));
+    loading.catch(() => soundBuffers.delete(url));
+    soundBuffers.set(url, loading);
+  }
+  const source = ctx.createBufferSource();
+  source.buffer = await soundBuffers.get(url);
+  const gain = ctx.createGain();
+  gain.gain.value = volume;
+  source.connect(gain).connect(ctx.destination);
+  source.start();
+}
+
+function onBoardSound(ev) {
+  if (state.voice?.channelId !== ev.channelId) return;
+  const sound = fireServer()?.sounds?.find((x) => x.id === ev.soundId);
+  fireNote(`${nameOf(ev.userId)} played ${sound ? `${sound.emoji ? sound.emoji + ' ' : ''}${sound.name}` : 'a sound'}`);
+  // Not while deafened, and not from someone you've turned all the way down.
+  if (!voicePrefs.soundboard || state.voice.deafened || volumeFor(ev.userId) === 0) return;
+  playClip(ev.url, voicePrefs.soundboardVolume * voicePrefs.outputVolume).catch((err) => console.warn("Couldn't play the sound:", err));
+}
+
+/** A line that floats up over the fire for a few seconds. */
+function fireNote(text) {
+  const note = document.createElement('div');
+  note.className = 'fire-note';
+  note.textContent = text;
+  $('#fire-notes').append(note);
+  setTimeout(() => note.remove(), 4000);
+}
+
+function openBoard(anchor) {
+  const s = fireServer();
+  if (!s || isDm(s)) return;
+  closeVolume();
+  const pop = document.createElement('div');
+  pop.className = 'volume-pop board-pop';
+  pop.id = 'volume-pop';
+  const sounds = s.sounds ?? [];
+  pop.innerHTML = `<div class="volume-head"><b>Soundboard</b><span class="small muted">${escapeHtml(s.name)}</span></div>
+    ${sounds.length ? '<div class="board-grid"></div>' : `<p class="small muted">No sounds yet.${can(s, 'emoji') ? '' : ' Someone who manages emoji can add some.'}</p>`}
+    <label class="small">Your soundboard volume <span id="board-vol-val">${Math.round(voicePrefs.soundboardVolume * 100)}%</span>
+      <input type="range" id="board-vol" min="0" max="100" step="5" value="${Math.round(voicePrefs.soundboardVolume * 100)}" /></label>
+    ${can(s, 'emoji') && state.maxUploadBytes ? '<button type="button" class="link-btn" id="board-manage">Add or change sounds</button>' : ''}`;
+  pop.onclick = (e) => e.stopPropagation();
+  for (const sound of sounds) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'board-sound';
+    b.innerHTML = `<span class="board-emoji">${sound.emoji ? emojiHtml(sound.emoji, s) : SOUND_ICON}</span><span></span>`;
+    b.lastChild.textContent = sound.name;
+    b.disabled = !!state.voice?.serverMuted;
+    b.title = state.voice?.serverMuted ? "You've been muted here" : `Play ${sound.name} for everyone at the fire`;
+    b.onclick = () => state.ws?.send(JSON.stringify({ type: 'soundboard', soundId: sound.id }));
+    pop.querySelector('.board-grid').append(b);
+  }
+  document.body.append(pop);
+  placePop(pop, anchor);
+  $('#board-vol').oninput = (e) => {
+    voicePrefs.soundboardVolume = Number(e.target.value) / 100;
+    $('#board-vol-val').textContent = `${e.target.value}%`;
+  };
+  $('#board-vol').onchange = saveVoicePrefs;
+  $('#board-manage')?.addEventListener('click', () => { closeVolume(); openSounds(s.id); });
+}
+
+/** Puts a pop-up next to what opened it, inside the window. */
+function placePop(pop, anchor) {
+  const r = anchor.getBoundingClientRect();
+  pop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 8))}px`;
+  const below = r.bottom + 6 + pop.offsetHeight < window.innerHeight - 8;
+  pop.style.top = `${below ? r.bottom + 6 : Math.max(8, r.top - pop.offsetHeight - 6)}px`;
+}
+
+/** An emoji as text, or a burrow's own emoji written <:name:id> as its picture. */
+function emojiHtml(text, s) {
+  const m = /^<:(\w+):(\d+)>$/.exec(text);
+  const custom = m && s?.emoji?.find((e) => e.id === Number(m[2]));
+  return custom ? `<img class="custom-emoji" src="${escapeHtml(state.serverUrl + custom.url)}" alt="${escapeHtml(custom.name)}" />` : escapeHtml(text);
+}
+
+function openSounds(serverId) {
+  const s = state.servers.get(serverId);
+  if (!s) return closeModal();
+  const sounds = s.sounds ?? [];
+  modal(`<h2>Soundboard</h2>
+    <p class="small muted">Short clips anyone at ${escapeHtml(s.name)}'s fires can play for everyone there. Up to ${MAX_SOUND_SECONDS} seconds and 1 MB each; MP3, OGG, WAV, WebM or M4A.</p>
+    <h3>Sounds · ${sounds.length} of 30</h3>
+    ${sounds.length ? `<ul class="emoji-manage sound-manage">${sounds.map((x) => `<li data-id="${x.id}">
+        <button type="button" class="icon-btn" data-act="play" title="Hear it">${SPEAKER_ON}</button>
+        <input class="sound-emoji" maxlength="16" value="${escapeHtml(x.emoji)}" aria-label="Emoji" placeholder="🔊" />
+        <input class="sound-name" maxlength="32" value="${escapeHtml(x.name)}" aria-label="Name" />
+        <button type="button" class="btn secondary" data-act="save">Save</button>
+        <button type="button" class="btn danger" data-act="delete">Delete</button>
+      </li>`).join('')}</ul>` : '<p class="muted small">None yet.</p>'}
+    <h3>Add a sound</h3>
+    <form id="sound-form" class="sound-add">
+      <input type="file" id="sound-file" accept="audio/*" required />
+      <div class="sound-add-row"><input id="sound-new-emoji" maxlength="16" placeholder="🔊" aria-label="Emoji" /><input id="sound-new-name" maxlength="32" placeholder="Name" required /></div>
+      <div class="error" id="modal-error"></div>
+      <div class="modal-row"><button type="button" class="btn secondary" data-close>Done</button><button type="submit" class="btn">Add</button></div>
+    </form>`);
+  const done = (updated) => { handleEvent({ type: 'server_updated', server: updated }); openSounds(serverId); };
+  for (const li of document.querySelectorAll('#modal-card .sound-manage li')) {
+    const id = Number(li.dataset.id);
+    const sound = sounds.find((x) => x.id === id);
+    li.querySelector('[data-act="play"]').onclick = () => playClip(sound.url, voicePrefs.soundboardVolume).catch(alertError);
+    li.querySelector('[data-act="save"]').onclick = async () => {
+      try { done(await api(`/api/sounds/${id}`, { method: 'PATCH', body: { name: li.querySelector('.sound-name').value, emoji: li.querySelector('.sound-emoji').value } })); } catch (err) { alertError(err); }
+    };
+    li.querySelector('[data-act="delete"]').onclick = async () => {
+      if (!confirm(`Delete ${sound.name}?`)) return;
+      try { done(await api(`/api/sounds/${id}`, { method: 'DELETE' })); } catch (err) { alertError(err); }
+    };
+  }
+  $('#sound-file').onchange = () => {
+    const f = $('#sound-file').files[0];
+    if (f && !$('#sound-new-name').value) $('#sound-new-name').value = f.name.replace(/\.[^.]+$/, '').slice(0, 32);
+  };
+  $('#sound-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = $('#sound-file').files[0];
+    $('#modal-error').textContent = '';
+    try {
+      if (!f) throw new Error('Pick a sound');
+      if (f.size > 1024 * 1024) throw new Error('Sounds can be at most 1 MB');
+      // Checked here, since the server can't play it to see how long it is.
+      const decoded = await audioOut().decodeAudioData(await f.arrayBuffer()).catch(() => { throw new Error("That file isn't audio Burrow can play"); });
+      if (decoded.duration > MAX_SOUND_SECONDS + 0.5) throw new Error(`Sounds can be up to ${MAX_SOUND_SECONDS} seconds (that one is ${Math.round(decoded.duration)})`);
+      const query = new URLSearchParams({ name: $('#sound-new-name').value, emoji: $('#sound-new-emoji').value });
+      done(await uploadPicture(`/api/servers/${serverId}/sounds?${query}`, f));
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+}
+
+// ---------------------------------------------------------------- listen together
+//
+// One YouTube video per fire, played in step for everyone there. Anyone can start, pause, skip
+// or stop it. Burrow keeps what's playing and where it was at a moment in time; each app works
+// out where it should be now and nudges its player there. The player is YouTube's own, in a
+// frame, controlled with the messages its embed understands (no YouTube script runs in Burrow).
+
+const LISTEN_ICON = '<svg viewBox="0 0 24 24"><path d="M12 3v10.6A4 4 0 1 0 14 17V7h4V3h-6Z"/></svg>';
+let listen = null; // { channelId, state, at, frame, ready, time, playerState, hidden }
+
+/** The video id from a YouTube link (watch, youtu.be, shorts, music, embed) or a bare id. */
+function youtubeId(text) {
+  const t = text.trim();
+  if (/^[\w-]{11}$/.test(t)) return t;
+  try {
+    const u = new URL(t);
+    const host = u.hostname.replace(/^(www|m|music)\./, '');
+    if (host === 'youtu.be') return u.pathname.slice(1, 12);
+    if (host === 'youtube.com' || host === 'youtube-nocookie.com') {
+      const v = u.searchParams.get('v');
+      if (v) return v;
+      return /^\/(?:shorts|embed|live)\/([\w-]{11})/.exec(u.pathname)?.[1] ?? null;
+    }
+  } catch {}
+  return null;
+}
+/** Where in the video, from a link's ?t=90 or ?t=1m30s. */
+function youtubeStart(text) {
+  try {
+    const t = new URL(text.trim()).searchParams.get('t') ?? '';
+    const m = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/.exec(t);
+    return m ? (Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0)) : 0;
+  } catch { return 0; }
+}
+
+const sendListen = (msg) => state.ws?.readyState === WebSocket.OPEN && state.ws.send(JSON.stringify({ type: 'listen', ...msg }));
+
+function openListen() {
+  modal(`<h2>Listen together</h2>
+    <p class="small muted">Paste a YouTube link. It plays for everyone at the fire, in step, and anyone can pause or change it.</p>
+    <form id="listen-form">
+      <input id="listen-link" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off" required />
+      <div class="error" id="modal-error"></div>
+      <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">Play</button></div>
+    </form>`);
+  $('#listen-link').focus();
+  $('#listen-form').onsubmit = (e) => {
+    e.preventDefault();
+    const id = youtubeId($('#listen-link').value);
+    if (!id) return ($('#modal-error').textContent = "That doesn't look like a YouTube link");
+    sendListen({ action: 'start', videoId: id, position: youtubeStart($('#listen-link').value) });
+    closeModal();
+  };
+}
+
+/** Where the video should be now, in seconds. */
+const listenTarget = () => {
+  const st = listen?.state;
+  if (!st) return 0;
+  return st.position + (st.playing ? (performance.now() - listen.at) / 1000 : 0);
+};
+
+function onListenState(ev) {
+  if (state.voice?.channelId !== ev.channelId) return;
+  const before = listen?.state;
+  if (!ev.state) return stopListen();
+  if (!listen || listen.channelId !== ev.channelId) listen = { channelId: ev.channelId, hidden: store.get('listenHidden') === '1' };
+  listen.state = ev.state;
+  listen.at = performance.now(); // what Burrow says is where it is as of now
+  if (before?.videoId !== ev.state.videoId) {
+    if (before) fireNote(`${nameOf(ev.state.by)} put on something new`);
+    loadListenFrame();
+  } else syncListen(true);
+  renderListen();
+}
+
+function loadListenFrame() {
+  const st = listen.state;
+  listen.ready = false;
+  listen.time = null;
+  listen.titleSent = false;
+  const frame = document.createElement('iframe');
+  frame.className = 'listen-frame';
+  frame.allow = 'autoplay; encrypted-media';
+  // YouTube wants to know which site it's in; Burrow otherwise sends no referrer anywhere.
+  frame.referrerPolicy = 'strict-origin-when-cross-origin';
+  frame.title = 'Listen together';
+  const start = Math.floor(listenTarget());
+  frame.src = `https://www.youtube-nocookie.com/embed/${st.videoId}?enablejsapi=1&controls=0&disablekb=1&playsinline=1&rel=0&autoplay=${st.playing ? 1 : 0}&start=${start}`;
+  frame.onload = () => {
+    // Asks the player to start sending its state.
+    frame.contentWindow?.postMessage(JSON.stringify({ event: 'listening', id: 'burrow', channel: 'widget' }), '*');
+    setTimeout(() => syncListen(true), 500);
+  };
+  listen.frame = frame;
+  $('#listen-video').replaceChildren(frame);
+}
+
+function playerCommand(func, args = []) {
+  listen?.frame?.contentWindow?.postMessage(JSON.stringify({ event: 'command', func, args, id: 'burrow', channel: 'widget' }), '*');
+}
+
+/** Lines the player up with everyone else: playing or not, the same spot (within a second and a half), your volume. */
+function syncListen(force = false) {
+  if (!listen?.frame) return;
+  const st = listen.state;
+  const target = listenTarget();
+  playerCommand('setVolume', [Math.round((state.voice?.deafened ? 0 : voicePrefs.listenVolume * voicePrefs.outputVolume) * 100)]);
+  if (st.playing && listen.playerState !== 1 && listen.playerState !== 3) playerCommand('playVideo');
+  if (!st.playing && listen.playerState === 1) playerCommand('pauseVideo');
+  if (listen.time !== null && (force || st.playing) && Math.abs(listen.time - target) > 1.5) playerCommand('seekTo', [target, true]);
+}
+
+window.addEventListener('message', (e) => {
+  if (!listen?.frame || e.source !== listen.frame.contentWindow) return;
+  let data;
+  try { data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data; } catch { return; }
+  const info = data?.info;
+  if (data?.event === 'onReady') { listen.ready = true; syncListen(true); }
+  if (!info || typeof info !== 'object') return;
+  if (typeof info.currentTime === 'number') listen.time = info.currentTime;
+  if (typeof info.playerState === 'number' && info.playerState !== listen.playerState) {
+    listen.playerState = info.playerState;
+    // At the end it stops for everyone, rather than starting over.
+    if (info.playerState === 0 && listen.state.playing) sendListen({ action: 'ended' });
+    else syncListen();
+  }
+  const title = info.videoData?.title;
+  if (title && !listen.state.title && !listen.titleSent && listen.state.by === state.me.id) {
+    listen.titleSent = true;
+    sendListen({ action: 'title', title });
+  }
+  if (title) listen.title = title;
+  renderListen();
+});
+setInterval(() => { if (listen?.state?.playing) { syncListen(); renderListen(); } }, 1000);
+
+function renderListen() {
+  const panel = $('#listen-panel');
+  panel.classList.toggle('hidden', !listen?.state);
+  $('#fire-listen').classList.toggle('on', !!listen?.state);
+  if (!listen?.state) return;
+  const st = listen.state;
+  panel.classList.toggle('video-hidden', !!listen.hidden);
+  $('#listen-title').textContent = st.title || listen.title || 'YouTube video';
+  $('#listen-by').textContent = `Put on by ${st.by === state.me.id ? 'you' : nameOf(st.by)}`;
+  $('#listen-time').textContent = clock(listenTarget());
+  $('#listen-toggle').innerHTML = st.playing ? PAUSE_ICON : PLAY_ICON;
+  $('#listen-toggle').title = st.playing ? 'Pause for everyone' : 'Play for everyone';
+  $('#listen-hide').textContent = listen.hidden ? 'Show video' : 'Hide video';
+}
+
+function stopListen() {
+  listen = null;
+  $('#listen-video').replaceChildren();
+  renderListen();
+}
+
+$('#fire-board').innerHTML = SOUND_ICON;
+$('#fire-board').onclick = (e) => { e.stopPropagation(); openBoard(e.currentTarget); };
+$('#fire-listen').innerHTML = LISTEN_ICON;
+$('#fire-listen').onclick = () => (listen?.state ? $('#listen-panel').scrollIntoView({ block: 'nearest' }) : openListen());
+$('#listen-toggle').onclick = () => sendListen({ action: listen?.state?.playing ? 'pause' : 'play' });
+$('#listen-back').onclick = () => sendListen({ action: 'seek', position: Math.max(0, listenTarget() - 10) });
+$('#listen-forward').onclick = () => sendListen({ action: 'seek', position: listenTarget() + 10 });
+$('#listen-stop').onclick = () => sendListen({ action: 'stop' });
+$('#listen-change').onclick = openListen;
+$('#listen-hide').onclick = () => {
+  listen.hidden = !listen.hidden;
+  store.set('listenHidden', listen.hidden ? '1' : null);
+  renderListen();
+};
+$('#listen-volume').value = Math.round(voicePrefs.listenVolume * 100);
+$('#listen-volume').oninput = (e) => { voicePrefs.listenVolume = Number(e.target.value) / 100; syncListen(); };
+$('#listen-volume').onchange = saveVoicePrefs;
+
+// ---------------------------------------------------------------- calls in direct messages
+//
+// A conversation gets its own voice room the first time someone calls. Calling rings everyone
+// else in it: their app shows who's calling, with a ringtone, until they answer or say no, the
+// caller gives up, or half a minute goes by.
+
+const PHONE_ICON = '<svg viewBox="0 0 24 24"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1L6.6 10.8Z"/></svg>';
+let ringing = null; // { serverId, channelId, from, timer, tone }
+
+const callRoomOf = (s) => s?.channels.find((c) => c.kind === 'voice') ?? null;
+
+async function startCall(s) {
+  try {
+    const { channelId } = await api(`/api/dms/${s.id}/call`, { method: 'POST' });
+    await joinVoice(channelId);
+  } catch (err) { alertError(err); }
+}
+
+function onRing(ev) {
+  const s = state.servers.get(ev.serverId);
+  if (!s || state.voice?.channelId === ev.channelId) return;
+  stopRinging();
+  const who = ev.from.username;
+  ringing = { serverId: ev.serverId, channelId: ev.channelId, from: ev.from };
+  const card = $('#ring');
+  card.classList.remove('hidden');
+  setAvatar($('#ring-avatar'), who, avatarOf(ev.from.id));
+  $('#ring-name').textContent = s.group ? `${who} in ${dmTitle(s)}` : who;
+  // A ring every two seconds, for up to half a minute.
+  const ring = () => { if (!state.voice) playSound('ring', true); };
+  ring();
+  ringing.tone = setInterval(ring, 2000);
+  ringing.timer = setTimeout(() => stopRinging(), 30_000);
+  if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+    const n = new Notification(`${who} is calling`, { body: 'Open Burrow to answer', requireInteraction: true, tag: `ring-${ev.serverId}` });
+    n.onclick = () => { window.focus(); n.close(); };
+    ringing.notification = n;
+  }
+}
+function stopRinging() {
+  if (!ringing) return;
+  clearInterval(ringing.tone);
+  clearTimeout(ringing.timer);
+  ringing.notification?.close();
+  ringing = null;
+  $('#ring').classList.add('hidden');
+}
+$('#ring-answer').onclick = () => {
+  const r = ringing;
+  stopRinging();
+  if (!r) return;
+  selectServer(r.serverId);
+  joinVoice(r.channelId);
+};
+$('#ring-decline').onclick = () => {
+  const r = ringing;
+  stopRinging();
+  if (r) api(`/api/dms/${r.serverId}/call/decline`, { method: 'POST' }).catch(() => {});
+};
+/** Whoever called gave up, or you picked up somewhere else: stop ringing. */
+function checkRinging(channelId, userIds) {
+  if (!ringing || ringing.channelId !== channelId) return;
+  if (!userIds.length || userIds.includes(state.me.id)) stopRinging();
+}
+
+/** In a direct message: the call button, and a way into a call that's going on. */
+function renderCallButton() {
+  const s = state.servers.get(state.serverId);
+  const dm = isDm(s) && state.voiceEnabled;
+  const room = dm ? callRoomOf(s) : null;
+  const inCall = !!room && state.voice?.channelId === room.id;
+  const going = !!room && !inCall && (room.voiceUsers?.length ?? 0) > 0;
+  $('#call-btn').classList.toggle('hidden', !dm || inCall);
+  $('#call-btn').classList.toggle('live', going);
+  $('#call-btn').title = going ? 'Join the call' : 'Call';
+  $('#call-btn').setAttribute('aria-label', $('#call-btn').title);
+  $('#call-bar').classList.toggle('hidden', !going);
+  if (going) $('#call-bar-text').textContent = `${room.voiceUsers.map((id) => nameOf(id)).join(', ')} ${room.voiceUsers.length === 1 ? 'is' : 'are'} in a call`;
+}
+$('#call-btn').innerHTML = PHONE_ICON;
+$('#call-btn').onclick = () => {
+  const s = state.servers.get(state.serverId);
+  const room = callRoomOf(s);
+  if (room?.voiceUsers?.length) joinVoice(room.id);
+  else if (s) startCall(s);
+};
+$('#call-join').onclick = () => { const room = callRoomOf(state.servers.get(state.serverId)); if (room) joinVoice(room.id); };
+
 // ---------------------------------------------------------------- rooms, threads and what you've read
 
 const PIN_ICON = '<svg viewBox="0 0 24 24"><path d="M15 3l6 6-2 1-3 3 .5 5.5L15 20l-4-4-5.5 5.5-1-1L10 15l-4-4 1.5-1.5L13 10l3-3 1-2-2-2Z"/></svg>';
@@ -4128,6 +5091,7 @@ function renderChatHeader() {
   renderNotifyButton();
   renderComposerLock();
   renderSlowNote();
+  renderCallButton();
 }
 
 // ---- reading: the room you're looking at is read up to its newest message
@@ -5949,6 +6913,7 @@ function openEditBurrow(serverId) {
       <label>Rules<textarea id="burrow-rules" maxlength="2000" rows="4" placeholder="Leave empty for no rules">${escapeHtml(s.rules ?? '')}</textarea>
         <span class="small muted">New people accept these before they can chat. Changing them asks everyone again.</span>
       </label>
+      ${afkSettings(s)}
       <div class="error" id="modal-error"></div>
       <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">Save</button></div>
     </form>
@@ -5991,6 +6956,7 @@ function openEditBurrow(serverId) {
           description: $('#burrow-desc').value,
           welcomeChannelId: $('#burrow-welcome').value ? Number($('#burrow-welcome').value) : null,
           rules: $('#burrow-rules').value,
+          ...($('#burrow-afk') ? { afkChannelId: $('#burrow-afk').value ? Number($('#burrow-afk').value) : null, afkMinutes: Number($('#burrow-afk-minutes').value) } : {}),
         },
       }));
       closeModal();
