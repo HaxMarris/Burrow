@@ -44,6 +44,7 @@ const state = {
   replyTo: null,            // the message the composer is replying to
   pending: [],              // files attached to the composer: { file, previewUrl, progress, attachment, error, done }
   voice: null,              // { channelId, room, muted } while in a voice room
+  rejoin: null,             // { channelId, muted, deafened, tries, timer } while getting back into voice
   speaking: new Set(),      // user ids talking right now in our voice room
   mutedInVoice: new Set(),  // user ids muted in our voice room
   sharing: new Map(),       // user id -> { camera, screen } in our voice room
@@ -400,9 +401,32 @@ async function loadServers() {
   await selectServer(state.serverId, true);
 }
 
+/**
+ * Back online in the same room: fetch just the messages sent while you were away and add them
+ * below the ones already on screen, instead of reloading the room and losing your place.
+ */
+async function catchUpRoom() {
+  const id = state.channelId;
+  if (!id || !state.reachedEnd || !state.messages.length) return;
+  const last = state.messages.at(-1).id;
+  const missed = await api(`/api/channels/${id}/messages?limit=50&after=${last}`);
+  if (state.channelId !== id || state.messages.at(-1)?.id !== last) return;
+  const known = new Set(state.messages.map((m) => m.id));
+  const fresh = missed.filter((m) => !known.has(m.id));
+  if (!fresh.length) return;
+  state.messages.push(...fresh);
+  // A long time away: the rest loads as you scroll down, like after jumping back in time.
+  state.reachedEnd = missed.length < 50;
+  renderMessages();
+  renderPresentBar();
+  updateUnreadBar();
+  if (state.reachedEnd) markReadSoon();
+}
+
 // ---------------------------------------------------------------- websocket
 
 function connect() {
+  wsTimer = null;
   if (!state.token) return;
   const url = state.serverUrl.replace(/^http/, 'ws') + '/ws?token=' + encodeURIComponent(state.token);
   const ws = new WebSocket(url);
@@ -417,7 +441,7 @@ function connect() {
     if (idleSent) ws.send(JSON.stringify({ type: 'idle', idle: true }));
     if (sharedActivity) ws.send(JSON.stringify({ type: 'activity', name: sharedActivity }));
     // Catch up on anything missed while disconnected.
-    if (wasRetry) { loadServers().catch(() => {}); loadFriends(); }
+    if (wasRetry) { loadServers().then(catchUpRoom).catch(() => {}); loadFriends(); }
   };
   ws.onmessage = (e) => handleEvent(JSON.parse(e.data));
   ws.onclose = (e) => {
@@ -431,9 +455,18 @@ function connect() {
     setConnected(false, 'Reconnecting…');
     if (state.ws !== ws || !state.token) return;
     const delay = Math.min(30000, 1000 * 2 ** state.wsRetry++);
-    setTimeout(connect, delay);
+    clearTimeout(wsTimer);
+    wsTimer = setTimeout(connect, delay);
   };
 }
+let wsTimer = null;
+// The network's back (Wi-Fi rejoined, laptop woke up): reconnect now rather than waiting out the backoff.
+window.addEventListener('online', () => {
+  if (!wsTimer || !state.token || state.ws?.readyState === WebSocket.OPEN) return;
+  clearTimeout(wsTimer);
+  wsTimer = null;
+  connect();
+});
 
 function handleEvent(ev) {
   switch (ev.type) {
@@ -1943,6 +1976,35 @@ const canActOn = (s, m) => {
   return m.id !== state.me.id && (can(s, 'remove') || can(s, 'ban') || can(s, 'voice')) && rankOf(s, m) > rankOf(s, me(s));
 };
 
+// ---- getting back into voice after the connection drops
+
+/** Tries to rejoin the fire you were at, backing off while offline, until it works or you leave. */
+function scheduleRejoin(again) {
+  const tries = (state.rejoin?.tries ?? 0) + 1;
+  clearTimeout(state.rejoin?.timer);
+  // Ten minutes of trying is plenty; by then you've probably moved on.
+  if (tries > 14) { cancelRejoin(); return renderVoiceBar(); }
+  const delay = Math.min(60000, 1000 * 2 ** Math.min(tries - 1, 6));
+  state.rejoin = { ...again, tries, timer: setTimeout(rejoinNow, navigator.onLine === false ? 60000 : delay) };
+  renderVoiceBar();
+}
+function rejoinNow() {
+  const r = state.rejoin;
+  if (!r || state.voice) return;
+  clearTimeout(r.timer);
+  // The room may be gone, or you may have lost access, while away.
+  if (!roomById(r.channelId)) { cancelRejoin(); return renderVoiceBar(); }
+  joinVoice(r.channelId, { muted: r.muted, deafened: r.deafened, rejoin: true });
+}
+function cancelRejoin() {
+  if (!state.rejoin) return;
+  clearTimeout(state.rejoin.timer);
+  state.rejoin = null;
+  renderVoiceBar();
+}
+// The network's back: don't wait out the backoff.
+window.addEventListener('online', () => { if (state.rejoin) rejoinNow(); });
+
 function leaveVoiceIfGone() {
   if (!state.voice) return;
   const stillThere = [...state.servers.values()].some((s) => s.channels.some((c) => c.id === state.voice.channelId));
@@ -3205,17 +3267,18 @@ function loadLivekit() {
 }
 
 // muted: start with your mic off (moved to the AFK fire). deafened: keep it on when moved.
-async function joinVoice(channelId, { muted = false, deafened = false } = {}) {
+async function joinVoice(channelId, { muted = false, deafened = false, rejoin = false } = {}) {
   if (state.voice?.channelId === channelId) return;
   if (!state.voiceEnabled) return alert('Voice is not set up on this server yet.');
+  if (!rejoin) cancelRejoin();
   leaveVoice(true);
   const voice = { channelId, room: null, muted: muted || deafened, deafened, mutedBeforeDeafen: muted };
   state.voice = voice;
   state.fireside = { channelId, messages: [], unread: 0 };
   // Made now, while the click still counts, or some browsers start it paused.
   if (wantsMicProcessor()) voice.micCtx = newMicContext();
-  renderVoiceBar('Connecting…');
-  goToVoice(); // sit down at the fire
+  renderVoiceBar(rejoin ? 'Reconnecting…' : 'Connecting…');
+  if (!rejoin) goToVoice(); // sit down at the fire
   try {
     const LK = await loadLivekit();
     const { url, token, canSpeak = true } = await api(`/api/channels/${channelId}/voice`, { method: 'POST' });
@@ -3298,7 +3361,17 @@ async function joinVoice(channelId, { muted = false, deafened = false } = {}) {
       .on(LK.RoomEvent.TrackUnmuted, (pub, p) => (pub.kind === 'audio' && pub.source === LK.Track.Source.Microphone ? setMuted(p, false) : renderStage()))
       .on(LK.RoomEvent.Reconnecting, () => renderVoiceBar('Reconnecting…'))
       .on(LK.RoomEvent.Reconnected, () => renderVoiceBar())
-      .on(LK.RoomEvent.Disconnected, () => { if (state.voice === voice) leaveVoice(); })
+      .on(LK.RoomEvent.Disconnected, (reason) => {
+        if (state.voice !== voice) return;
+        // Left, removed, or the room closed: that's final. Anything else (Wi-Fi dropped, the voice
+        // server restarted) and you're put back at the same fire once you can be.
+        const R = LK.DisconnectReason ?? {};
+        const final = [R.CLIENT_INITIATED, R.DUPLICATE_IDENTITY, R.PARTICIPANT_REMOVED, R.ROOM_DELETED].includes(reason);
+        if (final) return leaveVoice();
+        const again = { channelId: voice.channelId, muted: voice.deafened ? voice.mutedBeforeDeafen : voice.muted, deafened: voice.deafened };
+        leaveVoice(true);
+        scheduleRejoin(again);
+      })
       .on(LK.RoomEvent.DataReceived, (payload, participant, kind, topic) => (topic === ROOM_TOPIC ? onRoomData(voice, payload, participant) : onCryptoMessage(voice, payload, participant, topic)))
       .on(LK.RoomEvent.ParticipantDisconnected, (p) => {
         vc.pubs.delete(p.identity);
@@ -3319,9 +3392,12 @@ async function joinVoice(channelId, { muted = false, deafened = false } = {}) {
     renderVoiceBar();
     renderChannels();
     syncHotkeys();
-    playSound('join');
+    if (rejoin) cancelRejoin();
+    else playSound('join');
   } catch (err) {
     if (state.voice === voice) leaveVoice(true);
+    // Still offline: keep trying quietly rather than showing an error each time.
+    if (rejoin && state.rejoin) return scheduleRejoin(state.rejoin);
     const denied = err?.name === 'NotAllowedError' || /permission/i.test(err?.message ?? '');
     alert(denied ? 'Burrow needs microphone access for voice. Allow it in your system settings and try again.'
                  : `Couldn't join voice: ${err?.message || err}`);
@@ -3366,6 +3442,7 @@ function setMuted(participant, muted) {
 
 // quiet: no leave sound, when switching rooms or when joining failed.
 function leaveVoice(quiet) {
+  if (quiet !== true) cancelRejoin();
   const voice = state.voice;
   if (!voice) return;
   state.voice = null;
@@ -3449,9 +3526,18 @@ const voiceFlags = () => ({ muted: !!state.voice?.muted, deafened: !!state.voice
 
 function renderVoiceBar(status) {
   const voice = state.voice;
-  $('#voice-bar').classList.toggle('hidden', !voice);
+  $('#voice-bar').classList.toggle('hidden', !voice && !state.rejoin);
   renderVoicePlaces();
-  if (!voice) return;
+  if (!voice) {
+    // Between tries at getting back into voice after the connection dropped.
+    if (state.rejoin) {
+      $('#voice-status').textContent = 'Reconnecting…';
+      $('#voice-status').classList.remove('ok', 'talking');
+      $('#voice-lock').classList.add('hidden');
+      $('#voice-room-name').textContent = fireName(roomById(state.rejoin.channelId)?.c);
+    }
+    return;
+  }
   const ch = [...state.servers.values()].flatMap((s) => s.channels).find((c) => c.id === voice.channelId);
   const sealed = voice.crypto?.index >= 0;
   // With push to talk, the status says how to talk, and when you are.

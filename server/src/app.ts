@@ -276,6 +276,8 @@ export function createApp(opts: AppOptions): Server {
     url: `/api/attachments/${a.id}/${encodeURIComponent(a.name as string)}`,
     ...(a.spoiler ? { spoiler: true } : {}),
     ...(a.voice_seconds != null ? { voiceSeconds: a.voice_seconds } : {}),
+    ...(a.width && a.height ? { width: a.width, height: a.height } : {}),
+    ...(a.thumb ? { thumb: `/api/attachments/${a.id}/thumb` } : {}),
   });
 
   const reactionsFor = (messageId: number) => {
@@ -320,7 +322,7 @@ export function createApp(opts: AppOptions): Server {
     const ids = rows.map((r) => r.id as number);
     const atts = db
       .prepare(
-        `SELECT id, message_id, name, type, size, spoiler, voice_seconds FROM attachments
+        `SELECT id, message_id, name, type, size, spoiler, voice_seconds, width, height, thumb FROM attachments
          WHERE message_id IN (${ids.map(() => '?').join(',')}) ORDER BY position`,
       )
       .all(...ids) as Json[];
@@ -393,7 +395,7 @@ export function createApp(opts: AppOptions): Server {
       }));
     const roles = (
       db.prepare('SELECT id, name, color, perms, position, upload_mb AS uploadMb FROM roles WHERE server_id = ? ORDER BY position').all(serverId) as Json[]
-    ).map((r) => ({ ...r, perms: parsePerms(r.perms as string) }));
+    ).map((r) => ({ ...r, id: r.id as number, perms: parsePerms(r.perms as string) }));
     const memberRoles = db
       .prepare('SELECT mr.user_id, mr.role_id FROM member_roles mr JOIN roles r ON r.id = mr.role_id WHERE mr.server_id = ? ORDER BY r.position')
       .all(serverId) as { user_id: number; role_id: number }[];
@@ -787,7 +789,7 @@ export function createApp(opts: AppOptions): Server {
     if (typeof body.newPassword !== 'string' || body.newPassword.length < 8)
       throw new HttpError(400, 'New password must be at least 8 characters');
     db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(body.newPassword), user.id);
-    db.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(user.id, token);
+    db.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(user.id, token ?? '');
     for (const ws of sockets.get(user.id) ?? []) if (socketTokens.get(ws) !== token) ws.close(4001, 'Password changed');
     return { ok: true };
   });
@@ -1858,7 +1860,17 @@ export function createApp(opts: AppOptions): Server {
   const filePath = (id: string) => join(opts.uploadDir!, id);
   const removeFiles = (rows: Json[]) => {
     if (!opts.uploadDir) return;
-    for (const r of rows) unlink(filePath(r.id as string)).catch(() => {});
+    for (const r of rows) {
+      unlink(filePath(r.id as string)).catch(() => {});
+      unlink(thumbPath(r.id as string)).catch(() => {});
+    }
+  };
+  const thumbPath = (id: string) => join(opts.uploadDir!, `${id}.thumb`);
+  /** A picture or video's size in pixels, from the uploader, when it's believable. */
+  const mediaSize = (type: string, w: unknown, h: unknown) => {
+    const width = Math.round(Number(w)), height = Math.round(Number(h));
+    if (!/^(image|video)\//.test(type) || !(width >= 1 && width <= 20000 && height >= 1 && height <= 20000)) return { width: null, height: null };
+    return { width, height };
   };
 
   // The file is the raw request body; its name comes in the x-filename header.
@@ -1908,10 +1920,60 @@ export function createApp(opts: AppOptions): Server {
     // Voice messages say how long they are, so the player can show it before loading.
     const voiceSeconds = Number(req.headers['x-voice-seconds']);
     const voice = type.startsWith('audio/') && voiceSeconds > 0 && voiceSeconds <= 3600 ? Math.round(voiceSeconds * 10) / 10 : null;
+    const { width, height } = mediaSize(type, req.headers['x-width'], req.headers['x-height']);
     db.prepare(
-      'INSERT INTO attachments (id, channel_id, uploader_id, name, type, size, created_at, voice_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    ).run(id, channel.id, user.id, name, type, size, now(), voice);
-    send(res, 200, attachmentJson({ id, name, type, size, voice_seconds: voice }));
+      'INSERT INTO attachments (id, channel_id, uploader_id, name, type, size, created_at, voice_seconds, width, height) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(id, channel.id, user.id, name, type, size, now(), voice, width, height);
+    send(res, 200, attachmentJson({ id, name, type, size, voice_seconds: voice, width, height }));
+  };
+
+  const MAX_THUMB_BYTES = 300 * 1024;
+  // A video's thumbnail: a small still the uploader's app took from it, sent before the message.
+  const THUMB_TYPES: Record<string, (b: Buffer) => boolean> = {
+    'image/webp': (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP',
+    'image/jpeg': (b) => b[0] === 0xff && b[1] === 0xd8,
+  };
+  const handleThumbUpload = async (req: IncomingMessage, res: ServerResponse, id: string) => {
+    const user = userByToken(req.headers.authorization?.replace(/^Bearer /, ''));
+    if (!user) throw new HttpError(401, 'Not logged in');
+    if (!opts.uploadDir) throw new HttpError(503, 'Uploads are not set up on this server');
+    const a = db.prepare('SELECT type FROM attachments WHERE id = ? AND uploader_id = ? AND message_id IS NULL').get(id, user.id) as { type: string } | undefined;
+    if (!a) throw new HttpError(404, 'File not found');
+    if (!a.type.startsWith('video/')) throw new HttpError(400, 'Only videos have thumbnails');
+    const tooBig = new HttpError(413, 'That thumbnail is too big');
+    if (Number(req.headers['content-length']) > MAX_THUMB_BYTES) throw tooBig;
+    const chunks: Buffer[] = [];
+    let size = 0;
+    await new Promise<void>((resolve, reject) => {
+      req.on('data', (c: Buffer) => {
+        size += c.length;
+        if (size > MAX_THUMB_BYTES) {
+          req.pause();
+          reject(tooBig);
+        } else chunks.push(c);
+      });
+      req.on('end', resolve);
+      req.on('error', reject);
+    });
+    const data = Buffer.concat(chunks);
+    const kind = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+    if (!THUMB_TYPES[kind]?.(data)) throw new HttpError(400, 'Send the thumbnail as a WebP or JPEG picture');
+    await writeFile(thumbPath(id), data);
+    db.prepare('UPDATE attachments SET thumb = 1 WHERE id = ?').run(id);
+    send(res, 200, { thumb: `/api/attachments/${id}/thumb` });
+  };
+  const serveThumb = async (req: IncomingMessage, res: ServerResponse, id: string) => {
+    const a = db.prepare('SELECT 1 FROM attachments WHERE id = ? AND thumb = 1 AND message_id IS NOT NULL').get(id);
+    const data = a && opts.uploadDir ? await readFile(thumbPath(id)).catch(() => null) : null;
+    if (!data) throw new HttpError(404, 'No thumbnail');
+    res.writeHead(200, {
+      'content-type': THUMB_TYPES['image/webp'](data) ? 'image/webp' : 'image/jpeg',
+      'content-length': data.length,
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; sandbox",
+      'cache-control': 'private, max-age=31536000, immutable',
+    });
+    res.end(req.method === 'HEAD' ? undefined : data);
   };
 
   // Attachment links are unguessable (128 random bits), so images work in <img> tags without a login.
@@ -1921,14 +1983,28 @@ export function createApp(opts: AppOptions): Server {
       | undefined;
     if (!a || !opts.uploadDir || !(await stat(filePath(id)).catch(() => null))) throw new HttpError(404, 'File not found');
     const inline = INLINE_TYPES.has(a.type);
-    res.writeHead(200, {
+    const headers: Record<string, string | number> = {
       'content-type': inline ? a.type : 'application/octet-stream',
-      'content-length': a.size,
       'content-disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(a.name)}`,
       'x-content-type-options': 'nosniff',
       'content-security-policy': "default-src 'none'; sandbox",
       'cache-control': 'private, max-age=31536000, immutable',
-    });
+      'accept-ranges': 'bytes',
+    };
+    // Videos and long voice messages are fetched a piece at a time, so they start (and skip ahead) without downloading it all.
+    const range = String(req.headers.range ?? '').match(/^bytes=(\d*)-(\d*)$/);
+    if (range && (range[1] || range[2])) {
+      let start = range[1] ? Number(range[1]) : Math.max(0, a.size - Number(range[2]));
+      let end = range[1] && range[2] ? Math.min(Number(range[2]), a.size - 1) : a.size - 1;
+      if (start >= a.size || start > end) {
+        res.writeHead(416, { 'content-range': `bytes */${a.size}` });
+        return res.end();
+      }
+      res.writeHead(206, { ...headers, 'content-length': end - start + 1, 'content-range': `bytes ${start}-${end}/${a.size}` });
+      if (req.method === 'HEAD') return res.end();
+      return void createReadStream(filePath(id), { start, end }).pipe(res);
+    }
+    res.writeHead(200, { ...headers, 'content-length': a.size });
     if (req.method === 'HEAD') return res.end();
     createReadStream(filePath(id)).pipe(res);
   };
@@ -2870,9 +2946,10 @@ export function createApp(opts: AppOptions): Server {
         await copyFile(filePath(a.id as string), filePath(copy)).catch(() => {
           throw new HttpError(410, 'One of its files is gone');
         });
+        const thumb = a.thumb ? await copyFile(thumbPath(a.id as string), thumbPath(copy)).then(() => 1, () => 0) : 0;
         db.prepare(
-          'INSERT INTO attachments (id, channel_id, uploader_id, name, type, size, created_at, voice_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        ).run(copy, to.id, user.id, a.name as string, a.type as string, a.size as number, now(), (a.voiceSeconds as number) ?? null);
+          'INSERT INTO attachments (id, channel_id, uploader_id, name, type, size, created_at, voice_seconds, width, height, thumb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        ).run(copy, to.id, user.id, a.name as string, a.type as string, a.size as number, now(), (a.voiceSeconds as number) ?? null, (a.width as number) ?? null, (a.height as number) ?? null, thumb);
         attachmentIds.push(copy);
         if (a.spoiler) spoilerIds.push(copy);
       }
@@ -4438,6 +4515,9 @@ export function createApp(opts: AppOptions): Server {
     try {
       const upload = req.method === 'POST' && url.pathname.match(/^\/api\/channels\/(\d+)\/attachments$/);
       if (upload) return await handleUpload(req, res, Number(upload[1]));
+      const thumb = url.pathname.match(/^\/api\/attachments\/([\w-]+)\/thumb$/);
+      if (thumb && req.method === 'POST') return await handleThumbUpload(req, res, thumb[1]);
+      if (thumb && (req.method === 'GET' || req.method === 'HEAD')) return await serveThumb(req, res, thumb[1]);
       const file = (req.method === 'GET' || req.method === 'HEAD') && url.pathname.match(/^\/api\/attachments\/([\w-]+)(\/|$)/);
       if (file) return await serveAttachment(req, res, file[1]);
       if (req.method === 'POST' && url.pathname === '/api/me/avatar') return await handleAvatarUpload(req, res);
