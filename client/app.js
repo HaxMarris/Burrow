@@ -1163,7 +1163,7 @@ async function selectChannel(id, { around = null, present = false } = {}) {
     saveDraft();
     // Files upload into a specific room, so switching rooms drops any not yet sent.
     if (state.pending.length) {
-      state.pending.forEach((p) => { p.xhr?.abort(); if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
+      state.pending.forEach((p) => { p.xhr?.abort(); p.cancelShrink?.(); if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
       state.pending = [];
       renderPending();
     }
@@ -3046,14 +3046,21 @@ function addFiles(fileList) {
   for (const file of fileList) {
     if (state.pending.length >= 10) { alert('You can attach up to 10 files at a time.'); break; }
     const shrinkable = SHRINKABLE_TYPES.test(file.type);
-    // Photos are checked after shrinking, since most get well under the limit.
-    if (file.size > limit && !shrinkable) {
+    const video = VIDEO_TYPES.test(file.type);
+    // Photos are checked after shrinking, since most get well under the limit. Big videos can be shrunk by hand.
+    if (file.size > limit && !shrinkable && !(video && canShrinkVideo())) {
       alert(`"${file.name}" is too big. Files can be at most ${formatSize(limit)} here.`);
       continue;
     }
     const p = { file, previewUrl: IMAGE_TYPES.test(file.type) ? URL.createObjectURL(file) : null, progress: 0, error: null };
-    p.done = (shrinkable ? shrinkPhoto(file) : Promise.resolve(file)).then((f) => {
+    if (video) {
+      state.pending.push(p);
+      queueVideo(p, channelId, limit);
+      continue;
+    }
+    p.done = (shrinkable ? shrinkPhoto(file) : Promise.resolve(file)).then(async (f) => {
       p.file = f;
+      p.meta = f.dims ?? (p.previewUrl ? await imageSize(p.previewUrl) : null);
       if (!state.pending.includes(p)) throw new Error('Upload cancelled');
       if (f.size > limit) {
         p.error = `Too big (at most ${formatSize(limit)})`;
@@ -3079,6 +3086,8 @@ async function shrinkPhoto(file) {
   let img;
   try { img = await createImageBitmap(file); } catch { return file; }
   const scale = Math.min(1, MAX_PHOTO_SIDE / Math.max(img.width, img.height));
+  // Its size goes up with it, so the chat can keep its space before it loads.
+  file.dims = { width: img.width, height: img.height };
   if (scale === 1 && file.size < 1024 * 1024) return file;
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(img.width * scale);
@@ -3092,7 +3101,176 @@ async function shrinkPhoto(file) {
   if (!blob || blob.size >= file.size) return file;
   const ext = { 'image/webp': 'webp', 'image/jpeg': 'jpg', 'image/png': 'png' }[blob.type];
   const name = (file.name || 'pasted-image').replace(/\.[^.]*$/, '') + '.' + ext;
-  return new File([blob], name, { type: blob.type });
+  const out = new File([blob], name, { type: blob.type });
+  out.dims = { width: canvas.width, height: canvas.height };
+  return out;
+}
+
+/** A picture's size in pixels, or null if it can't be read. */
+function imageSize(url) {
+  const img = new Image();
+  img.src = url;
+  return img.decode().then(() => ({ width: img.naturalWidth, height: img.naturalHeight }), () => null);
+}
+
+// ---- videos: a thumbnail to show before it plays, and shrinking huge clips before they go up
+
+/** Gets a video ready and uploads it, with its thumbnail. `shrink` re-encodes it smaller first. */
+function queueVideo(p, channelId, limit, { shrink = false } = {}) {
+  const run = {};
+  p.run = run;
+  p.error = null;
+  p.progress = 0;
+  const current = () => p.run === run && state.pending.includes(p);
+  p.done = (async () => {
+    if (shrink) {
+      p.shrinking = 0;
+      renderPending();
+      try { p.file = await shrinkVideo(p); } finally { p.shrinking = null; }
+      p.shrunk = true;
+      p.meta = null;
+    }
+    if (!p.meta) {
+      p.meta = await videoStill(p.file);
+      if (p.meta?.thumb && !p.previewUrl) p.previewUrl = URL.createObjectURL(p.meta.thumb);
+    }
+    if (!current()) throw new Error('Upload cancelled');
+    if (p.file.size > limit) {
+      p.error = `Too big (at most ${formatSize(limit)})`;
+      renderPending();
+      throw new Error(`"${p.file.name}" is too big. Files can be at most ${formatSize(limit)} here.`);
+    }
+    renderPending();
+    const att = await uploadFile(channelId, p);
+    if (p.meta?.thumb) {
+      const res = await fetch(`${state.serverUrl}/api/attachments/${att.id}/thumb`, {
+        method: 'POST', headers: { authorization: 'Bearer ' + state.token, 'content-type': p.meta.thumb.type }, body: p.meta.thumb,
+      }).catch(() => null);
+      if (res?.ok) att.thumb = (await res.json()).thumb; // without one it just loads the first frame
+    }
+    return att;
+  })();
+  p.done.catch((err) => { if (p.run === run && err?.message !== 'Upload cancelled' && !p.error) { p.error = err?.message || 'Failed'; renderPending(); } });
+  p.limit = limit;
+  p.channelId = channelId;
+  renderPending();
+}
+
+/** Size, length and a small still from part way in, read on this device. Null if this browser can't play it. */
+async function videoStill(file) {
+  const url = URL.createObjectURL(file);
+  const v = document.createElement('video');
+  v.muted = true;
+  v.playsInline = true;
+  v.preload = 'auto';
+  const wait = (event) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timed out')), 15000);
+    v.addEventListener(event, () => { clearTimeout(timer); resolve(); }, { once: true });
+    v.addEventListener('error', () => { clearTimeout(timer); reject(new Error("can't play")); }, { once: true });
+  });
+  try {
+    const loaded = wait('loadeddata');
+    v.src = url;
+    await loaded;
+    const width = v.videoWidth, height = v.videoHeight, duration = v.duration;
+    if (!width || !height) return null;
+    const seeked = wait('seeked');
+    v.currentTime = Math.min(1, (Number.isFinite(duration) ? duration : 0) / 3);
+    await seeked;
+    const scale = Math.min(1, 640 / Math.max(width, height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(width * scale);
+    canvas.height = Math.round(height * scale);
+    canvas.getContext('2d').drawImage(v, 0, 0, canvas.width, canvas.height);
+    const encode = (type, quality) => new Promise((resolve) => canvas.toBlob(resolve, type, quality));
+    let thumb = await encode('image/webp', 0.75);
+    if (thumb?.type !== 'image/webp') thumb = await encode('image/jpeg', 0.8);
+    return { width, height, duration, thumb: thumb && thumb.size <= 300 * 1024 ? thumb : null };
+  } catch {
+    return null;
+  } finally {
+    v.removeAttribute('src');
+    v.load();
+    URL.revokeObjectURL(url);
+  }
+}
+
+// Shrinking plays the video through once (in real time) and records it again at 720p.
+const SHRINK_OFFER_BYTES = 20 * 1024 * 1024;
+function shrinkType() {
+  if (typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream) return null;
+  return ['video/mp4;codecs=avc1.42E01F,mp4a.40.2', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus']
+    .find((t) => MediaRecorder.isTypeSupported(t)) ?? null;
+}
+function canShrinkVideo() { return !!shrinkType(); }
+
+async function shrinkVideo(p) {
+  const file = p.file;
+  const type = shrinkType();
+  // Made straight away, while the click still lets it play sound.
+  const audio = new AudioContext();
+  const url = URL.createObjectURL(file);
+  const v = document.createElement('video');
+  v.playsInline = true;
+  v.preload = 'auto';
+  let recorder = null, timer = null;
+  try {
+    const loaded = new Promise((resolve, reject) => { v.onloadedmetadata = resolve; v.onerror = () => reject(new Error("This browser can't play that video, so it can't shrink it")); });
+    v.src = url;
+    await loaded;
+    // 720p: the short side at most 720 pixels, both sides even.
+    const scale = Math.min(1, 720 / Math.min(v.videoWidth, v.videoHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(2, Math.round((v.videoWidth * scale) / 2) * 2);
+    canvas.height = Math.max(2, Math.round((v.videoHeight * scale) / 2) * 2);
+    const ctx = canvas.getContext('2d');
+    const stream = canvas.captureStream(30);
+    // The sound goes into the recording only, not out of your speakers.
+    const sound = audio.createMediaStreamDestination();
+    audio.createMediaElementSource(v).connect(sound);
+    for (const t of sound.stream.getAudioTracks()) stream.addTrack(t);
+    recorder = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 2_500_000, audioBitsPerSecond: 128_000 });
+    const chunks = [];
+    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    const stopped = new Promise((resolve) => { recorder.onstop = resolve; });
+    const draw = () => {
+      ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+      p.shrinking = Number.isFinite(v.duration) && v.duration ? v.currentTime / v.duration : 0;
+    };
+    // Drawn on a timer rather than per frame, so it carries on (slower) if you switch tabs.
+    timer = setInterval(() => { draw(); renderPendingSoon(); }, 1000 / 30);
+    draw();
+    recorder.start(1000);
+    await audio.resume();
+    await new Promise((resolve, reject) => {
+      v.onended = resolve;
+      v.onerror = () => reject(new Error('The video stopped playing part way'));
+      p.cancelShrink = () => reject(new Error('Upload cancelled'));
+      v.play().catch(reject);
+    });
+    clearInterval(timer);
+    recorder.stop();
+    await stopped;
+    const blob = new Blob(chunks, { type: type.split(';')[0] });
+    if (!blob.size || blob.size >= file.size) return file;
+    const ext = blob.type === 'video/mp4' ? 'mp4' : 'webm';
+    return new File([blob], (file.name || 'video').replace(/\.[^.]*$/, '') + '.' + ext, { type: blob.type });
+  } finally {
+    clearInterval(timer);
+    if (recorder?.state === 'recording') recorder.stop();
+    p.cancelShrink = null;
+    v.pause();
+    v.removeAttribute('src');
+    v.load();
+    URL.revokeObjectURL(url);
+    audio.close().catch(() => {});
+  }
+}
+
+let pendingFrame = 0;
+function renderPendingSoon() {
+  if (pendingFrame) return;
+  pendingFrame = setTimeout(() => { pendingFrame = 0; renderPending(); }, 250);
 }
 
 function uploadFile(channelId, p) {
@@ -3104,6 +3282,10 @@ function uploadFile(channelId, p) {
     xhr.setRequestHeader('content-type', p.file.type || 'application/octet-stream');
     xhr.setRequestHeader('x-filename', encodeURIComponent(p.file.name || 'pasted-image.png'));
     if (p.voiceSeconds) xhr.setRequestHeader('x-voice-seconds', String(p.voiceSeconds));
+    if (p.meta?.width && p.meta?.height) {
+      xhr.setRequestHeader('x-width', String(p.meta.width));
+      xhr.setRequestHeader('x-height', String(p.meta.height));
+    }
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) { p.progress = e.loaded / e.total; renderPending(); } };
     xhr.onload = () => {
       let data = {};
@@ -3127,9 +3309,23 @@ function renderPending() {
     chip.title = p.error || p.file.name;
     chip.innerHTML = (p.previewUrl ? `<img src="${p.previewUrl}" alt="" />` : `<span class="file-icon">${FILE_ICON}</span>`)
       + `<span class="pending-name">${escapeHtml(p.file.name || 'image')}</span>`
-      + `<span class="pending-meta">${p.error ? 'Failed' : p.progress < 1 ? Math.round(p.progress * 100) + '%' : formatSize(p.file.size)}</span>`
-      + `<span class="bar" style="width:${p.error ? 0 : Math.round(p.progress * 100)}%"></span>`;
-    if (!p.error) {
+      + `<span class="pending-meta">${p.shrinking != null ? `Shrinking ${Math.round(p.shrinking * 100)}%` : p.error ? (p.error.startsWith('Too big') ? 'Too big' : 'Failed') : p.progress < 1 ? Math.round(p.progress * 100) + '%' : formatSize(p.file.size)}</span>`
+      + `<span class="bar" style="width:${p.error ? 0 : Math.round((p.shrinking ?? p.progress) * 100)}%"></span>`;
+    if (p.shrinking != null) chip.title = 'Shrinking plays the video through once, so keep Burrow open until it finishes';
+    // A big video can be shrunk to 720p before it goes up.
+    if (p.run && !p.shrunk && p.shrinking == null && (p.file.size > SHRINK_OFFER_BYTES || p.file.size > p.limit) && canShrinkVideo()) {
+      const sh = document.createElement('button');
+      sh.type = 'button';
+      sh.className = 'pending-shrink';
+      sh.textContent = 'Shrink';
+      sh.title = `Make it smaller (720p) before sending. Takes as long as the video. It's ${formatSize(p.file.size)} now.`;
+      sh.onclick = () => {
+        p.xhr?.abort();
+        queueVideo(p, p.channelId, p.limit, { shrink: true });
+      };
+      chip.append(sh);
+    }
+    if (!p.error && p.shrinking == null) {
       const sp = document.createElement('button');
       sp.type = 'button';
       sp.className = 'pending-spoiler' + (p.spoiler ? ' on' : '');
@@ -3146,6 +3342,7 @@ function renderPending() {
     x.textContent = '×';
     x.onclick = () => {
       p.xhr?.abort();
+      p.cancelShrink?.();
       if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
       state.pending = state.pending.filter((q) => q !== p);
       renderPending();
@@ -3153,6 +3350,14 @@ function renderPending() {
     chip.append(x);
     return chip;
   }));
+}
+
+/** Sizes a picture or video to how it will show, before it loads, when its size is known. */
+function keepSpace(el, a, maxW, maxH) {
+  if (!a.width || !a.height) return;
+  const scale = Math.min(1, maxW / a.width, maxH / a.height);
+  el.style.width = `${Math.max(1, Math.round(a.width * scale))}px`;
+  el.style.aspectRatio = `${a.width} / ${a.height}`;
 }
 
 function renderAttachments(list) {
@@ -3166,7 +3371,10 @@ function renderAttachments(list) {
       el.className = 'att-image';
       el.src = url;
       el.alt = a.name;
+      // Pictures load as they scroll into view, with their space kept so the chat doesn't jump when they arrive.
       el.loading = 'lazy';
+      el.decoding = 'async';
+      keepSpace(el, a, 400, 300);
       el.onload = () => { if (state.reachedEnd && messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 400) messagesEl.scrollTop = messagesEl.scrollHeight; };
       el.onclick = () => openImage(a, url);
     } else if (VIDEO_TYPES.test(a.type)) {
@@ -3174,8 +3382,11 @@ function renderAttachments(list) {
       el.className = 'att-video';
       el.src = url;
       el.controls = true;
-      el.preload = 'metadata';
+      // With a thumbnail, nothing of the video downloads until you press play.
+      if (a.thumb) el.poster = state.serverUrl + a.thumb;
+      el.preload = a.thumb ? 'none' : 'metadata';
       el.playsInline = true;
+      keepSpace(el, a, 480, 320);
     } else if (/^audio\//.test(a.type) && a.voiceSeconds != null) {
       el = voicePlayer(a, url);
     } else if (/^audio\//.test(a.type)) {
