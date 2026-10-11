@@ -53,7 +53,8 @@ export function staticFiles() {
       const ext = file.slice(file.lastIndexOf('.'));
       if (COMPRESSIBLE.has(ext) && raw.length > 1024) {
         [entry.br, entry.gzip] = await Promise.all([
-          brotli(raw, { params: { [constants.BROTLI_PARAM_QUALITY]: 11, [constants.BROTLI_PARAM_SIZE_HINT]: raw.length } }),
+          // Big files (the camera background's WebAssembly) at a quicker setting, so the first download doesn't wait long.
+          brotli(raw, { params: { [constants.BROTLI_PARAM_QUALITY]: raw.length > 2_000_000 ? 9 : 11, [constants.BROTLI_PARAM_SIZE_HINT]: raw.length } }),
           gzipAsync(raw, { level: 9 }),
         ]);
       }

@@ -37,6 +37,10 @@
       "app-audio.js",
       "hotkeys.js",
       "activity.js",
+      "draw-overlay.js",
+      "draw-overlay-preload.js",
+      "draw-overlay.html",
+      "draw-overlay-page.js",
       "app/**/*"
     ],
     "win": {

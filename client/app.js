@@ -583,7 +583,7 @@ function notify(m) {
   if (!mentioned && !document.hidden) return;
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   const title = isDm(server) ? (server.group ? `${m.author} in ${dmTitle(server)}` : `${m.author} (direct message)`) : `${m.author} in ${channel?.name ?? 'Burrow'}`;
-  const body = plainText(m.content).slice(0, 200) || (m.poll ? `Poll: ${m.poll.question}` : m.sticker ? 'Sent a sticker' : 'Sent a file');
+  const body = plainText(m.content).slice(0, 200) || (m.poll ? `Poll: ${m.poll.question}` : m.live ? 'Is live, sharing their screen' : m.sticker ? 'Sent a sticker' : 'Sent a file');
   const n = new Notification(title, { body, silent: !mentioned });
   n.onclick = () => { window.focus(); jumpTo(m.channelId, m.id); };
 }
@@ -973,7 +973,10 @@ function renderChannels() {
       else if (state.mutedInVoice.has(id) || c.voiceMuted?.includes(id)) row.insertAdjacentHTML('beforeend', MUTED_ICON);
       const sharing = joined ? state.sharing.get(id) : null;
       if (sharing?.camera) row.insertAdjacentHTML('beforeend', `<span class="cam-tag" title="Camera on">${CAMERA_ICON}</span>`);
-      if (sharing?.screen) row.insertAdjacentHTML('beforeend', '<span class="live-tag" title="Sharing their screen">LIVE</span>');
+      if (sharing?.screen) {
+        row.insertAdjacentHTML('beforeend', '<span class="live-tag">LIVE</span>');
+        attachPeek(row.lastChild, id);
+      }
       if (id !== state.me.id) {
         const v = volumeFor(id);
         if (v !== 1) row.insertAdjacentHTML('beforeend', `<span class="volume-tag">${Math.round(v * 100)}%</span>`);
@@ -1315,6 +1318,7 @@ function renderLine(m) {
   el.append(content);
   if (m.sticker) el.append(renderSticker(m.sticker));
   if (m.poll) el.append(renderPoll(m));
+  if (m.live) el.append(renderLiveCard(m));
   if (m.attachments?.length) el.append(renderAttachments(m.attachments));
   if (m.embeds?.length) el.append(renderEmbeds(m));
   if (m.thread) el.append(renderThreadChip(m.thread));
@@ -1327,7 +1331,7 @@ function renderLine(m) {
   const replyBtn = iconButton('', 'Reply', () => setReply(m));
   replyBtn.innerHTML = REPLY_ICON;
   actions.append(reactBtn, replyBtn);
-  if (m.authorId === state.me.id && !m.poll && !m.forwarded) actions.append(iconButton('Edit', 'Edit message', () => startEdit(m, content)));
+  if (m.authorId === state.me.id && !m.poll && !m.forwarded && !m.live) actions.append(iconButton('Edit', 'Edit message', () => startEdit(m, content)));
   const more = iconButton('', 'More', (e) => openMessageMenu(e.currentTarget, m));
   more.innerHTML = MORE_ICON;
   more.setAttribute('aria-haspopup', 'menu');
@@ -2740,9 +2744,22 @@ async function joinVoice(channelId, { muted = false, deafened = false } = {}) {
         renderStage();
       })
       .on(LK.RoomEvent.TrackUnpublished, renderStage)
-      .on(LK.RoomEvent.LocalTrackPublished, renderStage)
+      .on(LK.RoomEvent.LocalTrackPublished, (pub) => {
+        if (pub.source === LK.Track.Source.ScreenShare) {
+          state.ws?.send(JSON.stringify({ type: 'voice_live', live: true }));
+          startThumbs(voice);
+        }
+        renderStage();
+      })
       .on(LK.RoomEvent.LocalTrackUnpublished, (pub) => {
-        if (pub.source === LK.Track.Source.ScreenShare) stopAppAudio(voice);
+        if (pub.source === LK.Track.Source.ScreenShare) {
+          stopAppAudio(voice);
+          stopThumbs(voice);
+          if (state.voice === voice) state.ws?.send(JSON.stringify({ type: 'voice_live', live: false }));
+          strokes.delete(state.me.id);
+          window.burrowDesktop?.drawOverlay?.(null);
+          sendRoomData(voice, { t: 'thumb', img: null });
+        }
         renderStage();
         renderVoiceBar();
       })
@@ -2762,8 +2779,14 @@ async function joinVoice(channelId, { muted = false, deafened = false } = {}) {
       .on(LK.RoomEvent.Reconnecting, () => renderVoiceBar('Reconnecting…'))
       .on(LK.RoomEvent.Reconnected, () => renderVoiceBar())
       .on(LK.RoomEvent.Disconnected, () => { if (state.voice === voice) leaveVoice(); })
-      .on(LK.RoomEvent.DataReceived, (payload, participant, kind, topic) => onCryptoMessage(voice, payload, participant, topic))
-      .on(LK.RoomEvent.ParticipantDisconnected, (p) => { vc.pubs.delete(p.identity); keysChanged(voice); renderStage(); })
+      .on(LK.RoomEvent.DataReceived, (payload, participant, kind, topic) => (topic === ROOM_TOPIC ? onRoomData(voice, payload, participant) : onCryptoMessage(voice, payload, participant, topic)))
+      .on(LK.RoomEvent.ParticipantDisconnected, (p) => {
+        vc.pubs.delete(p.identity);
+        watchersOf(voice).delete(Number(p.identity));
+        thumbsOf(voice).delete(Number(p.identity));
+        keysChanged(voice);
+        renderStage();
+      })
       .on(LK.RoomEvent.EncryptionError, (err) => console.warn('Voice encryption:', err?.message ?? err));
     await room.connect(url || state.serverUrl.replace(/^http/, 'ws'), token);
     await room.setE2EEEnabled(true);
@@ -2836,6 +2859,12 @@ function leaveVoice(quiet) {
   stopListen();
   pttHeld = false;
   stopAppAudio(voice);
+  stopThumbs(voice);
+  strokes.clear();
+  drawingOn.clear();
+  restoreStreamChat();
+  hidePeek();
+  window.burrowDesktop?.drawOverlay?.(null);
   voice.room?.disconnect();
   clearTimeout(voice.crypto?.retry);
   clearTimeout(voice.crypto?.grace);
@@ -2950,20 +2979,21 @@ $('#voice-deafen').onclick = toggleDeafen;
 $('#voice-settings').onclick = openVoiceSettings;
 $('#voice-leave').onclick = () => leaveVoice();
 $('#voice-camera').onclick = toggleCamera;
-$('#voice-screen').onclick = toggleScreen;
+$('#voice-screen').onclick = chooseShare;
 $('#voice-watch').onclick = () => (state.stageOpen ? closeStage() : goToVoice());
 $('#stage-close').onclick = () => closeStage();
 $('#fire-back').onclick = () => { closeStage(); showView('rooms'); };
 $('#fire-mute').onclick = toggleMute;
 $('#fire-deafen').onclick = toggleDeafen;
 $('#fire-camera').onclick = toggleCamera;
-$('#fire-screen').onclick = toggleScreen;
+$('#fire-screen').onclick = chooseShare;
 $('#fire-settings').onclick = openVoiceSettings;
 $('#fire-settings').innerHTML = $('#voice-settings').innerHTML;
 $('#fire-leave').onclick = () => leaveVoice();
 $('#fire-leave').innerHTML = $('#voice-leave').innerHTML;
 $('#stage-video').onclick = () => openVideo(null);
-$('#video-back').onclick = () => { state.stageShow = 'fire'; focusKey = null; renderStage(); };
+$('#video-back').onclick = () => { state.stageShow = 'fire'; focusKey = null; sideBySide = false; renderStage(); };
+$('#video-layout').onclick = () => { sideBySide = !sideBySide; focusKey = null; renderStage(); };
 // Phones and tablets can't share their screen from a browser.
 if (!navigator.mediaDevices?.getDisplayMedia && !window.burrowDesktop) $('#fire-screen').parentElement.classList.add('hidden');
 
@@ -2978,6 +3008,8 @@ const FULLSCREEN_ICON = '<svg viewBox="0 0 24 24" class="enter"><path d="M4 4h6v
 const EXIT_FULLSCREEN_ICON = '<svg viewBox="0 0 24 24" class="exit"><path d="M8 4h2v6H4V8h4V4Zm6 0h2v4h4v2h-6V4ZM4 14h6v6H8v-4H4v-2Zm10 0h6v2h-4v4h-2v-6Z"/></svg>';
 const tiles = new Map(); // "identity:camera" or "identity:screen" -> { el, track, video }
 let focusKey = null;     // the tile shown big, if any
+let sideBySide = false;  // every shared screen shown big, next to each other
+let poppedKey = null;    // the tile playing in its own picture-in-picture window
 
 function nameOf(userId, fallback = '?') {
   for (const s of state.servers.values()) {
@@ -2998,7 +3030,10 @@ async function toggleCamera() {
   const lp = state.voice?.room?.localParticipant;
   if (!lp) return;
   try {
-    await lp.setCameraEnabled(!lp.isCameraEnabled, { resolution: window.LivekitClient.VideoPresets.h720.resolution });
+    const on = !lp.isCameraEnabled;
+    const background = on && cameraBackground() !== 'off';
+    if (background) await loadSegmenter().catch(() => {}); // so the first frame sent is already changed
+    await lp.setCameraEnabled(on, { resolution: window.LivekitClient.VideoPresets.h720.resolution, ...(background ? { processor: backgroundProcessor() } : {}) });
     if (lp.isCameraEnabled && !state.stageOpen) goToVoice(); // so you can see yourself
   } catch (err) {
     alert(mediaError(err, 'camera'));
@@ -3030,7 +3065,8 @@ async function applyShareMode(lp) {
   await sender.setParameters(params);
 }
 
-async function toggleScreen() {
+/** Starts or stops sharing. On the web, `surface` says whether a tab or a screen was asked for. */
+async function toggleScreen(surface) {
   const voice = state.voice;
   const lp = voice?.room?.localParticipant;
   if (!lp) return;
@@ -3045,11 +3081,22 @@ async function toggleScreen() {
     // Captured at up to 60 fps either way, so the mode can still change in the desktop picker.
     await lp.setScreenShareEnabled(
       starting,
-      { audio: !appAudio, systemAudio: 'include', selfBrowserSurface: 'exclude', contentHint: mode.hint, resolution: { width: 1920, height: 1080, frameRate: 60 } },
+      {
+        audio: !appAudio, systemAudio: 'include', selfBrowserSurface: 'exclude', surfaceSwitching: 'include', contentHint: mode.hint,
+        resolution: { width: 1920, height: 1080, frameRate: 60 }, ...(typeof surface === 'string' ? { video: { displaySurface: surface } } : {}),
+      },
       // One full-size copy only: a second, smaller one would cost the sharer frames.
       { screenShareEncoding: mode.encoding, degradationPreference: mode.degradation, simulcast: false },
     );
     if (starting && shareMode !== modeName) await applyShareMode(lp).catch((err) => console.warn('Share mode:', err));
+    // The browser asks whether to share the sound too; say so if it isn't.
+    const LK = window.LivekitClient;
+    if (starting && !window.burrowDesktop && lp.isScreenShareEnabled && !lp.getTrackPublication(LK.Track.Source.ScreenShareAudio)) {
+      const settings = lp.getTrackPublication(LK.Track.Source.ScreenShare)?.track?.mediaStreamTrack.getSettings() ?? {};
+      toast(settings.displaySurface === 'browser'
+        ? 'The tab is shared without its sound. To share it, share again and leave "Also share tab audio" on.'
+        : 'Your screen is shared without sound. To share sound, share a browser tab instead, or on Windows tick "Also share system audio".', { timeout: 9000 });
+    }
     if (starting && audioContext && lp.isScreenShareEnabled) {
       await startAppAudio(voice, audioContext).catch((err) => {
         console.warn('Program audio:', err);
@@ -3181,10 +3228,18 @@ function renderStage() {
     state.sharing = sharing;
     renderChannels();
   }
+  // Joined from a go-live post: open their screen as soon as it arrives.
+  if (state.watchOnJoin && sharing.get(state.watchOnJoin)?.screen) {
+    const id = state.watchOnJoin;
+    state.watchOnJoin = null;
+    setTimeout(() => openVideo(`${id}:screen`));
+  }
 
   // Off the video grid, let go of its video so none of it is downloaded. (The fire shows cameras itself.)
   const wanted = [];
-  if (state.stageOpen && state.stageShow === 'video' && room) {
+  const onVideo = state.stageOpen && state.stageShow === 'video';
+  const popped = poppedOutKey();
+  if ((onVideo || popped) && room) {
     const ch = [...state.servers.values()].flatMap((s) => s.channels).find((c) => c.id === state.voice.channelId);
     $('#video-title').textContent = ch?.name ?? 'Voice';
     for (const p of people) {
@@ -3196,46 +3251,69 @@ function renderStage() {
       const camera = showing(p, LK.Track.Source.Camera);
       wanted.push({ key: `${id}:camera`, id, track: camera?.track ?? null, label: me ? `${name} (you)` : name, kind: 'camera', mirror: me, name });
     }
+    // Back in the chat, only a stream that's popped out keeps playing.
+    if (!onVideo) wanted.splice(0, wanted.length, ...wanted.filter((w) => w.key === popped));
   }
   if (focusKey && !wanted.some((w) => w.key === focusKey)) focusKey = null;
+  const screens = wanted.filter((w) => w.kind === 'screen');
+  if (screens.length < 2) sideBySide = false;
+  $('#video-layout').classList.toggle('hidden', screens.length < 2);
+  $('#video-layout').textContent = sideBySide ? 'Back to the grid' : 'Screens side by side';
+  const isFocus = (w) => (sideBySide ? w.kind === 'screen' : focusKey === w.key);
 
   for (const [key, t] of tiles) {
     if (wanted.some((w) => w.key === key)) continue;
+    if (t.media && document.pictureInPictureElement === t.media) document.exitPictureInPicture().catch(() => {});
     if (t.track && t.media) t.track.detach(t.media);
+    if (t.el.contains($('#fire-chat'))) restoreStreamChat();
+    stopClips(key);
     tiles.delete(key);
   }
   for (const w of wanted) {
     let t = tiles.get(w.key);
     if (!t) {
       const el = document.createElement('div');
-      el.onclick = () => {
-        if (document.fullscreenElement) return;
-        focusKey = focusKey === w.key ? null : w.key;
+      el.onclick = (e) => {
+        if (document.fullscreenElement || e.target.closest('.fire-chat, .vtile-tools, .stream-audio') || el.classList.contains('drawing')) return;
+        if (sideBySide) { sideBySide = false; focusKey = w.key; }
+        else focusKey = focusKey === w.key ? null : w.key;
         renderStage();
       };
       const label = document.createElement('div');
       label.className = 'vtile-name';
+      const tools = document.createElement('div');
+      tools.className = 'vtile-tools';
       const full = document.createElement('button');
       full.type = 'button';
       full.className = 'vtile-full';
       full.title = 'Full screen';
       full.innerHTML = FULLSCREEN_ICON + EXIT_FULLSCREEN_ICON;
-      el.append(label, full);
-      t = { el, label, track: undefined, media: null, audio: null };
+      t = { key: w.key, id: w.id, kind: w.kind, el, label, tools, track: undefined, media: null, audio: null };
+      tools.append(...streamTools(t), full);
+      el.append(label, tools);
+      if (w.kind === 'screen') {
+        t.viewers = document.createElement('div');
+        t.viewers.className = 'vtile-viewers hidden';
+        t.draw = drawCanvas(t);
+        el.append(t.viewers, t.draw);
+      }
       full.onclick = (e) => { e.stopPropagation(); toggleFullscreen(t); };
-      el.ondblclick = () => toggleFullscreen(t);
+      el.ondblclick = (e) => { if (!e.target.closest('.fire-chat, .vtile-tools') && !el.classList.contains('drawing')) toggleFullscreen(t); };
       tiles.set(w.key, t);
     }
     if (t.track !== w.track) {
+      stopClips(w.key);
       if (t.track && t.media) t.track.detach(t.media);
       t.media?.remove();
       if (w.track) {
         t.media = w.track.attach();
         t.media.muted = true; // sound comes through the voice mix
         // Size the enlarged tile to the video, so there are no black bars around it.
-        const fit = () => { if (t.media.videoWidth) t.el.style.setProperty('--ar', t.media.videoWidth / t.media.videoHeight); };
+        const fit = () => { if (t.media.videoWidth) t.el.style.setProperty('--ar', t.media.videoWidth / t.media.videoHeight); paintStrokes(t); };
         t.media.addEventListener('resize', fit);
         t.media.addEventListener('loadedmetadata', fit);
+        t.media.addEventListener('enterpictureinpicture', () => { poppedKey = t.key; renderStage(); });
+        t.media.addEventListener('leavepictureinpicture', () => { if (poppedKey === t.key) poppedKey = null; renderStage(); });
       } else {
         t.media = document.createElement('span');
         t.media.className = 'avatar lg';
@@ -3251,8 +3329,12 @@ function renderStage() {
     t.el.className = 'vtile ' + w.kind
       + (w.mirror && w.track ? ' mirror' : '')
       + (w.kind === 'camera' && state.speaking.has(w.id) ? ' speaking' : '')
-      + (focusKey === w.key ? ' focus' : '');
+      + (isFocus(w) ? ' focus' : '')
+      + (drawingOn.has(w.key) ? ' drawing' : '')
+      + (t.el.contains($('#fire-chat')) ? ' chatting' : '');
     t.el.classList.toggle('no-video', !w.track);
+    if (t.viewers) renderViewers(t);
+    updateStreamTools(t);
     t.el.title = focusKey === w.key ? 'Click to shrink, double-click for full screen' : 'Click to make bigger, double-click for full screen';
   }
   const order = wanted.map((w) => tiles.get(w.key).el);
@@ -3268,8 +3350,583 @@ function renderStage() {
     grid.replaceChildren(...next);
   }
   grid.classList.toggle('focused', !!focused);
+  grid.classList.toggle('side-by-side', sideBySide);
+  grid.classList.toggle('many', screens.length > 2);
   $('#stage-grid').classList.toggle('solo', !!focused && order.length === 1);
+  // The chat over a stream stays only while that stream is big or full screen.
+  const chatTile = [...tiles.values()].find((t) => t.el.contains($('#fire-chat')));
+  if (chatTile && !chatTile.el.classList.contains('focus') && document.fullscreenElement !== chatTile.el) restoreStreamChat();
+  reportWatching();
   renderFire();
+}
+
+// ---------------------------------------------------------------- watching streams
+//
+// Extras around the video grid: popping a stream out, the fireside chat over a stream, who's
+// watching, a preview of a screen before you open it, drawing on a shared screen and clips.
+// What the people at a fire tell each other for these goes through the voice server sealed with
+// the room key, like the voice itself, so the server can't see it.
+
+const PIP_ICON = '<svg viewBox="0 0 24 24"><path d="M3 5h18a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Zm1 2v10h16V7H4Zm8 4h7v5h-7v-5Z"/></svg>';
+const PEN_ICON = '<svg viewBox="0 0 24 24"><path d="m14.1 5.1 4.8 4.8L8.8 20H4v-4.8L14.1 5.1Zm1.4-1.4 1.8-1.8a1.5 1.5 0 0 1 2.1 0l2.7 2.7a1.5 1.5 0 0 1 0 2.1l-1.8 1.8-4.8-4.8Z"/></svg>';
+const CLIP_ICON = '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18Zm0 2a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm-1 3h2v4.4l3.2 1.9-1 1.7L11 13.6V8Z"/></svg>';
+const EYE_ICON = '<svg viewBox="0 0 24 24"><path d="M12 5c5 0 8.7 3.6 10 7-1.3 3.4-5 7-10 7S3.3 15.4 2 12c1.3-3.4 5-7 10-7Zm0 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z"/></svg>';
+
+const poppedOutKey = () => (poppedKey && document.pictureInPictureElement && tiles.get(poppedKey)?.media === document.pictureInPictureElement ? poppedKey : null);
+
+/** The extra buttons in a video tile's corner. */
+function streamTools(t) {
+  const button = (cls, title, icon, run) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'vtile-tool ' + cls;
+    b.title = title;
+    b.setAttribute('aria-label', title);
+    b.innerHTML = icon;
+    b.onclick = (e) => { e.stopPropagation(); run(); };
+    return b;
+  };
+  const out = [];
+  if (t.kind === 'screen') out.push(button('tool-draw', 'Draw on this screen', PEN_ICON, () => toggleDrawing(t)));
+  if (t.kind === 'screen' && t.id !== state.me.id && window.MediaRecorder) out.push(button('tool-clip', 'Keep clips of this stream', CLIP_ICON, () => (clips.has(t.key) ? saveClip(t) : startClips(t))));
+  out.push(button('tool-chat', 'Fireside chat over the video', CHAT_ICON, () => toggleStreamChat(t)));
+  if (document.pictureInPictureEnabled) out.push(button('tool-pip', 'Pop out, to keep watching while you chat', PIP_ICON, () => popOut(t)));
+  return out;
+}
+function updateStreamTools(t) {
+  t.tools.querySelector('.tool-draw')?.classList.toggle('on', drawingOn.has(t.key));
+  const clip = t.tools.querySelector('.tool-clip');
+  if (clip) {
+    const on = clips.has(t.key);
+    clip.classList.toggle('on', on);
+    clip.classList.toggle('hidden', !state.maxUploadBytes);
+    clip.title = on ? `Save the last ${CLIP_SECONDS} seconds` : 'Keep clips of this stream';
+  }
+  t.tools.querySelector('.tool-chat')?.classList.toggle('on', t.el.contains($('#fire-chat')));
+  const pip = t.tools.querySelector('.tool-pip');
+  if (pip) {
+    pip.classList.toggle('on', poppedOutKey() === t.key);
+    pip.title = poppedOutKey() === t.key ? 'Put it back' : 'Pop out, to keep watching while you chat';
+  }
+}
+
+// ---- pop out: the browser's own picture-in-picture window, which stays on top while you chat
+
+async function popOut(t) {
+  try {
+    if (poppedOutKey() === t.key) return await document.exitPictureInPicture();
+    if (t.media?.requestPictureInPicture) await t.media.requestPictureInPicture();
+  } catch (err) {
+    toast(`Couldn't pop it out: ${err.message}`);
+  }
+}
+
+// ---- the fireside chat over a stream, so you can read and write while it fills the screen
+
+let chatHome = null; // where the fireside chat usually sits
+function toggleStreamChat(t) {
+  const chat = $('#fire-chat');
+  if (t.el.contains(chat)) return restoreStreamChat(), renderStage();
+  chatHome ??= { parent: chat.parentNode, next: chat.nextSibling };
+  if (!t.el.classList.contains('focus') && document.fullscreenElement !== t.el) { focusKey = t.key; sideBySide = false; }
+  chat.classList.add('overlay');
+  t.el.append(chat);
+  renderStage();
+  renderFireside();
+  $('#fire-chat-list').scrollTop = $('#fire-chat-list').scrollHeight;
+  $('#fire-chat-input').focus();
+}
+function restoreStreamChat() {
+  const chat = $('#fire-chat');
+  if (!chat.classList.contains('overlay') || !chatHome) return;
+  chat.classList.remove('overlay');
+  chatHome.parent.insertBefore(chat, chatHome.next);
+  for (const t of tiles.values()) { t.el.classList.remove('chatting'); updateStreamTools(t); }
+  renderFireside();
+}
+
+// ---- messages sealed with the room key
+
+const ROOM_TOPIC = 'burrow-room';
+/** Keeps a room key the voice uses, so messages can be sealed with it too. */
+function rememberRoomKey(vc, index, raw) {
+  vc.raws ??= new Map();
+  vc.aes ??= new Map();
+  vc.raws.set(index, raw);
+  vc.aes.delete(index);
+}
+async function roomAesKey(vc, index) {
+  let key = vc.aes?.get(index);
+  if (!key) {
+    const raw = vc.raws?.get(index);
+    if (!raw) return null;
+    key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+    vc.aes.set(index, key);
+  }
+  return key;
+}
+/** Sends something to everyone at the fire. False if it couldn't go (nobody else, or no key yet). */
+async function sendRoomData(voice, message) {
+  const vc = voice?.crypto, room = voice?.room;
+  if (!vc || !room || vc.index < 0 || !room.remoteParticipants.size) return false;
+  const index = vc.index;
+  const key = await roomAesKey(vc, index);
+  if (!key) return false;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(message))));
+  const packet = new Uint8Array(13 + sealed.length);
+  packet[0] = index;
+  packet.set(iv, 1);
+  packet.set(sealed, 13);
+  try {
+    await room.localParticipant.publishData(packet, { reliable: true, topic: ROOM_TOPIC });
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function onRoomData(voice, payload, participant) {
+  if (state.voice !== voice || !participant || payload.length < 14) return;
+  const key = await roomAesKey(voice.crypto, payload[0]);
+  if (!key) return;
+  let msg;
+  try {
+    const opened = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: payload.slice(1, 13) }, key, payload.slice(13));
+    msg = JSON.parse(new TextDecoder().decode(opened));
+  } catch { return; }
+  const from = Number(participant.identity);
+  if (msg.t === 'watch' && Array.isArray(msg.ids)) {
+    watchersOf(voice).set(from, new Set(msg.ids.map(Number)));
+    renderStage();
+  } else if (msg.t === 'thumb') {
+    if (typeof msg.img === 'string' && msg.img.startsWith('data:image/jpeg;base64,') && msg.img.length < 20000) thumbsOf(voice).set(from, msg.img);
+    else thumbsOf(voice).delete(from);
+    refreshPeek(from);
+  } else if (msg.t === 'draw') onDrawData(from, msg);
+}
+/** A new room key: tell everyone (newcomers too) what we're watching and showing. */
+function roomKeyReady(voice) {
+  voice.watchSent = null;
+  reportWatching();
+  if (voice.thumbTimer) sendThumb(voice);
+}
+const watchersOf = (voice) => (voice.watching ??= new Map()); // who -> ids of the screens they're watching
+const thumbsOf = (voice) => (voice.thumbs ??= new Map());     // who -> a small picture of their screen
+
+// ---- who's watching
+
+/** Tells the others whose screens we have open. */
+async function reportWatching() {
+  const voice = state.voice;
+  if (!voice?.room) return;
+  const ids = [...tiles.values()].filter((t) => t.kind === 'screen' && t.track && t.id !== state.me.id).map((t) => t.id).sort((a, b) => a - b);
+  const key = ids.join(',');
+  if (key === voice.watchSent) return;
+  voice.watchSent = key;
+  if (!(await sendRoomData(voice, { t: 'watch', ids })) && voice.watchSent === key) voice.watchSent = null;
+}
+/** Everyone watching someone's screen, ourselves included. */
+function viewersOf(id) {
+  const voice = state.voice;
+  if (!voice) return [];
+  const here = new Set([...(voice.room?.remoteParticipants.keys() ?? [])].map(Number));
+  const ids = [...watchersOf(voice)].filter(([who, set]) => here.has(who) && set.has(id)).map(([who]) => who);
+  if (id !== state.me.id && [...tiles.values()].some((t) => t.kind === 'screen' && t.id === id && t.track)) ids.push(state.me.id);
+  return ids;
+}
+function renderViewers(t) {
+  const ids = viewersOf(t.id);
+  t.viewers.classList.toggle('hidden', !ids.length);
+  t.viewers.innerHTML = `${EYE_ICON}<span>${ids.length}</span>`;
+  t.viewers.title = `Watching: ${ids.map((id) => (id === state.me.id ? 'you' : nameOf(id))).join(', ')}`;
+}
+
+// ---- a preview of someone's screen, before you open it
+
+const THUMB_MS = 15_000;
+function startThumbs(voice) {
+  stopThumbs(voice);
+  voice.thumbTimer = setInterval(() => sendThumb(voice), THUMB_MS);
+  setTimeout(() => sendThumb(voice), 1500);
+}
+function stopThumbs(voice) {
+  if (!voice) return;
+  clearInterval(voice.thumbTimer);
+  voice.thumbTimer = null;
+  voice.myThumb = null;
+  if (voice.thumbVideo) voice.thumbVideo.srcObject = null;
+  voice.thumbVideo = null;
+}
+async function sendThumb(voice) {
+  const LK = window.LivekitClient;
+  const track = voice.room?.localParticipant.getTrackPublication(LK.Track.Source.ScreenShare)?.track?.mediaStreamTrack;
+  if (!track || state.voice !== voice) return;
+  const video = (voice.thumbVideo ??= Object.assign(document.createElement('video'), { muted: true, playsInline: true }));
+  if (video.srcObject?.getVideoTracks()[0] !== track) {
+    video.srcObject = new MediaStream([track]);
+    await video.play().catch(() => {});
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  if (!video.videoWidth) return;
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = Math.round((256 * video.videoHeight) / video.videoWidth);
+  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+  // Small enough for one message.
+  for (const quality of [0.6, 0.45, 0.3]) {
+    const img = canvas.toDataURL('image/jpeg', quality);
+    if (img.length > 12_000) continue;
+    voice.myThumb = img;
+    refreshPeek(state.me.id);
+    return sendRoomData(voice, { t: 'thumb', img });
+  }
+}
+/** Shows the preview while the pointer is over something about someone's shared screen. */
+function attachPeek(el, id) {
+  el.addEventListener('mouseenter', () => showPeek(el, id));
+  el.addEventListener('mouseleave', hidePeek);
+  el.addEventListener('click', hidePeek);
+}
+function peekImage(id) {
+  const voice = state.voice;
+  return id === state.me.id ? voice?.myThumb : voice && thumbsOf(voice).get(id);
+}
+function showPeek(anchor, id) {
+  hidePeek();
+  if (!state.sharing.get(id)?.screen) return;
+  const peek = document.createElement('div');
+  peek.id = 'stream-peek';
+  peek.className = 'stream-peek';
+  peek.dataset.id = id;
+  document.body.append(peek);
+  fillPeek(peek, id);
+  const r = anchor.getBoundingClientRect();
+  const w = 260;
+  peek.style.left = `${Math.max(8, Math.min(innerWidth - w - 8, r.left + r.width / 2 - w / 2))}px`;
+  const above = r.top - peek.offsetHeight - 8;
+  peek.style.top = `${above > 8 ? above : r.bottom + 8}px`;
+}
+function fillPeek(peek, id) {
+  const img = peekImage(id);
+  const name = id === state.me.id ? 'Your screen' : `${nameOf(id)}'s screen`;
+  peek.innerHTML = (img ? `<img src="${img}" alt="" />` : '<div class="peek-wait">The preview shows up in a moment</div>')
+    + `<span>${escapeHtml(name)}${viewersOf(id).length ? ` · ${viewersOf(id).length} watching` : ''}</span>`;
+}
+function refreshPeek(id) {
+  const peek = $('#stream-peek');
+  if (peek && Number(peek.dataset.id) === id) fillPeek(peek, id);
+}
+function hidePeek() { $('#stream-peek')?.remove(); }
+
+// ---- drawing on a shared screen: everyone watching sees it, and the sharer too
+
+const drawingOn = new Set(); // tiles you're drawing on
+const strokes = new Map();   // whose screen -> its strokes [{ id, from, color, pts: [[x, y], ...], endedAt }]
+const DRAW_FADE_MS = 3000;
+const DRAW_COLORS = ['#ff5a4e', '#ffd23f', '#3ddc84', '#4fb3ff', '#c77dff', '#ff8fd0', '#ff9f43'];
+const drawColor = (userId) => DRAW_COLORS[Math.abs(userId) % DRAW_COLORS.length];
+
+function toggleDrawing(t) {
+  if (drawingOn.has(t.key)) drawingOn.delete(t.key);
+  else {
+    drawingOn.add(t.key);
+    if (!t.el.classList.contains('focus') && document.fullscreenElement !== t.el) { focusKey = t.key; sideBySide = false; }
+    if (!store.get('drewBefore')) toast('Draw with your mouse or finger. It fades after a few seconds. Press the pen again to stop.');
+    store.set('drewBefore', '1');
+  }
+  renderStage();
+}
+/** Where the picture sits inside a tile (the video keeps its shape, so there can be bars around it). */
+function videoBox(t) {
+  const r = t.el.getBoundingClientRect();
+  const vw = t.media?.videoWidth, vh = t.media?.videoHeight;
+  if (!vw || !vh) return { x: 0, y: 0, w: r.width, h: r.height, r };
+  const scale = Math.min(r.width / vw, r.height / vh);
+  const w = vw * scale, h = vh * scale;
+  return { x: (r.width - w) / 2, y: (r.height - h) / 2, w, h, r };
+}
+function drawCanvas(t) {
+  const canvas = document.createElement('canvas');
+  canvas.className = 'vtile-draw';
+  let stroke = null, timer = null;
+  const at = (e) => {
+    const b = videoBox(t);
+    const clamp = (n) => Math.round(Math.min(1, Math.max(0, n)) * 10000) / 10000;
+    return [clamp((e.clientX - b.r.left - b.x) / b.w), clamp((e.clientY - b.r.top - b.y) / b.h)];
+  };
+  const flush = (s) => {
+    clearTimeout(timer);
+    timer = null;
+    const pts = s.pts.slice(s.sent);
+    s.sent = s.pts.length;
+    if (pts.length || s.endedAt) sendRoomData(state.voice, { t: 'draw', on: t.id, id: s.id, pts, done: !!s.endedAt });
+    if (t.id === state.me.id) mirrorStrokes();
+  };
+  canvas.onpointerdown = (e) => {
+    if (!drawingOn.has(t.key)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    canvas.setPointerCapture(e.pointerId);
+    stroke = { id: `${state.me.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, from: state.me.id, color: drawColor(state.me.id), pts: [at(e)], sent: 0, endedAt: null };
+    addStroke(t.id, stroke);
+    flush(stroke);
+  };
+  canvas.onpointermove = (e) => {
+    if (!stroke) return;
+    stroke.pts.push(at(e));
+    if (stroke.pts.length > 4000) return end();
+    paintStrokes(t);
+    timer ??= setTimeout(() => stroke && flush(stroke), 50);
+  };
+  const end = () => {
+    if (!stroke) return;
+    stroke.endedAt = Date.now();
+    flush(stroke);
+    stroke = null;
+    animateStrokes();
+  };
+  canvas.onpointerup = end;
+  canvas.onpointercancel = end;
+  canvas.onclick = (e) => { if (drawingOn.has(t.key)) e.stopPropagation(); };
+  return canvas;
+}
+function addStroke(on, stroke) {
+  const list = strokes.get(on) ?? [];
+  list.push(stroke);
+  if (list.length > 200) list.shift();
+  strokes.set(on, list);
+  animateStrokes();
+}
+function onDrawData(from, msg) {
+  const on = Number(msg.on);
+  if (!state.sharing.get(on)?.screen || typeof msg.id !== 'string' || !msg.id.startsWith(`${from}-`) || !Array.isArray(msg.pts)) return;
+  let s = strokes.get(on)?.find((x) => x.id === msg.id);
+  if (!s) addStroke(on, (s = { id: msg.id, from, color: drawColor(from), pts: [], endedAt: null }));
+  for (const p of msg.pts.slice(0, 500)) {
+    if (Array.isArray(p) && p.length === 2 && p.every((n) => typeof n === 'number' && n >= 0 && n <= 1) && s.pts.length < 4000) s.pts.push(p);
+  }
+  if (msg.done) s.endedAt = Date.now();
+  animateStrokes();
+  if (on === state.me.id) mirrorStrokes();
+}
+/** How visible a stroke still is: fully, then fading out over its last second. */
+const strokeAlpha = (s, now) => (s.endedAt ? Math.max(0, Math.min(1, (s.endedAt + DRAW_FADE_MS - now) / 1000)) : 1);
+function paintStrokes(t) {
+  const canvas = t.draw;
+  if (!canvas) return;
+  const list = strokes.get(t.id) ?? [];
+  const dpr = devicePixelRatio || 1;
+  const w = Math.round(t.el.clientWidth * dpr), h = Math.round(t.el.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) Object.assign(canvas, { width: w, height: h });
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  if (!list.length) return;
+  const b = videoBox(t);
+  const now = Date.now();
+  ctx.lineCap = ctx.lineJoin = 'round';
+  ctx.lineWidth = Math.max(3, b.w / 250) * dpr;
+  for (const s of list) {
+    if (!s.pts.length) continue;
+    ctx.globalAlpha = strokeAlpha(s, now);
+    ctx.strokeStyle = s.color;
+    ctx.beginPath();
+    s.pts.forEach(([x, y], i) => ctx[i ? 'lineTo' : 'moveTo']((b.x + x * b.w) * dpr, (b.y + y * b.h) * dpr));
+    if (s.pts.length === 1) ctx.lineTo((b.x + s.pts[0][0] * b.w) * dpr + 0.1, (b.y + s.pts[0][1] * b.h) * dpr);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+let strokeFrame = 0;
+/** Repaints while there are strokes, and drops the ones that have faded away. */
+function animateStrokes() {
+  if (strokeFrame) return;
+  strokeFrame = requestAnimationFrame(() => {
+    strokeFrame = 0;
+    const now = Date.now();
+    let any = false;
+    for (const [on, list] of strokes) {
+      const left = list.filter((s) => strokeAlpha(s, now) > 0);
+      if (left.length !== list.length && on === state.me.id) mirrorStrokes();
+      if (left.length) { strokes.set(on, left); any = true; } else strokes.delete(on);
+    }
+    for (const t of tiles.values()) if (t.draw) paintStrokes(t);
+    if (any) animateStrokes();
+  });
+}
+/** On the desktop app, strokes on your own shared screen also show on that screen itself. */
+function mirrorStrokes() {
+  const show = window.burrowDesktop?.drawOverlay;
+  if (!show) return;
+  const now = Date.now();
+  show((strokes.get(state.me.id) ?? []).map((s) => ({ color: s.color, pts: s.pts, fadeIn: s.endedAt ? s.endedAt + DRAW_FADE_MS - now : null })));
+}
+
+// ---- clips: the last 30 seconds of someone's stream, recorded on your own device
+
+const CLIP_SECONDS = 30;
+const CLIP_STAGGER_MS = 15_000; // a new recording starts this often...
+const CLIP_KEEP_MS = 45_000;    // ...and each is kept this long, so one always covers the last 30 seconds
+const clips = new Map();        // tile key -> { stream, recorders: [{ rec, chunks, started }], timer }
+function clipType() {
+  return ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+    .find((type) => MediaRecorder.isTypeSupported(type));
+}
+/** The most a clip may be, in bytes: what you can share in the burrow. */
+const clipLimit = () => {
+  const s = fireServer();
+  return s && !isDm(s) && s.myUploadLimit != null ? s.myUploadLimit : state.maxUploadBytes;
+};
+function startClips(t, quiet = false) {
+  const LK = window.LivekitClient;
+  const type = clipType();
+  if (!t.track || !type) return toast("This browser can't record clips.");
+  if (!clipLimit()) return toast("Your roles can't share files here, so there's nowhere to post a clip.");
+  const p = state.voice?.room?.remoteParticipants.get(String(t.id));
+  const sound = p?.getTrackPublication(LK.Track.Source.ScreenShareAudio)?.track?.mediaStreamTrack;
+  const stream = new MediaStream([t.track.mediaStreamTrack, ...(sound ? [sound] : [])]);
+  // A bit rate that keeps the longest clip under the upload limit.
+  const bits = Math.round(Math.max(600_000, Math.min(5_000_000, (clipLimit() * 8 * 0.85) / (CLIP_KEEP_MS / 1000) - 128_000)));
+  const c = { stream, recorders: [], type, timer: null };
+  const begin = () => {
+    const now = Date.now();
+    for (const r of [...c.recorders]) if (now - r.started > CLIP_KEEP_MS) { dropRecorder(r); c.recorders.splice(c.recorders.indexOf(r), 1); }
+    try {
+      const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: bits, audioBitsPerSecond: 128_000 });
+      const r = { rec, chunks: [], started: now };
+      rec.ondataavailable = (e) => { if (e.data.size) r.chunks.push(e.data); };
+      rec.start(1000);
+      c.recorders.push(r);
+    } catch (err) {
+      console.warn('Clip recorder:', err);
+    }
+  };
+  c.begin = begin;
+  begin();
+  c.timer = setInterval(begin, CLIP_STAGGER_MS);
+  clips.set(t.key, c);
+  if (!quiet) toast(`Keeping clips of ${nameOf(t.id)}'s stream${sound ? '' : ' (without its sound, since you have it turned off)'}. Press the clip button again to save the last ${CLIP_SECONDS} seconds.`);
+  updateStreamTools(t);
+}
+function dropRecorder(r) {
+  r.rec.ondataavailable = null;
+  try { if (r.rec.state !== 'inactive') r.rec.stop(); } catch {}
+  r.chunks = [];
+}
+function stopClips(key) {
+  const c = clips.get(key);
+  if (!c) return;
+  clearInterval(c.timer);
+  c.recorders.forEach(dropRecorder);
+  clips.delete(key);
+  const t = tiles.get(key);
+  if (t) updateStreamTools(t);
+}
+async function saveClip(t) {
+  const c = clips.get(t.key);
+  if (!c?.recorders.length) return;
+  const now = Date.now();
+  // The shortest recording that's at least 30 seconds long, or the longest there is.
+  const long = c.recorders.filter((r) => now - r.started >= CLIP_SECONDS * 1000 - 500);
+  const r = long.length ? long[long.length - 1] : c.recorders[0];
+  c.recorders.splice(c.recorders.indexOf(r), 1);
+  if (!c.recorders.length) c.begin(); // keep one going for the next clip
+  const blob = await new Promise((resolve) => {
+    r.rec.onstop = () => resolve(new Blob(r.chunks, { type: c.type.split(';')[0] }));
+    r.rec.requestData?.();
+    r.rec.stop();
+  });
+  openClip(blob, t.id, Math.round((now - r.started) / 1000));
+}
+function openClip(blob, sharerId, seconds) {
+  const s = fireServer();
+  const rooms = s
+    ? (isDm(s) ? s.channels : s.channels.filter((c) => c.kind === 'text' && !c.archived && c.canPost !== false))
+    : [];
+  const pick = rooms.find((c) => c.id === state.channelId) ?? rooms.find((c) => c.id === s?.liveChannelId) ?? rooms[0];
+  const url = URL.createObjectURL(blob);
+  const ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
+  const name = `${nameOf(sharerId)}-clip-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}.${ext}`;
+  const tooBig = blob.size > clipLimit();
+  modal(`<h2>Your clip</h2>
+    <video class="clip-preview" src="${url}" controls playsinline></video>
+    <p class="muted small">The last ${seconds} seconds of ${escapeHtml(nameOf(sharerId))}'s stream, ${formatSize(blob.size)}.${tooBig ? ' That is more than you can share here, so you can only save it.' : ''}</p>
+    ${rooms.length && !tooBig ? `<label>Post it in<select id="clip-room">${rooms.map((c) => `<option value="${c.id}" ${c === pick ? 'selected' : ''}>${isDm(s) ? escapeHtml(fireName(c)) : '#' + escapeHtml(c.name)}</option>`).join('')}</select></label>
+    <label>Say something (optional)<input id="clip-text" maxlength="500" placeholder="Look at this!" /></label>` : ''}
+    <div class="error" id="modal-error"></div>
+    <div class="modal-row"><button class="btn secondary" id="clip-stop">Stop keeping clips</button><a class="btn secondary" id="clip-save" href="${url}" download="${escapeHtml(name)}">Save to this device</a>${rooms.length && !tooBig ? '<button class="btn" id="clip-post">Post</button>' : ''}</div>`);
+  const closing = onModalClose;
+  onModalClose = () => { closing?.(); setTimeout(() => URL.revokeObjectURL(url), 60_000); };
+  $('#clip-stop').onclick = () => { stopClips(`${sharerId}:screen`); closeModal(); };
+  $('#clip-post')?.addEventListener('click', async (e) => {
+    const b = e.currentTarget;
+    const channelId = Number($('#clip-room').value);
+    b.disabled = true;
+    b.textContent = 'Posting…';
+    try {
+      const attachment = await uploadFile(channelId, { file: new File([blob], name, { type: blob.type }), progress: 0 });
+      await api(`/api/channels/${channelId}/messages`, { method: 'POST', body: { content: $('#clip-text').value.trim(), attachmentIds: [attachment.id] } });
+      closeModal();
+      toast('Clip posted.');
+    } catch (err) {
+      b.disabled = false;
+      b.textContent = 'Post';
+      $('#modal-error').textContent = err.message;
+    }
+  });
+}
+
+// ---- going live: a post in the burrow's go-live room while you share your screen
+
+function renderLiveCard(m) {
+  const card = document.createElement('div');
+  const live = m.live;
+  card.className = 'live-card' + (live.endedAt ? ' over' : '');
+  const where = roomById(live.voiceChannelId)?.c;
+  const place = where ? where.name : 'a fire';
+  const minutes = live.endedAt ? Math.max(1, Math.round((live.endedAt - m.createdAt) / 60000)) : 0;
+  card.innerHTML = `<span class="live-badge">${live.endedAt ? 'ENDED' : 'LIVE'}</span><span class="live-text"></span>`;
+  card.querySelector('.live-text').textContent = live.endedAt
+    ? `${m.author} was live at ${place} for ${minutes} minute${minutes === 1 ? '' : 's'}`
+    : `${m.author} is sharing their screen at ${place}`;
+  if (!live.endedAt && where && m.authorId !== state.me.id) {
+    const here = state.voice?.channelId === where.id;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn';
+    b.textContent = here ? 'Watch' : 'Join and watch';
+    b.onclick = () => {
+      if (here) return goToVoice(), openVideo(`${m.authorId}:screen`);
+      state.watchOnJoin = m.authorId;
+      joinVoice(where.id);
+    };
+    card.append(b);
+  }
+  return card;
+}
+
+// ---- sharing a browser tab from the web app, with its sound
+
+function chooseShare() {
+  const lp = state.voice?.room?.localParticipant;
+  if (!lp) return;
+  if (lp.isScreenShareEnabled || window.burrowDesktop) return toggleScreen();
+  modal(`<h2>Share</h2>
+    <div class="share-choices">
+      <button class="share-choice" id="share-tab">${SCREEN_ICON}<b>A browser tab</b><span>With its sound. Pick the tab, and leave "Also share tab audio" on.</span></button>
+      <button class="share-choice" id="share-screen">${SCREEN_ICON}<b>Your screen or a window</b><span>Games and programs. Their sound is shared on Windows in Chrome or Edge, when you tick "Also share system audio".</span></button>
+    </div>
+    <label>Quality<select id="share-mode">
+      <option value="smooth" ${shareMode === 'smooth' ? 'selected' : ''}>Smooth: up to 60 frames a second, for games and video</option>
+      <option value="sharp" ${shareMode === 'sharp' ? 'selected' : ''}>Sharp: crisp text, for documents and code</option></select></label>
+    <div class="modal-row"><button class="btn secondary" data-close>Cancel</button></div>`);
+  const go = (surface) => {
+    shareMode = $('#share-mode').value;
+    store.set('shareMode', shareMode);
+    closeModal();
+    toggleScreen(surface);
+  };
+  $('#share-tab').onclick = () => go('browser');
+  $('#share-screen').onclick = () => go('monitor');
 }
 
 // ---------------------------------------------------------------- the Campfire
@@ -3386,9 +4043,11 @@ function renderFire(status) {
       watch.className = 'seat-watch';
       watch.innerHTML = `${SCREEN_ICON}<span></span>`;
       watch.onclick = (e) => { e.stopPropagation(); openVideo(`${id}:screen`); };
+      attachPeek(watch, id);
       seat.el.append(watch);
     } else if (!sharing?.screen && watch) watch.remove();
-    if (watch) watch.lastChild.textContent = me ? 'Your screen' : 'Watch screen';
+    const watchers = sharing?.screen ? viewersOf(id).length : 0;
+    if (watch) watch.lastChild.textContent = (me ? 'Your screen' : 'Watch screen') + (watchers ? ` · ${watchers} watching` : '');
   });
 
   // Open seats fill the rest of a small circle.
@@ -3405,8 +4064,8 @@ function renderFire(status) {
 // The fireside chat is in view: docked beside the fire on a wide screen, or opened over it.
 const fireChatDocked = () => matchMedia('(min-width: 1100px)').matches;
 let firesideHidden = store.get('firesideHidden') === '1';
-const firesideVisible = () => state.stageOpen && state.stageShow === 'fire' && !document.hidden
-  && (fireChatDocked() ? !firesideHidden : state.firesideOpen);
+const firesideVisible = () => !document.hidden && (($('#fire-chat').classList.contains('overlay') && state.stageOpen && state.stageShow === 'video')
+  || (state.stageOpen && state.stageShow === 'fire' && (fireChatDocked() ? !firesideHidden : state.firesideOpen)));
 
 function renderFireside({ added } = {}) {
   const space = $('#stage .fire-space');
@@ -3470,7 +4129,7 @@ const showFireside = (show) => {
 };
 $('#fire-chat-open').onclick = () => showFireside(true);
 $('#fire-chat-bar').onclick = () => showFireside(true);
-$('#fire-chat-close').onclick = () => showFireside(false);
+$('#fire-chat-close').onclick = () => ($('#fire-chat').classList.contains('overlay') ? restoreStreamChat() : showFireside(false));
 document.addEventListener('visibilitychange', () => { if (state.voice) renderFireside(); });
 
 // How loud someone's shared screen is, for you only: 0% (muted) to 200%. Kept on this device.
@@ -3683,8 +4342,10 @@ function keysChanged(voice) {
       sendCrypto(voice, { t: 'key', index, iv: toB64(iv), key: toB64(sealed), pub: vc.pub }, identity);
     }
     await vc.keys.use(raw.buffer, index);
+    rememberRoomKey(vc, index, raw.buffer);
     vc.index = index;
     renderVoiceBar();
+    roomKeyReady(voice);
   }, 250);
 }
 
@@ -3708,7 +4369,9 @@ async function onCryptoMessage(voice, payload, participant, topic) {
         fromB64(msg.key),
       );
       await vc.keys.use(raw, Number(msg.index) % KEYRING_SIZE);
+      rememberRoomKey(vc, Number(msg.index) % KEYRING_SIZE, raw);
       vc.index = Number(msg.index) % KEYRING_SIZE;
+      roomKeyReady(voice);
       clearTimeout(vc.retry);
       clearTimeout(vc.grace);
       renderVoiceBar();
@@ -3844,6 +4507,7 @@ const voicePrefs = (() => {
     fx: 'off', // voice changer
     music: false, // stereo, no filters, higher bitrate
     soundboard: true, soundboardVolume: 0.6, listenVolume: 0.6,
+    background: 'off', // camera background: 'off', 'blur' or 'picture'
     keys: { ptt: { code: 'Backquote' }, mute: { code: 'KeyM', ctrl: true, shift: true }, deafen: { code: 'KeyD', ctrl: true, shift: true } },
   };
   try {
@@ -4229,7 +4893,19 @@ async function startCameraPreview() {
     const deviceId = await deviceIdFor('videoinput');
     preview.stream = await navigator.mediaDevices.getUserMedia({ video: deviceId ? { deviceId } : true });
     if (cameraPreview !== preview) return preview.stream.getTracks().forEach((t) => t.stop());
-    $('#vs-preview').srcObject = preview.stream;
+    let shown = preview.stream;
+    if (cameraBackground() !== 'off') {
+      $('#vs-cam-status').textContent = 'Getting the background ready…';
+      try {
+        preview.background = await startBackground(preview.stream.getVideoTracks()[0]);
+        shown = new MediaStream([preview.background.track]);
+        $('#vs-cam-status').textContent = '';
+      } catch (err) {
+        $('#vs-cam-status').textContent = `Couldn't change the background: ${err.message}`;
+      }
+      if (cameraPreview !== preview) { preview.background?.stop(); return preview.stream.getTracks().forEach((t) => t.stop()); }
+    }
+    $('#vs-preview').srcObject = shown;
     $('#vs-preview').classList.remove('hidden');
     $('#vs-cam').textContent = 'Stop preview';
     fillDeviceLists();
@@ -4239,12 +4915,218 @@ async function startCameraPreview() {
   }
 }
 function stopCameraPreview() {
+  cameraPreview?.background?.stop();
   cameraPreview?.stream?.getTracks().forEach((t) => t.stop());
   cameraPreview = null;
   if (!$('#vs-preview')) return;
   $('#vs-preview').srcObject = null;
   $('#vs-preview').classList.add('hidden');
   $('#vs-cam').textContent = 'Preview camera';
+}
+
+// ---- camera background: blurred, or swapped for a picture, on your own device before it's sent
+//
+// MediaPipe's selfie segmenter (vendor/mediapipe) finds you in each frame; the rest is blurred or
+// replaced. It's only downloaded the first time someone turns this on.
+
+const BACKGROUNDS = { off: 'Off', blur: 'Blur', picture: 'A picture' };
+const cameraBackground = () => (BACKGROUNDS[voicePrefs.background] ? voicePrefs.background : 'off');
+let backgroundPicture = null; // an ImageBitmap of the picture, once loaded
+let segmenterLoading = null;
+let segmentTime = 0;
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const tag = document.createElement('script');
+    tag.src = src;
+    tag.onload = resolve;
+    tag.onerror = () => reject(new Error(`Couldn't load ${src}`));
+    document.head.append(tag);
+  });
+}
+function loadSegmenter() {
+  segmenterLoading ??= (async () => {
+    if (!window.MediaPipeVision) await loadScript('vendor/mediapipe/vision.js');
+    const { ImageSegmenter } = window.MediaPipeVision;
+    const model = new Uint8Array(await (await fetch('vendor/mediapipe/selfie_segmenter.tflite')).arrayBuffer());
+    const base = new URL('vendor/mediapipe/', location.href).href;
+    return ImageSegmenter.createFromOptions(
+      { wasmLoaderPath: base + 'vision_wasm_internal.js', wasmBinaryPath: base + 'vision_wasm_internal.wasm' },
+      { baseOptions: { modelAssetBuffer: model, delegate: 'CPU' }, runningMode: 'VIDEO', outputCategoryMask: false, outputConfidenceMasks: true },
+    );
+  })().catch((err) => {
+    segmenterLoading = null;
+    throw err;
+  });
+  return segmenterLoading;
+}
+async function loadBackgroundPicture() {
+  const data = store.get('cameraPicture');
+  if (!data) return (backgroundPicture = null);
+  try { backgroundPicture = await createImageBitmap(await (await fetch(data)).blob()); } catch { backgroundPicture = null; }
+  return backgroundPicture;
+}
+
+/**
+ * Draws one camera frame with its background changed. `source` is a video element or a
+ * VideoFrame; the result lands on `out`.
+ */
+function paintBackground(seg, source, w, h, parts) {
+  const { out, person, mask, small } = parts;
+  out.width = person.width = w;
+  out.height = person.height = h;
+  let maskData = null;
+  segmentTime = Math.max(segmentTime + 1, performance.now());
+  seg.segmentForVideo(source, segmentTime, (result) => {
+    const conf = result.confidenceMasks?.[0];
+    if (!conf) return;
+    const values = conf.getAsFloat32Array();
+    if (mask.width !== conf.width || mask.height !== conf.height) Object.assign(mask, { width: conf.width, height: conf.height });
+    maskData = new ImageData(conf.width, conf.height);
+    for (let i = 0; i < values.length; i++) maskData.data[i * 4 + 3] = Math.min(255, Math.max(0, (values[i] - 0.15) * 340));
+    result.close?.();
+  });
+  const ctx = out.getContext('2d');
+  // The background: blurred, or the picture filling the frame.
+  if (cameraBackground() === 'picture' && backgroundPicture) {
+    const p = backgroundPicture;
+    const scale = Math.max(w / p.width, h / p.height);
+    ctx.drawImage(p, (w - p.width * scale) / 2, (h - p.height * scale) / 2, p.width * scale, p.height * scale);
+  } else if ('filter' in ctx) {
+    ctx.filter = 'blur(14px)';
+    ctx.drawImage(source, -20, -20, w + 40, h + 40);
+    ctx.filter = 'none';
+  } else {
+    // No canvas blur (older Safari): drawing it tiny and back up is close enough.
+    small.width = Math.max(1, Math.round(w / 24));
+    small.height = Math.max(1, Math.round(h / 24));
+    small.getContext('2d').drawImage(source, 0, 0, small.width, small.height);
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(small, 0, 0, w, h);
+  }
+  if (!maskData) return;
+  mask.getContext('2d').putImageData(maskData, 0, 0);
+  // You, cut out along the mask with soft edges, on top.
+  const pc = person.getContext('2d');
+  pc.globalCompositeOperation = 'copy';
+  pc.drawImage(source, 0, 0, w, h);
+  pc.globalCompositeOperation = 'destination-in';
+  if ('filter' in pc) pc.filter = 'blur(2px)';
+  pc.drawImage(mask, 0, 0, w, h);
+  if ('filter' in pc) pc.filter = 'none';
+  pc.globalCompositeOperation = 'source-over';
+  ctx.drawImage(person, 0, 0);
+}
+
+/** Starts changing a camera track's background. Resolves to { track, stop }. */
+async function startBackground(track) {
+  const seg = await loadSegmenter();
+  if (cameraBackground() === 'picture' && !backgroundPicture) await loadBackgroundPicture();
+  const make = () => document.createElement('canvas');
+  const parts = { out: make(), person: make(), mask: make(), small: make() };
+  let stopped = false;
+  // Chrome, Edge and the desktop app hand over frames directly, which keeps going in a background tab.
+  if (window.MediaStreamTrackProcessor && window.MediaStreamTrackGenerator) {
+    const processor = new MediaStreamTrackProcessor({ track });
+    const generator = new MediaStreamTrackGenerator({ kind: 'video' });
+    const reader = processor.readable.getReader();
+    const writer = generator.writable.getWriter();
+    (async () => {
+      while (!stopped) {
+        const { value: frame, done } = await reader.read().catch(() => ({ done: true }));
+        if (done || !frame) break;
+        try {
+          if (cameraBackground() === 'off' || stopped) { await writer.write(frame); continue; }
+          paintBackground(seg, frame, frame.displayWidth, frame.displayHeight, parts);
+          const next = new VideoFrame(parts.out, { timestamp: frame.timestamp });
+          frame.close();
+          await writer.write(next);
+        } catch (err) {
+          try { frame.close(); } catch {}
+          if (!stopped) console.warn('Camera background:', err);
+        }
+      }
+    })();
+    return {
+      track: generator,
+      stop() {
+        stopped = true;
+        reader.cancel().catch(() => {});
+        generator.stop();
+      },
+    };
+  }
+  // Elsewhere: through a video element and a canvas.
+  const video = Object.assign(document.createElement('video'), { muted: true, playsInline: true, srcObject: new MediaStream([track]) });
+  await video.play().catch(() => {});
+  const out = parts.out.captureStream(30).getVideoTracks()[0];
+  const tick = () => {
+    if (stopped) return;
+    if (video.videoWidth) {
+      try { paintBackground(seg, video, video.videoWidth, video.videoHeight, parts); } catch (err) { console.warn('Camera background:', err); }
+    }
+    if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(tick);
+    else setTimeout(tick, 33);
+  };
+  tick();
+  return {
+    track: out,
+    stop() {
+      stopped = true;
+      out.stop();
+      video.srcObject = null;
+    },
+  };
+}
+
+/** The same, as a LiveKit track processor, so it's applied before the camera is sent. */
+function backgroundProcessor() {
+  let run = null;
+  const processor = {
+    name: 'burrow-background',
+    processedTrack: undefined,
+    async init({ track }) {
+      run = await startBackground(track);
+      processor.processedTrack = run.track;
+    },
+    async restart({ track }) {
+      run?.stop();
+      run = await startBackground(track);
+      processor.processedTrack = run.track;
+    },
+    async destroy() {
+      run?.stop();
+      run = null;
+    },
+  };
+  return processor;
+}
+
+/** Turns the background change on or off on a camera that's already on. */
+async function applyCameraBackground() {
+  const LK = window.LivekitClient;
+  const track = state.voice?.room?.localParticipant.getTrackPublication(LK?.Track.Source.Camera)?.track;
+  if (!track) return;
+  const has = track.getProcessor?.()?.name === 'burrow-background';
+  try {
+    if (cameraBackground() !== 'off' && !has) await track.setProcessor(backgroundProcessor());
+    else if (cameraBackground() === 'off' && has) await track.stopProcessor();
+  } catch (err) {
+    toast(`Couldn't change your background: ${err.message}`);
+  }
+}
+
+/** A picture picked for the background, kept on this device only. */
+async function pickBackgroundPicture(file) {
+  const img = await createImageBitmap(file);
+  const scale = Math.min(1, 1280 / Math.max(img.width, img.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+  img.close();
+  store.set('cameraPicture', canvas.toDataURL('image/jpeg', 0.85));
+  return loadBackgroundPicture();
 }
 
 // ---- the settings themselves: in your account, and from the gear on the voice bar
@@ -4300,6 +5182,10 @@ function voiceSettings() {
       <label>Camera<select id="vs-videoinput"></select></label>
       <video id="vs-preview" class="cam-preview hidden" autoplay muted playsinline></video>
       <div class="mic-test"><button type="button" class="btn secondary" id="vs-cam">Preview camera</button><span class="small muted" id="vs-cam-status"></span></div>
+      <label>Camera background
+        <select id="vs-background">${Object.entries(BACKGROUNDS).map(([k, label]) => `<option value="${k}" ${cameraBackground() === k ? 'selected' : ''}>${label}</option>`).join('')}</select>
+        <span class="small muted">Done on this device, before your camera is sent.</span></label>
+      <div class="mic-test ${cameraBackground() === 'picture' ? '' : 'hidden'}" id="vs-picture-row"><button type="button" class="btn secondary" id="vs-picture">${store.get('cameraPicture') ? 'Change the picture' : 'Pick a picture'}</button><input type="file" id="vs-picture-file" accept="image/*" hidden /></div>
       <label>Your voice quality
         <select id="voice-quality">${Object.entries(VOICE_QUALITY).map(([k, q]) => `<option value="${k}" ${voicePrefs.quality === k ? 'selected' : ''}>${q.label}</option>`).join('')}</select>
       </label>
@@ -4415,6 +5301,30 @@ function wireVoiceSettings() {
   for (const name of ['ptt', 'mute', 'deafen']) $(`#vs-key-${name}`).onclick = (e) => captureKey(name, e.currentTarget);
   renderHotkeyNote();
   $('#vs-cam').onclick = () => (cameraPreview ? stopCameraPreview() : startCameraPreview());
+  const backgroundChanged = () => {
+    applyCameraBackground();
+    if (cameraPreview) startCameraPreview();
+  };
+  $('#vs-background').onchange = (e) => {
+    voicePrefs.background = e.target.value;
+    saveVoicePrefs();
+    $('#vs-picture-row').classList.toggle('hidden', e.target.value !== 'picture');
+    if (e.target.value === 'picture' && !store.get('cameraPicture')) return $('#vs-picture-file').click();
+    if (e.target.value === 'picture') loadBackgroundPicture();
+    backgroundChanged();
+  };
+  $('#vs-picture').onclick = () => $('#vs-picture-file').click();
+  $('#vs-picture-file').onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      await pickBackgroundPicture(file);
+      $('#vs-picture').textContent = 'Change the picture';
+      backgroundChanged();
+    } catch {
+      alert("Couldn't open that picture.");
+    }
+  };
   $('#voice-quality').onchange = (e) => { voicePrefs.quality = e.target.value; saveVoicePrefs(); };
   // Whatever closes the settings stops the test and the preview.
   const closing = onModalClose;
@@ -7511,6 +8421,10 @@ function openEditBurrow(serverId) {
         <span class="small muted">New people accept these before they can chat. Changing them asks everyone again.</span>
       </label>
       ${afkSettings(s)}
+      <label>Go-live posts
+        <select id="burrow-live"><option value="">Off</option>${s.channels.filter((c) => c.kind === 'text' && !c.archived).map((c) => `<option value="${c.id}" ${c.id === s.liveChannelId ? 'selected' : ''}>#${escapeHtml(c.name)}</option>`).join('')}</select>
+        <span class="small muted">When someone shares their screen at a fire, a post here says they're live, with a button to join.</span>
+      </label>
       ${state.maxUploadBytes ? `<label>Largest file people can share
         <span class="inline-form"><input type="number" id="burrow-upload" min="0" max="${Math.floor(state.maxUploadBytes / 1048576)}" placeholder="${Math.floor(state.maxUploadBytes / 1048576)}" value="${s.uploadMb ?? ''}" /><span class="muted">MB</span></span>
         <span class="small muted">Empty: the server's ${formatSize(state.maxUploadBytes)}. 0: no files. Roles can allow more (Roles › Edit).</span></label>` : ''}
@@ -7561,6 +8475,7 @@ function openEditBurrow(serverId) {
           description: $('#burrow-desc').value,
           welcomeChannelId: $('#burrow-welcome').value ? Number($('#burrow-welcome').value) : null,
           rules: $('#burrow-rules').value,
+          liveChannelId: $('#burrow-live').value ? Number($('#burrow-live').value) : null,
           ...($('#burrow-upload') ? { uploadMb: $('#burrow-upload').value === '' ? null : Number($('#burrow-upload').value) } : {}),
           wordFilter: { words: $('#burrow-words').value.split(/[,\n]/).map((w) => w.trim()).filter(Boolean), action: $('#burrow-words-action').value },
           ...($('#burrow-afk') ? { afkChannelId: $('#burrow-afk').value ? Number($('#burrow-afk').value) : null, afkMinutes: Number($('#burrow-afk-minutes').value) } : {}),
