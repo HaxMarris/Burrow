@@ -107,6 +107,9 @@ Data goes to `server/data/chat.db`.
 | `MAIL_FROM`         | the SMTP username      | Who those emails come from, like `Burrow <you@example.com>`.        |
 | `PUBLIC_URL`        | unset                  | The address friends open Burrow at, for links in emails.            |
 | `PUSH_CONTACT`      | Burrow's GitHub page | A `mailto:` or `https:` address the phone push services can reach you at if something goes wrong. |
+| `ADMIN_USERS`       | the first account made | Usernames (comma-separated) that can open the admin page. See *The admin page*. |
+| `HEARTBEAT_URL`     | unset                  | An address Burrow pings every five minutes, for uptime alerts. See *Uptime alerts*. |
+| `BACKUP_S3_BUCKET`, `BACKUP_S3_ENDPOINT`, `BACKUP_S3_REGION`, `BACKUP_S3_KEY_ID`, `BACKUP_S3_SECRET`, `BACKUP_S3_PREFIX` | unset (no off-site copies) | Where off-site backups go. See *Backups*. |
 
 ### Letting friends reach it
 
@@ -230,23 +233,82 @@ Send them the link it prints (it uses `PUBLIC_URL`). Add `--two-step-off` if the
 - Passkeys work in the web app over HTTPS (they belong to the site's address, so set `PUBLIC_URL` if people reach Burrow by more than one name). The desktop app logs in with a password.
 - With Docker, port 3000 only listens on the server itself, so the only way in is through Caddy. Set `BURROW_BIND=0.0.0.0` in `.env` if you run without a reverse proxy.
 - The web app only runs its own scripts (a strict Content-Security-Policy), which blunts any injected code.
+- A weekly check on GitHub (`.github/workflows/security.yml`) looks for known holes in Burrow's packages and makes sure those protective headers are still sent, and Dependabot proposes updates to packages, Docker images and workflows.
+
+### The admin page
+
+Whoever runs the server finds **Server admin** in their menu (their picture, top right). It's the
+first account made on the server, unless `ADMIN_USERS` in `.env` names others. It has:
+
+- **Overview:** how many people and messages there are, who's in voice, how much space files,
+  the database and backups take and how much disk is left, and a list of checks (https, who can
+  sign up, backups, off-site copies, uptime monitor, updater). *Clean up unused files* removes files
+  nothing points at any more, such as pictures from deleted burrows; it also runs by itself daily.
+- **People:** everyone with an account, when they were last on, what they've sent and uploaded.
+  *Reset link* makes a one-hour link that sets a new password (send it to them); *Log out* signs
+  someone out everywhere.
+- **Signing up:** who can make an account (anyone, people with the registration code, or only people
+  with a signup link), and signup links: each works for 1 to 50 accounts and can run out after a
+  day, a week or a month. Someone opening one sees the sign-up form with no code to type.
+- **Backups:** back up now, and restore an earlier day (Burrow restarts on it; see below).
+- **Crashes:** errors from people's apps, grouped, with how often they happened, to send to whoever
+  fixes Burrow.
 
 ### Backups
 
-Burrow copies its database once a day and keeps the last 7 copies. They sit on the same disk as
-the server, so now and then copy them somewhere else. With Docker:
+Burrow copies its database once a day and keeps the last 7 copies (`BACKUP_KEEP`). They sit on the
+same disk as the server, so also have them copied somewhere else: with the `BACKUP_S3_` settings,
+each day's backup and every uploaded file go to S3-style storage too. Any of these work:
+
+- **Backblaze B2** (10 GB free): make a private bucket, then *Application Keys › Add a New Application
+  Key* for that bucket. `BACKUP_S3_ENDPOINT` is the bucket's *Endpoint* with `https://` in front, and
+  `BACKUP_S3_REGION` its middle part (like `us-west-004`).
+- **Cloudflare R2** (10 GB free): make a bucket, then *Manage R2 API Tokens › Create API token* with
+  *Object Read & Write*. The endpoint is `https://<account id>.r2.cloudflarestorage.com`; the region
+  is `auto`.
+- **Amazon S3**, Wasabi, MinIO and others: the bucket, its region, and an access key that can read,
+  write and list it (leave the endpoint out for Amazon).
 
 ```sh
-docker compose cp burrow:/data/backups ./backups
+BACKUP_S3_BUCKET=my-burrow-backups
+BACKUP_S3_ENDPOINT=https://s3.us-west-004.backblazeb2.com
+BACKUP_S3_REGION=us-west-004
+BACKUP_S3_KEY_ID=your-key-id
+BACKUP_S3_SECRET=your-secret-key
 ```
 
-To restore one (swap in the date you want):
+Burrow never deletes anything there; set the bucket to drop old versions if you like. The admin
+page shows when the last copy worked.
+
+**Restoring:** pick a day under *Backups* on the admin page and press *Restore*; Burrow restarts on
+that copy. The database it replaces is kept next to it as `chat.db.before-restore-…`. Or from SSH,
+which also reaches the off-site copies:
 
 ```sh
-docker compose stop burrow
-docker compose run --rm --entrypoint sh burrow -c "cp /data/backups/burrow-2026-10-05.db /data/chat.db && rm -f /data/chat.db-wal /data/chat.db-shm"
-docker compose up -d
+docker compose exec burrow node --no-warnings server/src/restore.ts             # lists them
+docker compose exec burrow node --no-warnings server/src/restore.ts 2026-10-05  # picks one
+docker compose restart burrow                                                   # finishes it
 ```
+
+On a brand new server (the old one is gone), put the same `.env` in place, start Burrow once, then
+run the restore with `--uploads` after the date to bring back every uploaded file too.
+
+### Uptime alerts
+
+To get an email when Burrow goes down, make a free check at [healthchecks.io](https://healthchecks.io)
+(period 5 minutes, grace 10), and put its ping address in `.env` as
+`HEARTBEAT_URL=https://hc-ping.com/…`. Burrow pings it every five minutes; when the pings stop, you
+hear about it. Monitors that check from outside, like UptimeRobot, can watch
+`https://your-address/api/health` instead, which also catches Caddy or the network being down.
+
+### Updating from the admin page
+
+Updating is normally `git pull && docker compose up -d --build` over SSH. To do it from the admin
+page instead, add `updates` to `COMPOSE_PROFILES` in `.env` (`COMPOSE_PROFILES=voice,updates`) and
+run `docker compose up -d`. That starts a small updater next to Burrow that checks for new versions
+hourly; the admin page then lists what's new and has *Update now*, which pulls, rebuilds and
+restarts Burrow (a minute or two away; voice reconnects after). The updater can control Docker on
+the machine, which is what lets it rebuild Burrow, so leave it off if you'd rather not.
 
 ## 2. Get your friends the app
 
@@ -344,6 +406,8 @@ Burrow has its own names for things: a **burrow** is a shared space for one grou
 - Your account has the notification settings: alerts while Burrow is closed, quiet hours (no sounds or pop-ups, and silent phone alerts, between two times), and, in the desktop app, whether to show the game you're playing.
 - Type `@everyone` (everyone who can see the room), `@here` (only people online) or `@` and a role's name to ping them all. Only roles allowed to *mention @everyone and roles* can; for everyone else it's just text.
 - The **GIF** button next to the message box opens trending GIFs; type to search, and tap one to send it.
+- Type `/` in the message box for commands: `/roll 2d6` (or `d20`, `3d8+2`), `/flip`, `/poll Question | answer | answer` (or just `/poll` for the poll maker), `/gif cats` (also `/giphy`), `/me waves`, `/shrug` and `/spoiler text`.
+- **Bots and webhooks** in a burrow's settings (for people who can edit the burrow) connect other things. A *webhook* posts in one room: GitHub, a home server or a script sends `{"content": "Build passed"}` (or Slack's `{"text": "…"}`) to its address, up to 30 a minute. A *bot* gets its own account and token, and uses the same API the apps do with `Authorization: Bearer <token>` (for example `POST /api/channels/<room id>/messages` with `{"content": "hi"}`, and `/ws?token=<token>` for live events). Their messages are marked BOT.
 - Pictures and videos load only as they scroll into view, and keep their space so the chat doesn't jump. Videos show a still from the video until you press play, so nothing more downloads until then. A video over 20 MB (or over the limit) gets a **Shrink** button before it's sent, which makes it 720p; it plays the video through once on your device, so it takes as long as the video (Chrome, Edge, Firefox and the desktop app).
 - If your connection drops, Burrow reconnects by itself when it can, fetches only the messages you missed, and puts you back at the fire you were at. With no connection at all it still opens (on the web, once you've used it there over `https://`) and shows your burrows and the latest messages in rooms you'd opened on that device; messages you write wait in a *Waiting to send* list above the message box (with ✕ to drop one) and go out once you're back.
 - The **+** in the message box uploads files, makes a poll, sends a sticker, or sends what you've typed later. The smiley opens every emoji (and your burrows' own), and the microphone records a voice message.
@@ -417,7 +481,7 @@ out before CPU for video: each camera at medium quality is about 0.5 Mbps for ev
 
 ## Roadmap
 
-Done: auto-update for the desktop app, voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more), the rooms, burrows and organization update (headings and room order, topics, slow mode, announcement and archived rooms, invite links that run out, banners, rules and a welcome room, muting, events, group conversations and folders), and the voice and Campfire update (push to talk and hotkeys, voice sensitivity, soundboard, moving and muting people, AFK fire, seat limits, calls, listen together, kept fireside chat, music mode and a voice changer), and the notifications and presence update (away and Do not disturb, custom statuses, playing now, a mentions inbox, @everyone and @role mentions, quiet hours, the app icon count, alerts while Burrow is closed), password resets by email, the moderation update (timeouts, an audit log, reports, a word filter, bulk delete, read-only roles, more role permissions and upload limits per role), the video and streaming update (side by side, pop out, previews, chat over a stream, who's watching, camera backgrounds, tab sharing with sound, clips, drawing and go-live posts), the profiles, friends and DMs update (display names, nicknames, profile cards, friends, blocking, username changes, devices, reset links, two-step login, passkeys, data export and account deletion), and the speed and reliability update (clean reconnects, lazy-loaded pictures, video thumbnails and shrinking, the client split into parts, checks on every pull request and a load test), and the apps update (Android install and sharing into Burrow, swipes, working offline, the tray and starting with the computer, signed Mac and Intel Mac builds, Windows signing, keyboard shortcuts and a quick switcher, accessibility, compact messages, text size and several servers in the desktop app).
+Done: auto-update for the desktop app, voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more), the rooms, burrows and organization update (headings and room order, topics, slow mode, announcement and archived rooms, invite links that run out, banners, rules and a welcome room, muting, events, group conversations and folders), and the voice and Campfire update (push to talk and hotkeys, voice sensitivity, soundboard, moving and muting people, AFK fire, seat limits, calls, listen together, kept fireside chat, music mode and a voice changer), and the notifications and presence update (away and Do not disturb, custom statuses, playing now, a mentions inbox, @everyone and @role mentions, quiet hours, the app icon count, alerts while Burrow is closed), password resets by email, the moderation update (timeouts, an audit log, reports, a word filter, bulk delete, read-only roles, more role permissions and upload limits per role), the video and streaming update (side by side, pop out, previews, chat over a stream, who's watching, camera backgrounds, tab sharing with sound, clips, drawing and go-live posts), the profiles, friends and DMs update (display names, nicknames, profile cards, friends, blocking, username changes, devices, reset links, two-step login, passkeys, data export and account deletion), and the speed and reliability update (clean reconnects, lazy-loaded pictures, video thumbnails and shrinking, the client split into parts, checks on every pull request and a load test), the apps update (Android install and sharing into Burrow, swipes, working offline, the tray and starting with the computer, signed Mac and Intel Mac builds, Windows signing, keyboard shortcuts and a quick switcher, accessibility, compact messages, text size and several servers in the desktop app), and the hosting, admin and security update (an admin page, off-site backups and one-click restore, signup links, storage clean-up, uptime alerts, updating from the app, crash reports, a weekly security check, bots, webhooks and slash commands).
 
 Ideas for later: text message encryption, sharing one program's sound on macOS.
 

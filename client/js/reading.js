@@ -671,6 +671,10 @@ const AUDIT_LABELS = {
   voice_move: (e) => `moved ${e.target} (${e.detail})`,
   burrow_edit: (e) => `changed the burrow's ${e.detail}`,
   invite_reset: () => 'made a new invite code',
+  bot_add: (e) => `added the bot ${e.target}`,
+  bot_remove: (e) => `removed the bot ${e.target}`,
+  webhook_add: (e) => `added the webhook ${e.target} in ${e.detail}`,
+  webhook_remove: (e) => `deleted the webhook ${e.target}`,
 };
 
 async function openAudit(serverId) {

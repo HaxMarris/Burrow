@@ -1,0 +1,58 @@
+# A weekly look for known security problems: in the packages the server and desktop app use
+# (npm audit), and in the web app's security headers on a freshly started server. A failure
+# here shows as a red run under Actions (GitHub emails you about it); fix it by updating the
+# package it names, or by merging Dependabot's pull request for it.
+name: Security check
+
+on:
+  schedule:
+    - cron: '17 6 * * 1' # Mondays
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'server/package*.json'
+      - 'desktop/package*.json'
+      - '.github/workflows/security.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Known vulnerabilities in packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The server's own packages (what runs on your server), high severity and up.
+      - run: npm audit --omit=dev --audit-level=high
+        working-directory: server
+      # The desktop app's packages, Electron included (it ships inside the app), high severity and up.
+      - run: npm install --package-lock-only --ignore-scripts && npm audit --audit-level=high
+        working-directory: desktop
+
+  headers:
+    name: Security headers
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: server
+      - name: Start a throwaway server and check its headers
+        working-directory: server
+        run: |
+          DB_FILE="$RUNNER_TEMP/check.db" PORT=3999 REGISTRATION_CODE=x node --no-warnings src/index.ts &
+          for i in $(seq 1 50); do curl -sf http://localhost:3999/api/health >/dev/null && break; sleep 0.2; done
+          headers=$(curl -sI -H 'x-forwarded-proto: https' http://localhost:3999/)
+          echo "$headers"
+          for h in content-security-policy x-content-type-options x-frame-options referrer-policy permissions-policy strict-transport-security; do
+            echo "$headers" | grep -qi "^$h:" || { echo "::error::Missing $h header"; exit 1; }
+          done
+          echo "$headers" | grep -i '^content-security-policy:' | grep -q "frame-ancestors 'none'" || { echo "::error::The page could be framed by other sites"; exit 1; }

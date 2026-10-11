@@ -8,6 +8,30 @@
 const $ = (sel) => document.querySelector(sel);
 const isDesktop = location.protocol === 'file:';
 
+// Crashes in the app are sent to the server (a few per visit), where whoever runs it sees them
+// on the admin page. Just the error and where it happened; nothing you typed.
+let errorsSent = 0;
+function reportError(error, where) {
+  let base = '';
+  try { base = state.serverUrl; } catch {} // not set up yet
+  if (errorsSent >= 5 || !base) return;
+  const message = String(error?.message ?? error ?? '').slice(0, 500);
+  if (!message || /ResizeObserver loop|Script error\.?$/.test(message)) return; // harmless browser noise
+  errorsSent++;
+  fetch(base + '/api/errors', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) },
+    body: JSON.stringify({ message, stack: String(error?.stack ?? '').slice(0, 4000), where, app: `${isDesktop ? 'Desktop app' : 'Web'} · ${navigator.userAgent}` }),
+  }).catch(() => {});
+}
+window.addEventListener('error', (e) => reportError(e.error ?? e.message, `${e.filename?.split('/').pop() ?? ''}:${e.lineno ?? ''}`));
+window.addEventListener('unhandledrejection', (e) => {
+  // Failed requests already show their own message, and a dropped connection isn't a crash.
+  if (e.reason instanceof TypeError && /fetch|network/i.test(e.reason.message)) return;
+  if (e.reason?.handled) return;
+  reportError(e.reason, 'promise');
+});
+
 const store = {
   get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
   set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
@@ -97,7 +121,9 @@ async function resolveServerUrl() {
 
 // ---------------------------------------------------------------- auth screen
 
-let registering = false;
+// A signup link from whoever runs the server: /?signup=… opens the register form, no code needed.
+let signupLink = isDesktop ? null : new URLSearchParams(location.search).get('signup');
+let registering = !!signupLink;
 
 async function showAuth() {
   $('#app').classList.add('hidden');
@@ -148,10 +174,15 @@ async function renderAuthMode() {
   $('#password').autocomplete = registering ? 'new-password' : 'current-password';
   $('#auth-error').textContent = '';
   let needsCode = false;
-  if (registering && state.serverUrl) {
-    try { needsCode = (await api('/api/config')).registrationCodeRequired; } catch {}
+  let linksOnly = false;
+  if (registering && state.serverUrl && !signupLink) {
+    try { ({ registrationCodeRequired: needsCode, signupLinksOnly: linksOnly } = await api('/api/config')); } catch {}
   }
-  $('#reg-code-row').classList.toggle('hidden', !needsCode);
+  // A signup link can be pasted here too (the desktop app can't be opened by one).
+  $('#reg-code-row').classList.toggle('hidden', !needsCode && !linksOnly);
+  $('#reg-code').placeholder = linksOnly ? 'Paste your signup link' : 'Ask whoever runs the server, or paste a signup link';
+  if (registering && signupLink) $('#auth-subtitle').textContent = "You've been invited. Pick a username your friends will see.";
+  if (linksOnly) $('#auth-subtitle').textContent = 'Signing up here needs a signup link from whoever runs this Burrow.';
   // "Forgot your password?" only where the server can send email.
   let canEmail = false;
   if (!registering && state.serverUrl) {
@@ -242,8 +273,11 @@ $('#auth-form').addEventListener('submit', async (e) => {
     await resolveServerUrl();
     const body = { username: $('#username').value.trim(), password: $('#password').value };
     if (registering) body.registrationCode = $('#reg-code').value.trim();
+    const pasted = /[?&]signup=([\w-]+)/.exec(body.registrationCode ?? '')?.[1];
+    if (registering && (signupLink || pasted)) body.signupLink = signupLink || pasted;
     const result = await api(registering ? '/api/register' : '/api/login', { method: 'POST', body });
     $('#password').value = '';
+    if (registering && signupLink) { signupLink = null; history.replaceState(null, '', location.pathname); }
     await finishLogin(result);
   } catch (err) {
     $('#auth-error').textContent = err.message === 'Failed to fetch' ? "Couldn't reach that server." : err.message;
@@ -387,6 +421,7 @@ async function enterApp() {
   state.emailEnabled = !!config.email;
   $('#gif-btn').classList.toggle('hidden', !state.gifsEnabled);
   renderMyStatus();
+  syncAdminButton();
   await loadServers();
   connect();
   loadSavedAndScheduled();
@@ -620,6 +655,7 @@ function handleEvent(ev) {
       const blockedBefore = String(state.me.blockedIds ?? []);
       Object.assign(state.me, ev.me);
       renderMyStatus();
+      syncAdminButton();
       $('#me-name').textContent = state.me.displayName || state.me.username;
       if (String(state.me.blockedIds ?? []) !== blockedBefore) renderMessages();
       break;

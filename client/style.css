@@ -1421,3 +1421,44 @@ kbd { display: inline-block; padding: 2px 7px; border: 1px solid var(--line); bo
 .auth-accounts { display: grid; gap: 6px; margin-top: 12px; }
 #messages .line { transition: transform 0.15s ease; }
 @media (hover: none) { #shortcuts-btn { display: none; } }
+/* ---- Server admin, bots and webhooks, slash commands */
+.modal-card.admin-modal { max-width: 640px; }
+.modal-card.bots-modal { max-width: 560px; }
+.admin-pane { display: flex; flex-direction: column; gap: 10px; min-height: 120px; }
+.admin-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.admin-stats div { display: flex; flex-direction: column; align-items: center; padding: 10px 6px; border-radius: 12px; background: var(--surface-2); }
+.admin-stats b { font-size: 22px; color: var(--text-strong); }
+.admin-stats span { font-size: 12px; color: var(--muted); }
+.admin-checks, .admin-voice, .backup-list, .bot-list, .signup-links, .error-list, .update-changes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.update-changes { list-style: disc; padding-left: 20px; gap: 2px; }
+.admin-checks li { display: flex; gap: 8px; align-items: baseline; font-size: 14px; }
+.admin-checks li span { flex: none; width: 18px; height: 18px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 12px; font-weight: 800; color: #fff; background: var(--online); }
+.admin-checks li.warn span { background: var(--cloudberry); }
+.admin-list { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0; font-size: 14px; }
+.admin-list dt { color: var(--muted); }
+.admin-list dd { margin: 0; }
+.admin-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.admin-table-wrap { overflow-x: auto; }
+.admin-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.admin-table th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 4px 6px; }
+.admin-table td { padding: 6px; border-top: 1px solid var(--line); vertical-align: middle; }
+.admin-table td:last-child { text-align: right; white-space: nowrap; }
+.tiny-btn { padding: 4px 10px; font-size: 13px; }
+.signup-links li, .backup-list li, .bot-list li { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 12px; background: var(--surface-2); }
+.signup-links li.used { opacity: .6; }
+.signup-text, .bot-list li > span:first-child { display: flex; flex-direction: column; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.backup-list li > span { flex: 1; }
+.signup-new, .bot-new { flex-direction: row !important; flex-wrap: wrap; align-items: center; gap: 8px; }
+.signup-new input, .bot-new input { flex: 1 1 160px; }
+.bot-secret { display: flex; flex-direction: column; gap: 6px; padding: 12px; border-radius: 12px; background: var(--mention-bg); }
+.bot-secret code { font-size: 13px; overflow-wrap: anywhere; user-select: all; }
+.bot-secret button { align-self: flex-start; }
+.bot-tag { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 5px; background: var(--accent); color: var(--accent-ink); font-size: 10px; font-weight: 800; letter-spacing: .04em; vertical-align: 2px; line-height: 1.4; }
+.error-list details { padding: 8px 10px; border-radius: 12px; background: var(--surface-2); }
+.error-list summary { cursor: pointer; overflow-wrap: anywhere; }
+.error-list pre { margin: 8px 0 0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow-y: auto; }
+#command-box .mention-option { justify-content: space-between; }
+.command-name { font-weight: 700; }
+@media (max-width: 600px) {
+  .admin-stats { grid-template-columns: repeat(2, 1fr); }
+}

@@ -90,7 +90,7 @@ function addMessageNodes(parent, m, prev, body) {
     body = document.createElement('div');
     const time = new Date(m.createdAt);
     const color = roleColor(state.servers.get(state.serverId), m.authorId);
-    body.innerHTML = `<div class="head"><span class="author"${color ? ` style="color:${escapeHtml(color)}"` : ''}>${escapeHtml(authorName(m))}</span>
+    body.innerHTML = `<div class="head"><span class="author"${color ? ` style="color:${escapeHtml(color)}"` : ''}>${escapeHtml(authorName(m))}</span>${m.authorBot ? '<span class="bot-tag">BOT</span>' : ''}
         <span class="time" title="${escapeHtml(time.toLocaleString())}">${escapeHtml(formatTime(time))}</span></div>`;
     // Their name and picture open their card.
     av.classList.add('opens-card');
@@ -508,6 +508,7 @@ $('#server-menu-btn').onclick = () => {
       ${can(s, 'burrow') ? '<button class="btn secondary" id="open-edit">Edit burrow</button>' : ''}
       ${can(s, 'messages') ? `<button class="btn secondary" id="open-reports">Reports${s.openReports ? ` · ${s.openReports}` : ''}</button>` : ''}
       ${can(s, 'audit') ? '<button class="btn secondary" id="open-audit">Audit log</button>' : ''}
+      ${can(s, 'burrow') ? '<button class="btn secondary" id="open-bots">Bots and webhooks</button>' : ''}
       ${can(s, 'roles') ? `<button class="btn secondary" id="open-roles">Roles${s.roles.length ? ` · ${s.roles.length}` : ''}</button>` : ''}
       ${can(s, 'emoji') && state.maxUploadBytes ? `<button class="btn secondary" id="open-emoji">Emoji and stickers${s.emoji?.length ? ` · ${s.emoji.length}` : ''}</button>
         <button class="btn secondary" id="open-sounds">Soundboard${s.sounds?.length ? ` · ${s.sounds.length}` : ''}</button>` : ''}
@@ -525,6 +526,7 @@ $('#server-menu-btn').onclick = () => {
   $('#open-roles')?.addEventListener('click', () => openRoles(s.id));
   $('#open-reports')?.addEventListener('click', () => openReports(s.id));
   $('#open-audit')?.addEventListener('click', () => openAudit(s.id));
+  $('#open-bots')?.addEventListener('click', () => openBots(s.id));
   $('#open-emoji')?.addEventListener('click', () => openEmojiManager(s.id));
   $('#open-sounds')?.addEventListener('click', () => openSounds(s.id));
   $('#leave-server').onclick = async () => {

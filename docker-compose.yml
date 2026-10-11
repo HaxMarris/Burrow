@@ -30,6 +30,17 @@ services:
       MAIL_FROM: ${MAIL_FROM:-}
       PUBLIC_URL: ${PUBLIC_URL:-}
       PUSH_CONTACT: ${PUSH_CONTACT:-}
+      # Who can open the admin page (usernames, comma-separated); the first account if empty.
+      ADMIN_USERS: ${ADMIN_USERS:-}
+      # Uptime: an address pinged every five minutes (see README).
+      HEARTBEAT_URL: ${HEARTBEAT_URL:-}
+      # Off-site copies of backups and uploads, to any S3-style storage (see README).
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:-}
+      BACKUP_S3_KEY_ID: ${BACKUP_S3_KEY_ID:-}
+      BACKUP_S3_SECRET: ${BACKUP_S3_SECRET:-}
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -53,6 +64,21 @@ services:
           use_external_ip: true
         logging:
           level: info
+
+  # Installs updates when the host asks for one on the admin page. It only starts when .env's
+  # COMPOSE_PROFILES includes "updates". It can control Docker on this machine, which is what lets
+  # it rebuild Burrow; it only ever runs scripts/updater.sh.
+  updater:
+    image: docker:28.3.3-cli
+    restart: unless-stopped
+    profiles: ["updates"]
+    logging: *logging
+    working_dir: /repo
+    entrypoint: ["sh", "/repo/scripts/updater.sh"]
+    volumes:
+      - .:/repo
+      - burrow-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   burrow-data:

@@ -153,6 +153,7 @@ export function openDb(file: string): Db {
   addStreaming(db);
   addProfiles(db);
   addMediaSizes(db);
+  addHosting(db);
   return db;
 }
 
@@ -568,4 +569,52 @@ function addMediaSizes(db: Db) {
   addColumn(db, 'attachments', 'height', 'INTEGER');
   // A small still from a video, stored next to it as <id>.thumb.
   addColumn(db, 'attachments', 'thumb', 'INTEGER NOT NULL DEFAULT 0');
+}
+
+/** Added with the hosting, admin and security update: signup links, bots, webhooks and error reports. */
+function addHosting(db: Db) {
+  // Bots are accounts that log in with a token instead of a password, made for one burrow.
+  addColumn(db, 'users', 'bot', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'users', 'bot_server_id', 'INTEGER REFERENCES servers(id) ON DELETE SET NULL');
+  db.exec(`
+    -- Settings the host changes on the admin page: { signup_mode: 'open' | 'code' | 'links' }.
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+    -- One-time (or few-time) links to sign up with, made on the admin page.
+    CREATE TABLE IF NOT EXISTS signup_links (
+      code       TEXT PRIMARY KEY,
+      note       TEXT NOT NULL DEFAULT '',
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER,
+      max_uses   INTEGER NOT NULL DEFAULT 1,
+      uses       INTEGER NOT NULL DEFAULT 0
+    );
+    -- A web address other services post to, which writes in one room as its own bot account.
+    CREATE TABLE IF NOT EXISTS webhooks (
+      id         INTEGER PRIMARY KEY,
+      server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL,
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS webhooks_by_server ON webhooks(server_id);
+    -- Crashes in people's apps, the same one counted once.
+    CREATE TABLE IF NOT EXISTS client_errors (
+      id       INTEGER PRIMARY KEY,
+      hash     TEXT NOT NULL UNIQUE,
+      message  TEXT NOT NULL,
+      stack    TEXT NOT NULL DEFAULT '',
+      where_at TEXT NOT NULL DEFAULT '',
+      app      TEXT NOT NULL DEFAULT '',
+      user_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      first_at INTEGER NOT NULL,
+      last_at  INTEGER NOT NULL,
+      count    INTEGER NOT NULL DEFAULT 1
+    );
+  `);
 }
