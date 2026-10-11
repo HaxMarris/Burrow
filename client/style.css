@@ -908,6 +908,8 @@ button.seat-face { cursor: pointer; }
 .att-text-more { width: 100%; border: 0; border-top: 1px solid var(--line); background: var(--surface); color: var(--accent); font-weight: 800; padding: 6px; }
 
 .pending-spoiler { flex: none; border: 1px solid var(--line); border-radius: 8px; background: none; color: var(--muted); font-size: 11px; font-weight: 800; padding: 3px 6px; }
+.pending-shrink { flex: none; border: 1px solid var(--moss); border-radius: 8px; background: none; color: var(--accent); font-size: 11px; font-weight: 800; padding: 3px 6px; }
+.pending-shrink:hover { background: var(--surface-2); }
 .pending-spoiler.on { background: var(--text); color: var(--surface); border-color: var(--text); }
 .pending.spoilered img { filter: blur(6px); }
 .scheduled-note { display: block; margin: 0 0 6px; border: 0; background: none; color: var(--muted); font-size: 12px; font-weight: 700; padding: 0 6px; }

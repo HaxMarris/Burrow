@@ -152,6 +152,7 @@ export function openDb(file: string): Db {
   addModeration(db);
   addStreaming(db);
   addProfiles(db);
+  addMediaSizes(db);
   return db;
 }
 
@@ -558,4 +559,13 @@ export function addModeratorRole(db: Db, serverId: number) {
     .prepare("INSERT INTO roles (server_id, name, color, perms, position, created_at) VALUES (?, 'Moderator', '#4f8a5b', 'rooms,messages,remove,ban,voice,everyone,pin,invites,timeout,audit', 1, ?)")
     .run(serverId, Date.now());
   return Number(r.lastInsertRowid);
+}
+
+/** Added with the speed and reliability update: picture and video sizes, and video thumbnails. */
+function addMediaSizes(db: Db) {
+  // Known before a picture or video loads, so its space is kept and the chat doesn't jump.
+  addColumn(db, 'attachments', 'width', 'INTEGER');
+  addColumn(db, 'attachments', 'height', 'INTEGER');
+  // A small still from a video, stored next to it as <id>.thumb.
+  addColumn(db, 'attachments', 'thumb', 'INTEGER NOT NULL DEFAULT 0');
 }
