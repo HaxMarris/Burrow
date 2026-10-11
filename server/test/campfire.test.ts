@@ -314,3 +314,48 @@ test('calling someone in a direct message rings their app', async () => {
   a.ws.close();
   b.ws.close();
 });
+
+test('sharing a screen posts "is live" in the go-live room, and stopping marks it over', async () => {
+  const [host, bob] = await people('host', 'bob');
+  const { server, fire } = await burrow(host, bob);
+  const general = server.channels.find((c: any) => c.kind === 'text').id;
+  // Only text rooms in this burrow, and only by people who can edit the burrow.
+  assert.equal((await call(`/api/servers/${server.id}`, { method: 'PATCH', body: { liveChannelId: fire }, token: host.token })).status, 400);
+  assert.equal((await call(`/api/servers/${server.id}`, { method: 'PATCH', body: { liveChannelId: general }, token: bob.token })).status, 403);
+  const set = await call(`/api/servers/${server.id}`, { method: 'PATCH', body: { liveChannelId: general }, token: host.token });
+  assert.equal(set.data.liveChannelId, general);
+
+  const b = await socket(bob.token);
+  b.send({ type: 'voice_live', live: true }); // not at a fire: nothing
+  b.send({ type: 'voice_join', channelId: fire });
+  await b.next((e) => e.type === 'voice_state' && e.userIds.includes(bob.user.id));
+  b.send({ type: 'voice_live', live: true });
+  const posted = await b.next((e) => e.type === 'message' && e.message.live);
+  assert.deepEqual(posted.message.live, { voiceChannelId: fire, endedAt: null });
+  assert.equal(posted.message.channelId, general);
+  b.send({ type: 'voice_live', live: true }); // already live: no second post
+  b.send({ type: 'voice_live', live: false });
+  const ended = await b.next((e) => e.type === 'message_updated' && e.message.id === posted.message.id);
+  assert.ok(ended.message.live.endedAt > 0);
+  // Sharing again soon after picks the same post back up.
+  b.send({ type: 'voice_live', live: true });
+  const again = await b.next((e) => e.type === 'message_updated' && e.message.id === posted.message.id);
+  assert.equal(again.message.live.endedAt, null);
+  // Leaving the fire ends it too.
+  b.send({ type: 'voice_leave' });
+  const left = await b.next((e) => e.type === 'message_updated' && e.message.id === posted.message.id);
+  assert.ok(left.message.live.endedAt > 0);
+  const lives = (await call(`/api/channels/${general}/messages`, { token: host.token })).data.filter((m: any) => m.live);
+  assert.equal(lives.length, 1);
+  b.ws.close();
+
+  // Without a go-live room, nothing is posted.
+  await call(`/api/servers/${server.id}`, { method: 'PATCH', body: { liveChannelId: null }, token: host.token });
+  const b2 = await socket(bob.token);
+  b2.send({ type: 'voice_join', channelId: fire });
+  await b2.next((e) => e.type === 'voice_state' && e.userIds.includes(bob.user.id));
+  b2.send({ type: 'voice_live', live: true });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.ok(!b2.events.some((e) => e.type === 'message'));
+  b2.ws.close();
+});

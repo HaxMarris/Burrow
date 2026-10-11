@@ -150,6 +150,7 @@ export function openDb(file: string): Db {
   addVoiceExtras(db);
   addPresence(db);
   addModeration(db);
+  addStreaming(db);
   return db;
 }
 
@@ -490,6 +491,16 @@ function addModeration(db: Db) {
     if (perms.has('ban')) perms.add('audit');
     add.run([...perms].join(','), r.id);
   }
+}
+
+/** Added with the video and streaming update: "is live" announcements. */
+function addStreaming(db: Db) {
+  // The text room where "someone is live" is posted (null: not announced).
+  addColumn(db, 'servers', 'live_channel_id', 'INTEGER REFERENCES channels(id) ON DELETE SET NULL');
+  // A go-live announcement: JSON { voiceChannelId, endedAt }.
+  addColumn(db, 'messages', 'live', 'TEXT');
+  // Nobody is still live after a restart.
+  db.prepare(`UPDATE messages SET live = json_set(live, '$.endedAt', ?) WHERE live IS NOT NULL AND json_extract(live, '$.endedAt') IS NULL`).run(Date.now());
 }
 
 /** Every new burrow starts with a Moderator role, which the host can change or delete. */
