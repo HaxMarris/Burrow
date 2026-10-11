@@ -149,6 +149,7 @@ export function openDb(file: string): Db {
   addOrganization(db);
   addVoiceExtras(db);
   addPresence(db);
+  addModeration(db);
   return db;
 }
 
@@ -437,10 +438,64 @@ function addPresence(db: Db) {
   }
 }
 
+function addModeration(db: Db) {
+  addColumn(db, 'members', 'timeout_until', 'INTEGER'); // can't write or talk until then
+  addColumn(db, 'roles', 'upload_mb', 'INTEGER'); // largest upload for this role; null = the server's limit, 0 = none
+  addColumn(db, 'servers', 'upload_mb', 'INTEGER'); // the same for people with no role that says otherwise
+  addColumn(db, 'servers', 'word_filter', 'TEXT'); // {"words":[...],"action":"block"|"flag"}
+  const hadAudit = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_log'").get();
+  db.exec(`
+    -- Who removed, banned, deleted or changed what in a burrow, and when.
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id         INTEGER PRIMARY KEY,
+      server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      actor_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      action     TEXT NOT NULL,
+      target_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      detail     TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS audit_by_server ON audit_log(server_id, id);
+    -- Messages someone (or the word filter) flagged for the people who look after the burrow.
+    CREATE TABLE IF NOT EXISTS reports (
+      id          INTEGER PRIMARY KEY,
+      server_id   INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      message_id  INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+      channel_id  INTEGER,
+      author_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      content     TEXT NOT NULL DEFAULT '',
+      reporter_id INTEGER REFERENCES users(id) ON DELETE SET NULL, -- null: the word filter
+      reason      TEXT NOT NULL DEFAULT '',
+      created_at  INTEGER NOT NULL,
+      resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      resolved_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS reports_open ON reports(server_id, resolved_at);
+    -- Roles that can read a room but not write in it.
+    CREATE TABLE IF NOT EXISTS channel_read_only (
+      channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      role_id    INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+      PRIMARY KEY (channel_id, role_id)
+    );
+  `);
+  if (hadAudit) return;
+  // The new switches split off older ones, so roles keep doing what they could.
+  const roles = db.prepare('SELECT id, perms FROM roles').all() as { id: number; perms: string }[];
+  const add = db.prepare('UPDATE roles SET perms = ? WHERE id = ?');
+  for (const r of roles) {
+    const perms = new Set(r.perms.split(',').filter(Boolean));
+    if (perms.has('messages')) perms.add('pin');
+    if (perms.has('burrow')) perms.add('invites');
+    if (perms.has('remove')) perms.add('timeout');
+    if (perms.has('ban')) perms.add('audit');
+    add.run([...perms].join(','), r.id);
+  }
+}
+
 /** Every new burrow starts with a Moderator role, which the host can change or delete. */
 export function addModeratorRole(db: Db, serverId: number) {
   const r = db
-    .prepare("INSERT INTO roles (server_id, name, color, perms, position, created_at) VALUES (?, 'Moderator', '#4f8a5b', 'rooms,messages,remove,ban,voice,everyone', 1, ?)")
+    .prepare("INSERT INTO roles (server_id, name, color, perms, position, created_at) VALUES (?, 'Moderator', '#4f8a5b', 'rooms,messages,remove,ban,voice,everyone,pin,invites,timeout,audit', 1, ?)")
     .run(serverId, Date.now());
   return Number(r.lastInsertRowid);
 }

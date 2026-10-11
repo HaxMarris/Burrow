@@ -40,7 +40,7 @@ export interface AppOptions {
 }
 
 type User = { id: number; username: string; avatar: string | null };
-const PERMS = ['rooms', 'messages', 'remove', 'ban', 'roles', 'burrow', 'emoji', 'voice', 'everyone'] as const;
+const PERMS = ['rooms', 'messages', 'remove', 'ban', 'roles', 'burrow', 'emoji', 'voice', 'everyone', 'pin', 'invites', 'timeout', 'audit'] as const;
 type Perm = (typeof PERMS)[number];
 type Standing = { host: boolean; rank: number; perms: Set<Perm>; roleIds: number[] };
 const parsePerms = (text: string) => text.split(',').filter((p): p is Perm => (PERMS as readonly string[]).includes(p));
@@ -378,19 +378,20 @@ export function createApp(opts: AppOptions): Server {
             }
           : {}),
         ...(announce && manager ? { postRoleIds: ids('SELECT role_id AS id FROM channel_post_roles WHERE channel_id = ?', c.id) } : {}),
+        ...(manager ? { readOnlyRoleIds: ids('SELECT role_id AS id FROM channel_read_only WHERE channel_id = ?', c.id) } : {}),
       }));
     const roles = (
-      db.prepare('SELECT id, name, color, perms, position FROM roles WHERE server_id = ? ORDER BY position').all(serverId) as Json[]
+      db.prepare('SELECT id, name, color, perms, position, upload_mb AS uploadMb FROM roles WHERE server_id = ? ORDER BY position').all(serverId) as Json[]
     ).map((r) => ({ ...r, perms: parsePerms(r.perms as string) }));
     const memberRoles = db
       .prepare('SELECT mr.user_id, mr.role_id FROM member_roles mr JOIN roles r ON r.id = mr.role_id WHERE mr.server_id = ? ORDER BY r.position')
       .all(serverId) as { user_id: number; role_id: number }[];
     const members = db
       .prepare(
-        `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar, m.voice_muted AS voiceMuted FROM members m JOIN users u ON u.id = m.user_id
+        `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar, m.voice_muted AS voiceMuted, m.timeout_until AS timeoutUntil FROM members m JOIN users u ON u.id = m.user_id
          WHERE m.server_id = ? ORDER BY u.username`,
       )
-      .all(serverId) as (User & { voiceMuted: number })[];
+      .all(serverId) as (User & { voiceMuted: number; timeoutUntil: number | null })[];
     const accepted = (db.prepare('SELECT rules_accepted_at FROM members WHERE server_id = ? AND user_id = ?').get(serverId, viewerId) as
       | { rules_accepted_at: number | null }
       | undefined)?.rules_accepted_at;
@@ -405,6 +406,7 @@ export function createApp(opts: AppOptions): Server {
       emoji: emojiOf(serverId),
       sounds: soundsOf(serverId),
       serverMuted: serverMuted(serverId, viewerId),
+      ...(server.kind === 'burrow' ? moderationSummary(serverId, viewerId) : {}),
       ...(server.kind === 'dm' ? { seen: dmSeen(serverId, viewerId) } : {}),
       roles,
       members: members.map((m) => {
@@ -412,7 +414,7 @@ export function createApp(opts: AppOptions): Server {
         const roleIds = memberRoles.filter((r) => r.user_id === m.id).map((r) => r.role_id);
         const host = server.kind === 'burrow' && m.id === server.ownerId;
         const powers = roleIds.some((id) => (roles.find((r) => r.id === id)?.perms.length ?? 0) > 0);
-        return { ...m, voiceMuted: !!m.voiceMuted, roleIds, role: host ? 'host' : powers ? 'mod' : 'member', online: online.has(m.id), ...presenceOf(m.id) };
+        return { ...m, voiceMuted: !!m.voiceMuted, timeoutUntil: (m.timeoutUntil ?? 0) > now() ? m.timeoutUntil : null, roleIds, role: host ? 'host' : powers ? 'mod' : 'member', online: online.has(m.id), ...presenceOf(m.id) };
       }),
     };
   };
@@ -441,9 +443,13 @@ export function createApp(opts: AppOptions): Server {
   const speaking = new Set<number>(); // people talking right now, as their apps report it
   const lastActive = new Map<number, number>(); // userId -> when they last talked or touched the app, for the AFK fire
   const usersInVoice = (channelId: number) => [...inVoice].filter(([, c]) => c === channelId).map(([u]) => u);
-  /** Muted for everyone in this burrow by a moderator. */
-  const serverMuted = (serverId: number, userId: number) =>
-    !!(db.prepare('SELECT voice_muted FROM members WHERE server_id = ? AND user_id = ?').get(serverId, userId) as { voice_muted: number } | undefined)?.voice_muted;
+  /** Muted for everyone in this burrow by a moderator, or timed out. */
+  const serverMuted = (serverId: number, userId: number) => {
+    const r = db.prepare('SELECT voice_muted, timeout_until FROM members WHERE server_id = ? AND user_id = ?').get(serverId, userId) as
+      | { voice_muted: number; timeout_until: number | null }
+      | undefined;
+    return !!r && (!!r.voice_muted || (r.timeout_until ?? 0) > now()); // muted by a moderator, or timed out
+  };
   /** Who's in a voice room, and which of them are muted, deafened or talking, so everyone in the burrow can see. */
   const voiceSummary = (channelId: number) => {
     const userIds = usersInVoice(channelId);
@@ -573,6 +579,7 @@ export function createApp(opts: AppOptions): Server {
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
     const problem = postProblem(channel, user.id);
     if (problem) throw new HttpError(403, problem);
+    const flagged = filterCheck(channel, user.id, typeof input.content === 'string' ? input.content : '');
     // Slow mode: people who manage rooms or messages aren't held back, and nor are scheduled messages.
     if (channel.slow && !extras.scheduled && !can(channel.serverId, user.id, 'rooms') && !can(channel.serverId, user.id, 'messages')) {
       const last = (db.prepare('SELECT MAX(created_at) AS t FROM messages WHERE channel_id = ? AND author_id = ?').get(channelId, user.id) as { t: number | null }).t;
@@ -629,6 +636,7 @@ export function createApp(opts: AppOptions): Server {
     }
     const message = messageById(messageId)!;
     broadcastToChannel(channel, { type: 'message', message });
+    if (flagged) fileReport(channel.serverId, message, null, `Word filter: ${flagged}`);
     alertAway(channel, message, forWhom);
     // Writing in a room means you've read it.
     markRead(user.id, channel, messageId);
@@ -984,9 +992,11 @@ export function createApp(opts: AppOptions): Server {
     const count = (db.prepare('SELECT COUNT(*) AS n, MAX(position) AS last FROM roles WHERE server_id = ?').get(serverId) as { n: number; last: number | null });
     if (count.n >= MAX_ROLES) throw new HttpError(400, `A burrow can have at most ${MAX_ROLES} roles`);
     // New roles start at the bottom, below everyone's.
+    const name = cleanName(body.name, 'Role name', 32);
+    audit(serverId, user.id, 'role_create', null, name);
     db.prepare('INSERT INTO roles (server_id, name, color, perms, position, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
       serverId,
-      cleanName(body.name, 'Role name', 32),
+      name,
       cleanColor(body.color ?? '#8a8f87'),
       cleanPerms(body.perms, me),
       (count.last ?? 0) + 1,
@@ -1002,6 +1012,9 @@ export function createApp(opts: AppOptions): Server {
     if (body.name !== undefined) db.prepare('UPDATE roles SET name = ? WHERE id = ?').run(cleanName(body.name, 'Role name', 32), role.id);
     if (body.color !== undefined) db.prepare('UPDATE roles SET color = ? WHERE id = ?').run(cleanColor(body.color), role.id);
     if (body.perms !== undefined) db.prepare('UPDATE roles SET perms = ? WHERE id = ?').run(cleanPerms(body.perms, me, role.perms), role.id);
+    if (body.uploadMb !== undefined) db.prepare('UPDATE roles SET upload_mb = ? WHERE id = ?').run(cleanUploadMb(body.uploadMb), role.id);
+    if (body.name !== undefined || body.color !== undefined || body.perms !== undefined || body.uploadMb !== undefined)
+      audit(role.serverId, user.id, 'role_edit', null, roleName(role.id));
     if (body.move === 'up' || body.move === 'down') {
       const neighbor = db
         .prepare(
@@ -1022,6 +1035,7 @@ export function createApp(opts: AppOptions): Server {
 
   route('DELETE', '/api/roles/:id', ({ user, params }) => {
     const { role } = managedRole(Number(params[0]), user);
+    audit(role.serverId, user.id, 'role_delete', null, roleName(role.id));
     db.prepare('DELETE FROM roles WHERE id = ?').run(role.id);
     accessChanged(role.serverId);
     return serverSummary(role.serverId, user.id);
@@ -1041,6 +1055,7 @@ export function createApp(opts: AppOptions): Server {
       if (!changeable(id)) throw new HttpError(403, 'You can only give or take roles below your own');
       if (wanted.has(id)) db.prepare('INSERT INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?)').run(serverId, targetId, id);
       else db.prepare('DELETE FROM member_roles WHERE role_id = ? AND user_id = ?').run(id, targetId);
+      audit(serverId, user.id, wanted.has(id) ? 'role_give' : 'role_take', targetId, roleName(id));
     }
     accessChanged(serverId);
     return { ok: true };
@@ -1055,6 +1070,7 @@ export function createApp(opts: AppOptions): Server {
     if (!target) throw new HttpError(404, "They aren't in this burrow");
     if (target.host || target.rank <= me.rank || targetId === user.id) throw new HttpError(403, "You can't remove them");
     if (body.ban) db.prepare('INSERT OR IGNORE INTO bans (server_id, user_id, banned_at) VALUES (?, ?, ?)').run(serverId, targetId, now());
+    audit(serverId, user.id, body.ban ? 'ban' : 'remove', targetId);
     removeMember(serverId, targetId);
     sendTo([targetId], { type: 'server_deleted', serverId });
     return { ok: true };
@@ -1074,6 +1090,7 @@ export function createApp(opts: AppOptions): Server {
     const [serverId, targetId] = params.map(Number);
     allowed(serverId, user, 'ban');
     db.prepare('DELETE FROM bans WHERE server_id = ? AND user_id = ?').run(serverId, targetId);
+    audit(serverId, user.id, 'unban', targetId);
     return { ok: true };
   });
 
@@ -1124,6 +1141,11 @@ export function createApp(opts: AppOptions): Server {
       for (const id of roleList(channel.serverId, body.postRoleIds))
         db.prepare('INSERT INTO channel_post_roles (channel_id, role_id) VALUES (?, ?)').run(channel.id, id);
     }
+    if (body.readOnlyRoleIds !== undefined) {
+      db.prepare('DELETE FROM channel_read_only WHERE channel_id = ?').run(channel.id);
+      for (const id of roleList(channel.serverId, body.readOnlyRoleIds))
+        db.prepare('INSERT INTO channel_read_only (channel_id, role_id) VALUES (?, ?)').run(channel.id, id);
+    }
     if (body.userLimit !== undefined && channel.kind === 'voice') {
       const limit = Math.floor(Number(body.userLimit) || 0);
       if (limit < 0 || limit > 99) throw new HttpError(400, 'A fire can have up to 99 seats');
@@ -1146,6 +1168,7 @@ export function createApp(opts: AppOptions): Server {
       }
       db.prepare('UPDATE channels SET archived_at = ? WHERE id = ?').run(body.archived ? channel.archivedAt ?? now() : null, channel.id);
     }
+    audit(channel.serverId, user.id, 'room_edit', null, `#${channelById(channel.id)!.name}`);
     accessChanged(channel.serverId);
     return serverSummary(channel.serverId, user.id);
   });
@@ -1158,6 +1181,7 @@ export function createApp(opts: AppOptions): Server {
     const textRooms = db.prepare("SELECT COUNT(*) AS n FROM channels WHERE server_id = ? AND kind = 'text'").get(channel.serverId) as { n: number };
     if (channel.kind === 'text' && textRooms.n <= 1) throw new HttpError(400, 'A burrow needs at least one text room');
     if (channel.kind === 'voice') closeVoiceRoom(channel.id);
+    if (channel.kind !== 'thread') audit(channel.serverId, user.id, 'room_delete', null, `#${channel.name}`);
     removeFiles(
       db.prepare('SELECT id FROM attachments WHERE channel_id = ? OR channel_id IN (SELECT id FROM channels WHERE parent_id = ?)').all(channel.id, channel.id) as Json[],
     );
@@ -1212,7 +1236,10 @@ export function createApp(opts: AppOptions): Server {
     voiceTarget(to.serverId, user, targetId);
     if (!from || from.serverId !== to.serverId) throw new HttpError(400, "They aren't at a fire in this burrow");
     if (!canSee(to, targetId)) throw new HttpError(403, "They can't see that room");
-    if (from.id !== to.id) moveTo(targetId, to.id, { by: user.username });
+    if (from.id !== to.id) {
+      audit(to.serverId, user.id, 'voice_move', targetId, `#${from.name} › #${to.name}`);
+      moveTo(targetId, to.id, { by: user.username });
+    }
     return { ok: true };
   });
 
@@ -1222,6 +1249,7 @@ export function createApp(opts: AppOptions): Server {
     if (!from) throw new HttpError(400, "They aren't at a fire");
     voiceTarget(from.serverId, user, targetId);
     sendTo([targetId], { type: 'voice_kicked', by: user.username });
+    audit(from.serverId, user.id, 'voice_disconnect', targetId, `#${from.name}`);
     kickFromVoice(targetId);
     return { ok: true };
   });
@@ -1234,6 +1262,7 @@ export function createApp(opts: AppOptions): Server {
     voiceTarget(serverId, user, targetId);
     const muted = body.muted === true;
     db.prepare('UPDATE members SET voice_muted = ? WHERE server_id = ? AND user_id = ?').run(muted ? 1 : 0, serverId, targetId);
+    audit(serverId, user.id, muted ? 'voice_mute' : 'voice_unmute', targetId);
     sendTo([targetId], { type: 'server_muted', serverId, muted });
     sendServerUpdate(serverId);
     const channel = channelById(inVoice.get(targetId) ?? -1);
@@ -1468,6 +1497,7 @@ export function createApp(opts: AppOptions): Server {
     if (body.content.length > MAX_MESSAGE_LENGTH) throw new HttpError(400, 'Message is too long');
     const before = db.prepare('SELECT content, COALESCE(edited_at, created_at) AS at FROM messages WHERE id = ?').get(id) as { content: string; at: number };
     if (before.content === body.content) return messageById(id);
+    const flagged = filterCheck(channel, user.id, body.content);
     // The old wording is kept, so anyone can see what an edited message used to say.
     db.prepare('INSERT INTO message_edits (message_id, content, edited_at) VALUES (?, ?, ?)').run(id, before.content, before.at);
     db.prepare('UPDATE messages SET content = ?, edited_at = ? WHERE id = ?').run(body.content, now(), id);
@@ -1478,6 +1508,7 @@ export function createApp(opts: AppOptions): Server {
     if (linksChanged) db.prepare('DELETE FROM message_embeds WHERE message_id = ?').run(id);
     const message = messageById(id)!;
     broadcastToChannel(channel, { type: 'message_updated', message });
+    if (flagged) fileReport(channel.serverId, message, null, `Word filter: ${flagged}`);
     if (linksChanged) previewLinks(id, channel, body.content);
     return message;
   });
@@ -1514,11 +1545,250 @@ export function createApp(opts: AppOptions): Server {
     if (!msg || !channel || !canSee(channel, user.id)) throw new HttpError(404, 'Message not found');
     if (msg.author_id !== user.id && !can(channel.serverId, user.id, 'messages'))
       throw new HttpError(403, 'You can only delete your own messages');
+    if (msg.author_id !== user.id) {
+      const text = (db.prepare('SELECT content FROM messages WHERE id = ?').get(id) as { content: string }).content;
+      audit(channel.serverId, user.id, 'message_delete', msg.author_id, `in #${channel.name}: ${text.slice(0, 120)}`);
+    }
     removeFiles(db.prepare('SELECT id FROM attachments WHERE message_id = ?').all(id) as Json[]);
     db.prepare('DELETE FROM messages WHERE id = ?').run(id);
     broadcastToChannel(channel, { type: 'message_deleted', id, channelId: channel.id });
     return { ok: true };
   });
+
+  // ---- moderation: timeouts, the audit log, bulk delete, the word filter, reports, upload limits ----
+
+  const isBurrow = (serverId: number) => !!db.prepare("SELECT 1 FROM servers WHERE id = ? AND kind = 'burrow'").get(serverId);
+  const roleName = (id: number) => (db.prepare('SELECT name FROM roles WHERE id = ?').get(id) as { name: string } | undefined)?.name ?? '';
+  const BURROW_FIELDS: Record<string, string> = {
+    name: 'name', description: 'description', welcomeChannelId: 'welcome room', afkChannelId: 'AFK fire', afkMinutes: 'AFK time',
+    rules: 'rules', uploadMb: 'upload limit', wordFilter: 'word filter',
+  };
+
+  /** Notes who did what, for the audit log. */
+  const audit = (serverId: number, actorId: number | null, action: string, targetId: number | null, detail = '') => {
+    if (!isBurrow(serverId)) return;
+    db.prepare('INSERT INTO audit_log (server_id, actor_id, action, target_id, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      serverId, actorId, action, targetId, detail.slice(0, 300), now(),
+    );
+  };
+  route('GET', '/api/servers/:id/audit', ({ user, params, url }) => {
+    const serverId = Number(params[0]);
+    allowed(serverId, user, 'audit');
+    const before = Number(url.searchParams.get('before')) || Number.MAX_SAFE_INTEGER;
+    const rows = db
+      .prepare(
+        `SELECT a.id, a.action, a.detail, a.created_at AS createdAt, a.actor_id AS actorId, ua.username AS actor, a.target_id AS targetId, ut.username AS target
+         FROM audit_log a LEFT JOIN users ua ON ua.id = a.actor_id LEFT JOIN users ut ON ut.id = a.target_id
+         WHERE a.server_id = ? AND a.id < ? ORDER BY a.id DESC LIMIT 51`,
+      )
+      .all(serverId, before) as Json[];
+    return { entries: rows.slice(0, 50), more: rows.length > 50 };
+  });
+
+  // Timeouts: someone can't write, react with files, or talk at a fire until it runs out.
+  const MAX_TIMEOUT_MINUTES = 7 * 24 * 60;
+  const timeoutTimers = new Map<string, NodeJS.Timeout>();
+  const timeoutUntil = (serverId: number, userId: number) =>
+    (db.prepare('SELECT timeout_until FROM members WHERE server_id = ? AND user_id = ?').get(serverId, userId) as { timeout_until: number | null } | undefined)?.timeout_until ?? 0;
+  /** "12 minutes" or "3 hours" left on a timeout, or null if there isn't one. */
+  const timeoutLeft = (serverId: number, userId: number) => {
+    const ms = timeoutUntil(serverId, userId) - now();
+    if (ms <= 0) return null;
+    const minutes = Math.ceil(ms / 60000);
+    if (minutes < 60) return `${minutes} more minute${minutes === 1 ? '' : 's'}`;
+    const hours = Math.round(minutes / 60);
+    return hours < 48 ? `${hours} more hour${hours === 1 ? '' : 's'}` : `${Math.round(hours / 24)} more days`;
+  };
+  /** Tells LiveKit whether someone at a fire can speak, after a timeout starts or ends. */
+  const voiceRightsChanged = (serverId: number, userId: number) => {
+    const channel = channelById(inVoice.get(userId) ?? -1);
+    if (channel?.serverId !== serverId) return;
+    tellLiveKit(`change whether user ${userId} can speak`, (v) => setCanSpeak(v, `room-${channel.id}`, String(userId), !serverMuted(serverId, userId)));
+    broadcastToChannel(channel, voiceStateEvent(channel.id));
+  };
+  const scheduleTimeoutEnd = (serverId: number, userId: number, until: number) => {
+    const key = `${serverId}:${userId}`;
+    clearTimeout(timeoutTimers.get(key));
+    timeoutTimers.delete(key);
+    if (until <= now()) return;
+    const t = setTimeout(() => {
+      timeoutTimers.delete(key);
+      if (timeoutUntil(serverId, userId) > now()) return;
+      voiceRightsChanged(serverId, userId);
+      sendServerUpdate(serverId);
+    }, Math.min(until - now() + 500, 2 ** 31 - 1));
+    t.unref();
+    timeoutTimers.set(key, t);
+  };
+  for (const r of db.prepare('SELECT server_id, user_id, timeout_until FROM members WHERE timeout_until > ?').all(now()) as { server_id: number; user_id: number; timeout_until: number }[])
+    scheduleTimeoutEnd(r.server_id, r.user_id, r.timeout_until);
+
+  route('POST', '/api/servers/:id/members/:id/timeout', ({ user, params, body }) => {
+    const [serverId, targetId] = params.map(Number);
+    const me = allowed(serverId, user, 'timeout');
+    const target = standing(serverId, targetId);
+    if (!target) throw new HttpError(404, "They aren't in this burrow");
+    if (target.host || target.rank <= me.rank || targetId === user.id) throw new HttpError(403, "You can't time them out");
+    const minutes = Math.floor(Number(body.minutes) || 0);
+    if (minutes < 0 || minutes > MAX_TIMEOUT_MINUTES) throw new HttpError(400, 'A timeout can last up to a week');
+    const until = minutes ? now() + minutes * 60000 : null;
+    db.prepare('UPDATE members SET timeout_until = ? WHERE server_id = ? AND user_id = ?').run(until, serverId, targetId);
+    audit(serverId, user.id, until ? 'timeout' : 'timeout_end', targetId, until ? `${minutes} minutes` : '');
+    scheduleTimeoutEnd(serverId, targetId, until ?? 0);
+    voiceRightsChanged(serverId, targetId);
+    sendServerUpdate(serverId);
+    return { ok: true, timeoutUntil: until };
+  });
+
+  // Bulk delete: a message and everything after it in the room, up to 100 at a time.
+  const MAX_BULK = 100;
+  route('POST', '/api/channels/:id/bulk-delete', ({ user, params, body }) => {
+    const channel = channelById(Number(params[0]));
+    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    allowed(channel.serverId, user, 'messages');
+    const fromId = Number(body.fromId);
+    const ids = (db.prepare('SELECT id FROM messages WHERE channel_id = ? AND id >= ? ORDER BY id LIMIT ?').all(channel.id, fromId, MAX_BULK + 1) as { id: number }[]).map((r) => r.id);
+    if (!ids.length) throw new HttpError(404, 'Message not found');
+    if (ids.length > MAX_BULK) throw new HttpError(400, `That's more than ${MAX_BULK} messages. Pick a newer one to start from.`);
+    for (const id of ids) {
+      removeFiles(db.prepare('SELECT id FROM attachments WHERE message_id = ?').all(id) as Json[]);
+      db.prepare('DELETE FROM messages WHERE id = ?').run(id);
+      broadcastToChannel(channel, { type: 'message_deleted', id, channelId: channel.id });
+    }
+    audit(channel.serverId, user.id, 'bulk_delete', null, `${ids.length} message${ids.length === 1 ? '' : 's'} in #${channel.name}`);
+    if (channel.kind === 'thread') threadChanged(channel);
+    return { deleted: ids.length };
+  });
+
+  // The word filter: chosen words either stop a message, or let it through and report it.
+  type WordFilter = { words: string[]; action: 'block' | 'flag' };
+  const cleanWordFilter = (value: unknown) => {
+    if (value === null) return null;
+    const v = (value ?? {}) as Json;
+    const words = [...new Set((Array.isArray(v.words) ? v.words : []).map((w) => String(w).trim().toLowerCase()).filter(Boolean))];
+    if (words.length > 200) throw new HttpError(400, 'The word filter can hold up to 200 words');
+    if (words.some((w) => w.length > 40)) throw new HttpError(400, 'Each filtered word can be at most 40 characters');
+    if (!words.length) return null;
+    return JSON.stringify({ words, action: v.action === 'flag' ? 'flag' : 'block' });
+  };
+  const wordFilterOf = (serverId: number): WordFilter | null => {
+    const raw = (db.prepare('SELECT word_filter FROM servers WHERE id = ?').get(serverId) as { word_filter: string | null } | undefined)?.word_filter;
+    return raw ? JSON.parse(raw) : null;
+  };
+  const filterRegexes = new Map<string, RegExp>();
+  /** The first filtered word in a message, matched as a whole word in any letter case. */
+  const filteredWord = (filter: WordFilter, text: string) => {
+    for (const word of filter.words) {
+      let re = filterRegexes.get(word);
+      if (!re) {
+        re = new RegExp(`(?<![\\p{L}\\p{N}])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'iu');
+        if (filterRegexes.size > 5000) filterRegexes.clear();
+        filterRegexes.set(word, re);
+      }
+      if (re.test(text)) return word;
+    }
+    return null;
+  };
+  /** Stops a message the filter blocks; returns the word if it should be reported instead. People who manage messages are exempt. */
+  const filterCheck = (channel: Channel, userId: number, text: string) => {
+    const filter = text ? wordFilterOf(channel.serverId) : null;
+    if (!filter || can(channel.serverId, userId, 'messages')) return null;
+    const word = filteredWord(filter, text);
+    if (word && filter.action === 'block') throw new HttpError(400, "Your message has a word this burrow doesn't allow");
+    return word;
+  };
+
+  // Reports: anyone can flag a message for the people who manage messages.
+  const openReports = (serverId: number) =>
+    (db.prepare('SELECT COUNT(*) AS n FROM reports WHERE server_id = ? AND resolved_at IS NULL').get(serverId) as { n: number }).n;
+  const reportsChanged = (serverId: number) => {
+    const count = openReports(serverId);
+    sendTo(serverMemberIds(serverId).filter((id) => can(serverId, id, 'messages')), { type: 'reports', serverId, open: count });
+  };
+  const fileReport = (serverId: number, message: Json, reporterId: number | null, reason: string) => {
+    db.prepare(
+      'INSERT INTO reports (server_id, message_id, channel_id, author_id, content, reporter_id, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(serverId, message.id as number, message.channelId as number, message.authorId as number, String(message.content ?? '').slice(0, 1000), reporterId, reason.slice(0, 200), now());
+    reportsChanged(serverId);
+  };
+  route('POST', '/api/messages/:id/report', ({ user, params, body }) => {
+    const { channel } = visibleMessage(user, Number(params[0]));
+    const message = messageById(Number(params[0]))!;
+    if (!isBurrow(channel.serverId)) throw new HttpError(400, 'Only messages in burrows can be reported');
+    if (db.prepare('SELECT 1 FROM reports WHERE message_id = ? AND reporter_id = ? AND resolved_at IS NULL').get(message.id as number, user.id))
+      throw new HttpError(409, "You've already reported this message");
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+    if (reason.length > 200) throw new HttpError(400, 'The reason can be at most 200 characters');
+    fileReport(channel.serverId, message, user.id, reason);
+    return { ok: true };
+  });
+  route('GET', '/api/servers/:id/reports', ({ user, params }) => {
+    const serverId = Number(params[0]);
+    allowed(serverId, user, 'messages');
+    return db
+      .prepare(
+        `SELECT r.id, r.message_id AS messageId, r.channel_id AS channelId, c.name AS channelName, r.content, r.reason, r.created_at AS createdAt,
+                r.author_id AS authorId, ua.username AS author, ${avatarUrl('ua.avatar')} AS authorAvatar, ur.username AS reporter,
+                r.resolved_at AS resolvedAt, uv.username AS resolvedBy
+         FROM reports r LEFT JOIN users ua ON ua.id = r.author_id LEFT JOIN users ur ON ur.id = r.reporter_id
+         LEFT JOIN users uv ON uv.id = r.resolved_by LEFT JOIN channels c ON c.id = r.channel_id
+         WHERE r.server_id = ? AND (r.resolved_at IS NULL OR r.resolved_at > ?) ORDER BY r.resolved_at IS NOT NULL, r.id DESC LIMIT 100`,
+      )
+      .all(serverId, now() - 7 * 86400e3);
+  });
+  // Dealt with: optionally deleting the message too. Every open report on that message closes.
+  route('POST', '/api/reports/:id/resolve', ({ user, params, body }) => {
+    const report = db.prepare('SELECT server_id, message_id, author_id FROM reports WHERE id = ?').get(Number(params[0])) as
+      | { server_id: number; message_id: number | null; author_id: number | null }
+      | undefined;
+    if (!report || !isMember(report.server_id, user.id)) throw new HttpError(404, 'Report not found');
+    allowed(report.server_id, user, 'messages');
+    const message = report.message_id === null ? undefined : (db.prepare('SELECT id, channel_id, content FROM messages WHERE id = ?').get(report.message_id) as Json | undefined);
+    if (body.deleteMessage && message) {
+      const channel = channelById(message.channel_id as number)!;
+      audit(report.server_id, user.id, 'message_delete', report.author_id, `in #${channel.name}: ${String(message.content).slice(0, 120)}`);
+      removeFiles(db.prepare('SELECT id FROM attachments WHERE message_id = ?').all(message.id as number) as Json[]);
+      db.prepare('DELETE FROM messages WHERE id = ?').run(message.id as number);
+      broadcastToChannel(channel, { type: 'message_deleted', id: message.id, channelId: channel.id });
+    }
+    db.prepare('UPDATE reports SET resolved_at = ?, resolved_by = ? WHERE resolved_at IS NULL AND (id = ? OR (message_id IS NOT NULL AND message_id = ?))').run(
+      now(), user.id, Number(params[0]), report.message_id ?? -1,
+    );
+    reportsChanged(report.server_id);
+    return { ok: true };
+  });
+
+  // Upload limits: a size for the burrow, and roles that allow more (or less). 0 means no files.
+  const cleanUploadMb = (value: unknown) => {
+    if (value === null || value === '') return null;
+    const mb = Math.floor(Number(value));
+    if (!(mb >= 0 && mb <= 10000)) throw new HttpError(400, 'Pick an upload limit in MB, or leave it empty');
+    return mb;
+  };
+  /** The largest file someone can share in a burrow, in bytes (0: none). The server's own limit is the most. */
+  const uploadLimitFor = (serverId: number, userId: number) => {
+    if (!isBurrow(serverId)) return maxUpload;
+    const me = standing(serverId, userId);
+    if (!me || me.host) return maxUpload;
+    const base = (db.prepare('SELECT upload_mb FROM servers WHERE id = ?').get(serverId) as { upload_mb: number | null }).upload_mb;
+    const roleLimits = me.roleIds.length
+      ? (db.prepare(`SELECT upload_mb FROM roles WHERE upload_mb IS NOT NULL AND id IN (${me.roleIds.map(() => '?').join(',')})`).all(...me.roleIds) as { upload_mb: number }[]).map((r) => r.upload_mb)
+      : [];
+    const mb = Math.max(base ?? Infinity, ...roleLimits);
+    return Math.min(maxUpload, mb * 1024 * 1024);
+  };
+
+  /** What the burrow's settings screens need, for the people allowed to see each part. */
+  const moderationSummary = (serverId: number, viewerId: number) => {
+    const r = db.prepare('SELECT upload_mb, word_filter FROM servers WHERE id = ?').get(serverId) as { upload_mb: number | null; word_filter: string | null };
+    return {
+      uploadMb: r.upload_mb,
+      myUploadLimit: opts.uploadDir ? uploadLimitFor(serverId, viewerId) : 0,
+      timeoutUntil: timeoutUntil(serverId, viewerId) > now() ? timeoutUntil(serverId, viewerId) : null,
+      ...(can(serverId, viewerId, 'burrow') ? { wordFilter: r.word_filter ? JSON.parse(r.word_filter) : null } : {}),
+      ...(can(serverId, viewerId, 'messages') ? { openReports: openReports(serverId) } : {}),
+    };
+  };
 
   // ---- uploads ------------------------------------------------------------
 
@@ -1537,8 +1807,11 @@ export function createApp(opts: AppOptions): Server {
     const channel = channelById(channelId);
     if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
+    const limit = uploadLimitFor(channel.serverId, user.id);
+    if (!limit) throw new HttpError(403, "Your roles can't share files in this burrow");
+    const tooBig = () => new HttpError(413, `You can share files up to ${Math.round(limit / 1048576)} MB here`);
     const declared = Number(req.headers['content-length']);
-    if (declared > maxUpload) throw new HttpError(413, `Files can be at most ${Math.round(maxUpload / 1048576)} MB`);
+    if (declared > limit) throw tooBig();
     let name = 'file';
     try {
       name = decodeURIComponent(String(req.headers['x-filename'] ?? 'file'));
@@ -1553,9 +1826,9 @@ export function createApp(opts: AppOptions): Server {
     await new Promise<void>((resolve, reject) => {
       req.on('data', (chunk: Buffer) => {
         size += chunk.length;
-        if (size > maxUpload) {
+        if (size > limit) {
           req.pause();
-          reject(new HttpError(413, `Files can be at most ${Math.round(maxUpload / 1048576)} MB`));
+          reject(tooBig());
         } else out.write(chunk);
       });
       req.on('end', () => out.end(resolve));
@@ -2359,6 +2632,7 @@ export function createApp(opts: AppOptions): Server {
   route('POST', '/api/messages/:id/pin', ({ user, params, body }) => {
     const id = Number(params[0]);
     const { channel } = visibleMessage(user, id);
+    if (isBurrow(channel.serverId) && !can(channel.serverId, user.id, 'pin')) throw new HttpError(403, "Your roles don't allow pinning");
     if (body.pinned === false) db.prepare('UPDATE messages SET pinned_at = NULL, pinned_by = NULL WHERE id = ?').run(id);
     else {
       const pins = (db.prepare('SELECT COUNT(*) AS n FROM messages WHERE channel_id = ? AND pinned_at IS NOT NULL AND id != ?').get(channel.id, id) as { n: number }).n;
@@ -2932,6 +3206,12 @@ export function createApp(opts: AppOptions): Server {
       const allowedRoles = db.prepare('SELECT role_id FROM channel_post_roles WHERE channel_id = ?').all(channel.id) as { role_id: number }[];
       if (!allowedRoles.some((r) => me.roleIds.includes(r.role_id))) return 'Only some roles can post in this room';
     }
+    if (!me.perms.has('rooms') && me.roleIds.length) {
+      const readOnly = db.prepare('SELECT role_id FROM channel_read_only WHERE channel_id = ?').all(room.id) as { role_id: number }[];
+      if (readOnly.some((r) => me.roleIds.includes(r.role_id))) return 'Your role can only read this room';
+    }
+    const left = timeoutLeft(channel.serverId, userId);
+    if (left) return `You're timed out for ${left}`;
     if (!rulesOk(channel.serverId, userId)) return "Accept the burrow's rules first";
     return null;
   };
@@ -3061,6 +3341,10 @@ export function createApp(opts: AppOptions): Server {
       return serverSummary(serverId, user.id);
     }
     allowed(serverId, user, 'burrow');
+    const changes = Object.keys(body).filter((k) => ['name', 'description', 'welcomeChannelId', 'afkChannelId', 'afkMinutes', 'rules', 'uploadMb', 'wordFilter'].includes(k));
+    if (changes.length) audit(serverId, user.id, 'burrow_edit', null, changes.map((k) => BURROW_FIELDS[k]).join(', '));
+    if (body.uploadMb !== undefined) db.prepare('UPDATE servers SET upload_mb = ? WHERE id = ?').run(cleanUploadMb(body.uploadMb), serverId);
+    if (body.wordFilter !== undefined) db.prepare('UPDATE servers SET word_filter = ? WHERE id = ?').run(cleanWordFilter(body.wordFilter), serverId);
     if (body.name !== undefined) db.prepare('UPDATE servers SET name = ? WHERE id = ?').run(cleanName(body.name, 'Burrow name'), serverId);
     if (body.description !== undefined) {
       const text = typeof body.description === 'string' ? body.description.trim() : '';
@@ -3136,7 +3420,7 @@ export function createApp(opts: AppOptions): Server {
   };
 
   const invitesOf = (serverId: number, user: User) => {
-    const all = can(serverId, user.id, 'burrow');
+    const all = can(serverId, user.id, 'invites');
     return db
       .prepare(
         `SELECT i.code, i.created_at AS createdAt, i.expires_at AS expiresAt, i.max_uses AS maxUses, i.uses, u.username AS createdBy
@@ -3175,7 +3459,7 @@ export function createApp(opts: AppOptions): Server {
   route('DELETE', '/api/invites/:code', ({ user, params }) => {
     const inv = db.prepare('SELECT server_id, created_by FROM invites WHERE code = ?').get(params[0]) as { server_id: number; created_by: number | null } | undefined;
     if (!inv || !isMember(inv.server_id, user.id)) throw new HttpError(404, 'Invite not found');
-    if (inv.created_by !== user.id) allowed(inv.server_id, user, 'burrow');
+    if (inv.created_by !== user.id) allowed(inv.server_id, user, 'invites');
     db.prepare('DELETE FROM invites WHERE code = ?').run(params[0]);
     return invitesOf(inv.server_id, user);
   });
@@ -3183,8 +3467,9 @@ export function createApp(opts: AppOptions): Server {
   // A new permanent code; the old one stops working.
   route('POST', '/api/servers/:id/invite-code', ({ user, params }) => {
     const serverId = Number(params[0]);
-    allowed(serverId, user, 'burrow');
+    allowed(serverId, user, 'invites');
     db.prepare('UPDATE servers SET invite_code = ? WHERE id = ?').run(newInviteCode(), serverId);
+    audit(serverId, user.id, 'invite_reset', null);
     sendServerUpdate(serverId);
     return serverSummary(serverId, user.id);
   });

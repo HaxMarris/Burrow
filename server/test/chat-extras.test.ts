@@ -99,7 +99,9 @@ test('pins and edit history', async () => {
   const { room } = await burrow(max, sam);
   const m = await say(room, max, 'first draft');
   assert.equal(m.pinnedAt, null);
-  const pinned = (await call(`/api/messages/${m.id}/pin`, { body: { pinned: true }, token: sam.token })).data;
+  // Pinning in a burrow takes the "pin messages" permission; the host has every permission.
+  assert.equal((await call(`/api/messages/${m.id}/pin`, { body: { pinned: true }, token: sam.token })).status, 403);
+  const pinned = (await call(`/api/messages/${m.id}/pin`, { body: { pinned: true }, token: max.token })).data;
   assert.ok(pinned.pinnedAt);
   assert.equal((await call(`/api/messages/${m.id}/pin`, { body: { pinned: true }, token: eve.token })).status, 404);
   assert.deepEqual((await call(`/api/channels/${room}/pins`, { token: sam.token })).data.map((x: any) => x.id), [m.id]);
