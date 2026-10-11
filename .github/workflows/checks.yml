@@ -1,0 +1,59 @@
+# Runs on every pull request (and on main): the server's type check and tests, a check of the
+# web client's scripts, the desktop app's scripts, and a test build of the Docker image.
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: Server types and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - run: npm run typecheck
+        working-directory: server
+      - run: npm test
+        working-directory: server
+
+  client:
+    name: Client and desktop scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Load order, duplicate names and ESLint (undefined names and other likely mistakes).
+      - run: npm install --no-save --no-package-lock --prefix "$RUNNER_TEMP/tools" eslint@9.39.1 globals@16.5.0 acorn@8.15.0
+      - run: node scripts/check-client.mjs
+        env:
+          TOOLS_DIR: ${{ runner.temp }}/tools/node_modules
+      - name: Desktop app scripts parse
+        run: for f in desktop/*.js desktop/scripts/*.js; do node --check "$f" || exit 1; done
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t burrow-check .

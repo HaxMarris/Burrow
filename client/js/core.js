@@ -449,7 +449,11 @@ function connect() {
     // Catch up on anything missed while disconnected.
     if (wasRetry) { loadServers().then(catchUpRoom).catch(() => {}); loadFriends(); }
   };
-  ws.onmessage = (e) => handleEvent(JSON.parse(e.data));
+  ws.onmessage = (e) => {
+    ws.heard = Date.now();
+    const ev = JSON.parse(e.data);
+    if (ev.type !== 'pong') handleEvent(ev);
+  };
   ws.onclose = (e) => {
     // The password was changed on another device, which signs this one out.
     if (e.code === 4001 && state.ws === ws) {
@@ -466,9 +470,31 @@ function connect() {
   };
 }
 let wsTimer = null;
+
+// A connection can die without closing (Wi-Fi switched, laptop slept), so the app checks it's still
+// there now and then, and as soon as you come back to it. No answer in time and it reconnects.
+function checkConnection() {
+  const ws = state.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN || ws.checking) return;
+  const asked = Date.now();
+  ws.checking = true;
+  ws.send(JSON.stringify({ type: 'ping' }));
+  setTimeout(() => {
+    ws.checking = false;
+    if (state.ws !== ws || ws.readyState !== WebSocket.OPEN || ws.heard >= asked) return;
+    // Closing a dead connection can hang, so don't wait for it to say it's closed.
+    const closed = ws.onclose;
+    ws.onclose = null;
+    ws.close();
+    closed?.({ code: 1006 });
+  }, 8000);
+}
+setInterval(() => { if (Date.now() - (state.ws?.heard ?? 0) > 25000) checkConnection(); }, 25000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkConnection(); });
 // The network's back (Wi-Fi rejoined, laptop woke up): reconnect now rather than waiting out the backoff.
 window.addEventListener('online', () => {
-  if (!wsTimer || !state.token || state.ws?.readyState === WebSocket.OPEN) return;
+  if (state.ws?.readyState === WebSocket.OPEN) return checkConnection();
+  if (!wsTimer || !state.token) return;
   clearTimeout(wsTimer);
   wsTimer = null;
   connect();

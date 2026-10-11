@@ -8,13 +8,16 @@
   "scripts": {
     "start": "node --no-warnings src/index.ts",
     "dev": "node --no-warnings --watch src/index.ts",
-    "test": "node --no-warnings --test test/*.test.ts"
+    "test": "node --no-warnings --test --test-timeout=30000 test/*.test.ts",
+    "typecheck": "tsc -p .",
+    "load-test": "node --no-warnings src/load-test.ts"
   },
   "dependencies": {
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
-    "@types/ws": "^8.5.13"
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.9.3"
   }
 }

@@ -1,0 +1,13 @@
+{
+  // Only for checking types: the server runs its .ts files directly (Node strips the types).
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "target": "es2023",
+    "module": "nodenext",
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src/*.ts"]
+}

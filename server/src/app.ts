@@ -4605,7 +4605,10 @@ export function createApp(opts: AppOptions): Server {
         return;
       }
       try {
-        if (msg.type === 'send') {
+        if (msg.type === 'ping') {
+          // The app checks now and then that the connection still works (a dropped Wi-Fi often doesn't close it).
+          ws.send(JSON.stringify({ type: 'pong' }));
+        } else if (msg.type === 'send') {
           postMessage(user, Number(msg.channelId), msg);
         } else if (msg.type === 'voice_join') {
           const channel = channelById(Number(msg.channelId));
