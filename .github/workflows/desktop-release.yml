@@ -81,7 +81,7 @@ jobs:
             desktop/dist/*.AppImage
           if-no-files-found: error
       # latest*.yml and .blockmap files are what installed apps read to update themselves.
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         if: github.event_name == 'release'
         with:
           files: |
