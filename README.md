@@ -20,8 +20,11 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Streaming extras: several screens side by side, popping a stream out, a preview of a screen before you open it, the fireside chat over a stream, who's watching, a blurred or swapped camera background, drawing on a shared screen, clips of the last 30 seconds, and "is live" posts
 - Image and file sharing: attach, paste or drag in up to 10 files per message, with inline image and video previews
 - Emoji reactions and replies (a reply to you counts as a mention)
-- Direct messages with anyone you share a burrow with, one to one or in groups of up to 10
-- Profile pictures and password changes (changing your password logs out your other devices), and resetting a forgotten password by email if the server has email set up
+- Direct messages with your friends and anyone you share a burrow with, one to one or in groups of up to 10
+- Profiles: a display name you can change any time, a nickname per burrow, a picture, a banner, a card colour and a short about me
+- Friends (add anyone by username, see who's online across all your burrows) and blocking (folds away their messages and stops their DMs, friend requests and pings)
+- Account safety: change your username, see and sign out your devices, optional two-step login with an authenticator app, passkeys (Face ID, Windows Hello, a phone or a security key), and password resets by email or by a link from whoever runs the server
+- Export my data (a zip of your messages and files) and delete my account (keeping your messages as "Deleted user", or taking them with you)
 - Real-time messaging over WebSockets, with typing indicators and online, away, Do not disturb and offline presence
 - Custom statuses (with an emoji, cleared after a while if you like), and "Playing …" from the desktop app when you run a game
 - A mentions inbox, `@everyone`, `@here` and `@role` mentions (for roles allowed to), quiet hours, and the unread count on the app icon
@@ -206,11 +209,21 @@ PUBLIC_URL=https://chat.example.com
 
 Write `@` in the username as `%40`. Port 465 starts encrypted (`smtps://`); for port 587 use `smtp://`, and Burrow switches to encryption before sending the password (it refuses to send it unencrypted). Then each person adds and confirms their address under *Email* in their account. Burrow only sends the code that confirms an address and the code that resets a password, never anything else.
 
+Without email (or for someone who lost their email too), whoever runs the server can make a one-hour reset link:
+
+```sh
+docker compose exec burrow node --no-warnings server/src/reset-link.ts their-username
+```
+
+Send them the link it prints (it uses `PUBLIC_URL`). Add `--two-step-off` if they also lost the phone with their authenticator app and their recovery codes.
+
 ### Security
 
 - Everything travels encrypted: Caddy serves HTTPS (and Burrow then tells browsers to always use it), and voice uses WebRTC's built-in encryption. Passwords are stored hashed with scrypt.
 - Too many wrong passwords lock that account's login for 15 minutes; registration code guesses are limited per address the same way.
-- Logins expire after 30 days without use. Changing your password logs you out everywhere else.
+- Logins expire after 30 days without use. Changing your password logs you out everywhere else, and *Your devices* in the account shows every login and can sign any of them out.
+- Two-step login is optional: each person can turn it on in their account, after which their password also needs a code from an authenticator app (or one of 10 one-time recovery codes).
+- Passkeys work in the web app over HTTPS (they belong to the site's address, so set `PUBLIC_URL` if people reach Burrow by more than one name). The desktop app logs in with a password.
 - With Docker, port 3000 only listens on the server itself, so the only way in is through Caddy. Set `BURROW_BIND=0.0.0.0` in `.env` if you run without a reverse proxy.
 - The web app only runs its own scripts (a strict Content-Security-Policy), which blunts any injected code.
 
@@ -282,7 +295,9 @@ Burrow has its own names for things: a **burrow** is a shared space for one grou
 - Anyone can report a message from its **⋯** menu. People who can delete messages see the reports under **Reports** in the burrow's settings, where they jump to the message, delete it or dismiss the report; the same menu can delete a message and everything after it (up to 100). **Edit burrow** has a word filter that either stops messages with those words or lets them through and reports them, and the burrow's upload limit. Roles allowed to *see the audit log* find who removed, banned, timed out, deleted or changed what under **Audit log**.
 - The speech-bubble tile above your burrows holds your direct messages. Start one with its **+** (tick several people for a group conversation), or click someone in a burrow's member list. A group's gear renames it, adds people or leaves it.
 - In the burrow list (*more* on a computer, or the burrow button on a phone), the folder button next to each burrow puts it in one of your own folders.
-- Click your name in the bottom corner to set a profile picture or change your password. If the server has email, add your address under *Email* there, so *Forgot your password?* on the login screen can send you a code.
+- **Your account** (in your menu, top right) has four tabs. *Profile*: picture, banner, display name, about me and card colour. *Settings*: theme, notifications, voice and sounds. *Login and security*: username, email, password, two-step login, passkeys and your devices. *Your data*: export everything, or delete your account. If the server has email, add your address under *Email*, so *Forgot your password?* on the login screen can send you a code.
+- Click anyone's name (in the member list or on a message) for their card: about me, the burrows you share, and buttons to message them, add them as a friend or block them. Click yourself to change your nickname in that burrow.
+- **Friends** is at the top of your direct messages: who's online, requests to accept, and anyone you've blocked. Add someone by their username there, even if you don't share a burrow.
 - Your picture (top right, or *You* on a phone) sets you to *Online*, *Away* or *Do not disturb* (no sounds or alerts), and sets a custom status. Burrow marks you away by itself after 10 minutes without touching it. The **@** next to it is your inbox of mentions and replies, with the number you haven't read.
 - Your account has the notification settings: alerts while Burrow is closed, quiet hours (no sounds or pop-ups, and silent phone alerts, between two times), and, in the desktop app, whether to show the game you're playing.
 - Type `@everyone` (everyone who can see the room), `@here` (only people online) or `@` and a role's name to ping them all. Only roles allowed to *mention @everyone and roles* can; for everyone else it's just text.
@@ -308,7 +323,7 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more), the rooms, burrows and organization update (headings and room order, topics, slow mode, announcement and archived rooms, invite links that run out, banners, rules and a welcome room, muting, events, group conversations and folders), and the voice and Campfire update (push to talk and hotkeys, voice sensitivity, soundboard, moving and muting people, AFK fire, seat limits, calls, listen together, kept fireside chat, music mode and a voice changer), and the notifications and presence update (away and Do not disturb, custom statuses, playing now, a mentions inbox, @everyone and @role mentions, quiet hours, the app icon count, alerts while Burrow is closed), password resets by email, the moderation update (timeouts, an audit log, reports, a word filter, bulk delete, read-only roles, more role permissions and upload limits per role), and the video and streaming update (side by side, pop out, previews, chat over a stream, who's watching, camera backgrounds, tab sharing with sound, clips, drawing and go-live posts).
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more), the rooms, burrows and organization update (headings and room order, topics, slow mode, announcement and archived rooms, invite links that run out, banners, rules and a welcome room, muting, events, group conversations and folders), and the voice and Campfire update (push to talk and hotkeys, voice sensitivity, soundboard, moving and muting people, AFK fire, seat limits, calls, listen together, kept fireside chat, music mode and a voice changer), and the notifications and presence update (away and Do not disturb, custom statuses, playing now, a mentions inbox, @everyone and @role mentions, quiet hours, the app icon count, alerts while Burrow is closed), password resets by email, the moderation update (timeouts, an audit log, reports, a word filter, bulk delete, read-only roles, more role permissions and upload limits per role), the video and streaming update (side by side, pop out, previews, chat over a stream, who's watching, camera backgrounds, tab sharing with sound, clips, drawing and go-live posts), and the profiles, friends and DMs update (display names, nicknames, profile cards, friends, blocking, username changes, devices, reset links, two-step login, passkeys, data export and account deletion).
 
 Ideas for later: text message encryption, sharing one program's sound on macOS.
 
