@@ -1990,6 +1990,8 @@ function renderDmList() {
     items.push(hint);
   }
   $('#channel-list').replaceChildren(...items);
+  // Calls show in the conversation itself, not as a burrow's Campfire.
+  $('#fire-main').replaceChildren();
   $('#voice-list').replaceChildren();
   $('#voice-section').classList.add('hidden');
 }
@@ -2593,7 +2595,11 @@ async function joinVoice(channelId, { muted = false, deafened = false } = {}) {
         if (track.kind !== 'audio') return renderStage();
         track.detach().forEach((el) => el.remove());
       })
-      .on(LK.RoomEvent.TrackPublished, renderStage)
+      .on(LK.RoomEvent.TrackPublished, (pub, p) => {
+        // A mic sent again (after a moderator lets someone speak) can arrive unmuted without saying so.
+        if (pub.source === LK.Track.Source.Microphone) setMuted(p, pub.isMuted);
+        renderStage();
+      })
       .on(LK.RoomEvent.TrackUnpublished, renderStage)
       .on(LK.RoomEvent.LocalTrackPublished, renderStage)
       .on(LK.RoomEvent.LocalTrackUnpublished, (pub) => {

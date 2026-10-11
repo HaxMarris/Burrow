@@ -1163,8 +1163,10 @@ button.seat-face { cursor: pointer; }
 .ring-text b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-strong); }
 .ring-card .btn { padding: 8px 14px; flex: none; }
 @media (max-width: 760px) {
-  .fire-btn { width: 44px; height: 44px; }
-  .fc { font-size: 11px; }
+  /* Eight buttons fit across a phone. */
+  .fire-controls { gap: 2px; justify-content: space-between; padding-left: 8px; padding-right: 8px; }
+  .fire-btn { width: 40px; height: 40px; }
+  .fc { font-size: 11px; min-width: 0; }
   .listen-video { width: 128px; }
   .listen-controls input[type="range"] { width: 70px; }
   .call-bar { margin: 8px 12px 0; }
