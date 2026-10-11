@@ -1276,6 +1276,8 @@ button.seat-face { cursor: pointer; }
 .vtile .fire-chat.overlay { position: absolute; z-index: 4; top: 52px; right: 10px; bottom: 10px; width: min(340px, 45%); display: flex; border: 0; border-radius: 16px; background: rgba(12, 18, 14, .78); color: #eef2ec; backdrop-filter: blur(6px); cursor: default; }
 .vtile .fire-chat.overlay .fire-chat-head { min-height: 46px; border-bottom-color: rgba(255, 255, 255, .12); }
 .vtile .fire-chat.overlay .fire-chat-head b, .vtile .fire-chat.overlay .fire-msg b { color: #fff; }
+.vtile .fire-chat.overlay .fire-msg { background: rgba(255, 255, 255, .1); color: #eef2ec; }
+.vtile .fire-chat.overlay .fire-msg.mine { background: rgba(255, 255, 255, .18); }
 .vtile .fire-chat.overlay .fire-chat-head .icon-btn { color: #eef2ec; }
 .vtile .fire-chat.overlay .fire-chat-note { color: rgba(238, 242, 236, .7); }
 .vtile .fire-chat.overlay .fire-chat-form { background: rgba(255, 255, 255, .1); border-color: rgba(255, 255, 255, .2); }
@@ -1283,7 +1285,7 @@ button.seat-face { cursor: pointer; }
 @media (max-width: 760px) { .vtile .fire-chat.overlay { width: auto; left: 10px; top: auto; height: 60%; } }
 /* A preview of someone's screen, over the button to watch it. */
 .stream-peek { position: fixed; z-index: 60; width: 260px; padding: 6px; border-radius: 14px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 5px; pointer-events: none; }
-.stream-peek img { width: 100%; border-radius: 9px; display: block; background: #0b100d; }
+.stream-peek img { width: 100%; aspect-ratio: 16 / 9; object-fit: contain; border-radius: 9px; display: block; background: #0b100d; }
 .stream-peek .peek-wait { display: grid; place-items: center; aspect-ratio: 16 / 9; border-radius: 9px; background: #0b100d; color: #cfd6cc; font-size: 12px; font-weight: 700; text-align: center; padding: 10px; }
 .stream-peek span { font-size: 12px; font-weight: 800; color: var(--text-strong); padding: 0 4px 2px; }
 .clip-preview { width: 100%; max-height: 50vh; border-radius: 12px; background: #000; }

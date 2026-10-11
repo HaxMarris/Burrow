@@ -3338,9 +3338,10 @@ function renderStage() {
     t.el.title = focusKey === w.key ? 'Click to shrink, double-click for full screen' : 'Click to make bigger, double-click for full screen';
   }
   const order = wanted.map((w) => tiles.get(w.key).el);
-  const focused = order.find((el) => el.classList.contains('focus'));
+  const big = order.filter((el) => el.classList.contains('focus'));
+  const focused = big[0];
   const grid = $('#stage-grid');
-  const next = focused ? [focused, ...order.filter((el) => el !== focused)] : order;
+  const next = [...big, ...order.filter((el) => !big.includes(el))];
   // Moving a tile that's full screen would drop it out of full screen, so while one is,
   // tiles only come and go; the order catches up afterwards.
   if (document.fullscreenElement && grid.contains(document.fullscreenElement)) {
@@ -3370,6 +3371,7 @@ function renderStage() {
 const PIP_ICON = '<svg viewBox="0 0 24 24"><path d="M3 5h18a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Zm1 2v10h16V7H4Zm8 4h7v5h-7v-5Z"/></svg>';
 const PEN_ICON = '<svg viewBox="0 0 24 24"><path d="m14.1 5.1 4.8 4.8L8.8 20H4v-4.8L14.1 5.1Zm1.4-1.4 1.8-1.8a1.5 1.5 0 0 1 2.1 0l2.7 2.7a1.5 1.5 0 0 1 0 2.1l-1.8 1.8-4.8-4.8Z"/></svg>';
 const CLIP_ICON = '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18Zm0 2a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm-1 3h2v4.4l3.2 1.9-1 1.7L11 13.6V8Z"/></svg>';
+const TAB_ICON = '<svg viewBox="0 0 24 24"><path d="M3 4h7l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Zm1 5v9h16V9H4Z"/></svg>';
 const EYE_ICON = '<svg viewBox="0 0 24 24"><path d="M12 5c5 0 8.7 3.6 10 7-1.3 3.4-5 7-10 7S3.3 15.4 2 12c1.3-3.4 5-7 10-7Zm0 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z"/></svg>';
 
 const poppedOutKey = () => (poppedKey && document.pictureInPictureElement && tiles.get(poppedKey)?.media === document.pictureInPictureElement ? poppedKey : null);
@@ -3853,7 +3855,7 @@ function openClip(blob, sharerId, seconds) {
     ${rooms.length && !tooBig ? `<label>Post it in<select id="clip-room">${rooms.map((c) => `<option value="${c.id}" ${c === pick ? 'selected' : ''}>${isDm(s) ? escapeHtml(fireName(c)) : '#' + escapeHtml(c.name)}</option>`).join('')}</select></label>
     <label>Say something (optional)<input id="clip-text" maxlength="500" placeholder="Look at this!" /></label>` : ''}
     <div class="error" id="modal-error"></div>
-    <div class="modal-row"><button class="btn secondary" id="clip-stop">Stop keeping clips</button><a class="btn secondary" id="clip-save" href="${url}" download="${escapeHtml(name)}">Save to this device</a>${rooms.length && !tooBig ? '<button class="btn" id="clip-post">Post</button>' : ''}</div>`);
+    <div class="modal-row"><button class="btn secondary" id="clip-stop">Stop clipping</button><a class="btn secondary" id="clip-save" href="${url}" download="${escapeHtml(name)}">Download</a>${rooms.length && !tooBig ? '<button class="btn" id="clip-post">Post</button>' : ''}</div>`);
   const closing = onModalClose;
   onModalClose = () => { closing?.(); setTimeout(() => URL.revokeObjectURL(url), 60_000); };
   $('#clip-stop').onclick = () => { stopClips(`${sharerId}:screen`); closeModal(); };
@@ -3912,12 +3914,12 @@ function chooseShare() {
   if (lp.isScreenShareEnabled || window.burrowDesktop) return toggleScreen();
   modal(`<h2>Share</h2>
     <div class="share-choices">
-      <button class="share-choice" id="share-tab">${SCREEN_ICON}<b>A browser tab</b><span>With its sound. Pick the tab, and leave "Also share tab audio" on.</span></button>
+      <button class="share-choice" id="share-tab">${TAB_ICON}<b>A browser tab</b><span>With its sound. Pick the tab, and leave "Also share tab audio" on.</span></button>
       <button class="share-choice" id="share-screen">${SCREEN_ICON}<b>Your screen or a window</b><span>Games and programs. Their sound is shared on Windows in Chrome or Edge, when you tick "Also share system audio".</span></button>
     </div>
     <label>Quality<select id="share-mode">
-      <option value="smooth" ${shareMode === 'smooth' ? 'selected' : ''}>Smooth: up to 60 frames a second, for games and video</option>
-      <option value="sharp" ${shareMode === 'sharp' ? 'selected' : ''}>Sharp: crisp text, for documents and code</option></select></label>
+      <option value="smooth" ${shareMode === 'smooth' ? 'selected' : ''}>Smooth (games and video, 60 fps)</option>
+      <option value="sharp" ${shareMode === 'sharp' ? 'selected' : ''}>Sharp (text and code)</option></select></label>
     <div class="modal-row"><button class="btn secondary" data-close>Cancel</button></div>`);
   const go = (surface) => {
     shareMode = $('#share-mode').value;

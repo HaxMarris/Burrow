@@ -17,6 +17,7 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Custom roles with their own name, color and permissions, private rooms, and removing or banning people
 - Moderation: timeouts, an audit log, reports, a word filter, deleting many messages at once, rooms some roles can only read, and upload limits per role
 - Voice rooms (via [LiveKit](https://livekit.io), self-hosted alongside Burrow) end-to-end encrypted, with mute and deafen, push to talk, strong noise isolation, a soundboard, a voice changer, calls in direct messages, your choice of microphone, speakers and camera, who's-talking rings, a volume slider for each person, and camera and screen sharing
+- Streaming extras: several screens side by side, popping a stream out, a preview of a screen before you open it, the fireside chat over a stream, who's watching, a blurred or swapped camera background, drawing on a shared screen, clips of the last 30 seconds, and "is live" posts
 - Image and file sharing: attach, paste or drag in up to 10 files per message, with inline image and video previews
 - Emoji reactions and replies (a reply to you counts as a mention)
 - Direct messages with anyone you share a burrow with, one to one or in groups of up to 10
@@ -156,12 +157,28 @@ corner (or double-click) for full screen, and **Back to chat** to return. The me
 sound starts muted; hover over it for its mute button and volume slider (0% to 200%, only for you).
 Burrow remembers what you pick for each person. In the desktop app you pick a screen or window from Burrow's
 own list, and *Smooth motion* (60 fps, for games and video) or *Sharp text* (keeps text crisp, for
-documents and code); browsers share smooth motion. Sound: on Windows 10 (version 2004 or later) and 11,
+documents and code); in a browser, **Share** asks whether to share a browser tab (with its sound) or your
+screen or a window, and which of the two. Sound: on Windows 10 (version 2004 or later) and 11,
 the desktop app shares only the sound of the window you picked, or everything except Burrow when you
 share a whole screen, so people don't hear themselves back. In Chrome or Edge, sharing a browser tab
 shares that tab's sound, and sharing a whole screen on Windows shares all of the computer's sound.
 Other cases share no sound. On a Mac, the first share asks for *Screen Recording* permission in System
 Settings, and Burrow may need a restart after you allow it.
+
+While you watch, the buttons in a video's corner:
+
+- **Pen**: draw on a shared screen. Everyone watching sees it, in your own color, and it fades after a few
+  seconds. When the desktop app shares a whole screen, the person sharing sees the drawing on that screen too.
+- **Clock**: keep clips of someone's stream; press it again to save the last 30 seconds (or so) and post it in
+  a room or download it. The recording happens on your own computer, only while it's on.
+- **Speech bubble**: the fireside chat over a big or full screen video.
+- **Pop out**: the video in its own small window that stays on top, so you can go back to chatting.
+
+With two or more screens shared, **Screens side by side** shows them next to each other. The eye in a screen's
+corner counts who's watching (hover for names). Hover over **Watch screen** at the fire for a small preview of
+it first. Everything people at a fire tell each other for these is sealed with the voice key, like the voice.
+*Edit burrow* can pick a room for go-live posts: sharing your screen then posts that you're live there, with a
+**Join and watch** button, and the post says when it ended.
 
 ### GIFs
 
@@ -256,7 +273,7 @@ Burrow has its own names for things: a **burrow** is a shared space for one grou
 - People who can manage rooms add rooms and headings with the **+** next to *Rooms*, where *Arrange rooms* also puts them in order (on a computer you can drag them too). Anyone can fold a heading away. The gear that appears when you hover over a room changes its name, topic, slow mode and who can see it, makes it an announcement room that only some roles can post in, picks roles that can only read it, archives it or deletes it. A private room is only seen by people who manage rooms, plus the roles and people you tick.
 - The bell at the top of a room mutes it for a while, or sets it to all messages, only @mentions or nothing. Right-clicking a room in the list does the same.
 - **Events** above the rooms plans a game night: pick a time and a room, and people answer *Going*, *Maybe* or *Can't go*. Everyone going or maybe going gets a reminder 15 minutes before.
-- Your account (your picture, top right) and the sliders button on the voice bar have voice and video settings: which microphone, speakers or headset and camera to use (with a mic test and a camera preview), your volume and everyone's volume, noise isolation, and voice quality (48, 64 or 96 kbps). Noise isolation has four levels: *Off* (for music), *Light* (the browser's own filter), *Strong* (the default, [RNNoise](https://github.com/xiph/rnnoise)) and *Strongest* ([GTCRN](https://github.com/Xiaobin-Rong/gtcrn); takes out the most noise but makes voices a little flatter). Both run on your own device before your voice is encrypted. Picking speakers works in Chrome, Edge and the desktop app; Safari, iPhones and Firefox play through whatever the system picks. Account also has sound settings: chimes for new messages and for people joining or leaving your voice room, and how loud they are.
+- Your account (your picture, top right) and the sliders button on the voice bar have voice and video settings: which microphone, speakers or headset and camera to use (with a mic test and a camera preview), your volume and everyone's volume, noise isolation, voice quality (48, 64 or 96 kbps), and your camera background: blurred, or a picture of your own (done on your own device with [MediaPipe](https://ai.google.dev/edge/mediapipe), before your camera is sent). Noise isolation has four levels: *Off* (for music), *Light* (the browser's own filter), *Strong* (the default, [RNNoise](https://github.com/xiph/rnnoise)) and *Strongest* ([GTCRN](https://github.com/Xiaobin-Rong/gtcrn); takes out the most noise but makes voices a little flatter). Both run on your own device before your voice is encrypted. Picking speakers works in Chrome, Edge and the desktop app; Safari, iPhones and Firefox play through whatever the system picks. Account also has sound settings: chimes for new messages and for people joining or leaving your voice room, and how loud they are.
 - **How you talk** in the voice settings: *When you speak* (optionally only above a sensitivity line you set while testing) or *Push to talk* (hold \` by default, or any key or mouse side button). Mute and deafen have keys too (Ctrl+Shift+M and Ctrl+Shift+D). In the desktop app these keys work while another program is in front, even a game; on a Mac, allow Burrow under System Settings › Privacy & Security › Accessibility first. The settings also have a voice changer (deeper, higher, robot, echo, radio, cave), *Music mode* (stereo at 128 kbps with no noise isolation, for playing an instrument), and whether to play soundboard sounds.
 - At the fire: **Sounds** opens the burrow's soundboard (people who manage emoji and sounds add clips of up to 10 seconds in the burrow settings), and **Listen** plays a YouTube video for everyone at the fire, in step; anyone can pause, skip or change it. Each voice room's gear sets how many seats it has and whether its fireside chat is kept after everyone leaves. *Edit burrow* picks an AFK fire that people idle for a while are moved to, muted. Who's talking shows in the room list even when you're not at that fire.
 - People whose role can *manage voice* click someone at a fire to move them to another fire, disconnect them, or mute them for everyone (until they're unmuted, even if they rejoin). They can also sit at a full fire.
@@ -291,7 +308,7 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more), the rooms, burrows and organization update (headings and room order, topics, slow mode, announcement and archived rooms, invite links that run out, banners, rules and a welcome room, muting, events, group conversations and folders), and the voice and Campfire update (push to talk and hotkeys, voice sensitivity, soundboard, moving and muting people, AFK fire, seat limits, calls, listen together, kept fireside chat, music mode and a voice changer), and the notifications and presence update (away and Do not disturb, custom statuses, playing now, a mentions inbox, @everyone and @role mentions, quiet hours, the app icon count, alerts while Burrow is closed), password resets by email, and the moderation update (timeouts, an audit log, reports, a word filter, bulk delete, read-only roles, more role permissions and upload limits per role).
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more), the rooms, burrows and organization update (headings and room order, topics, slow mode, announcement and archived rooms, invite links that run out, banners, rules and a welcome room, muting, events, group conversations and folders), and the voice and Campfire update (push to talk and hotkeys, voice sensitivity, soundboard, moving and muting people, AFK fire, seat limits, calls, listen together, kept fireside chat, music mode and a voice changer), and the notifications and presence update (away and Do not disturb, custom statuses, playing now, a mentions inbox, @everyone and @role mentions, quiet hours, the app icon count, alerts while Burrow is closed), password resets by email, the moderation update (timeouts, an audit log, reports, a word filter, bulk delete, read-only roles, more role permissions and upload limits per role), and the video and streaming update (side by side, pop out, previews, chat over a stream, who's watching, camera backgrounds, tab sharing with sound, clips, drawing and go-live posts).
 
 Ideas for later: text message encryption, sharing one program's sound on macOS.
 

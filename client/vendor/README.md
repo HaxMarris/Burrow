@@ -16,3 +16,8 @@
   [unicode-emoji-json](https://github.com/muan/unicode-emoji-json) 0.9.0 by Mu-An Chiou (MIT License),
   grouped and kept to Emoji 15.0 so everything listed shows on current systems. Loaded the first time
   someone opens the emoji picker.
+- `mediapipe/`: [MediaPipe Tasks Vision](https://github.com/google-ai-edge/mediapipe) 0.10.14 (Apache License 2.0)
+  for the camera background. `vision.js` is the npm package's `vision_bundle.cjs` wrapped for a plain script tag
+  (`window.MediaPipeVision`, source map reference removed); `vision_wasm_internal.js` and `.wasm` are its `wasm/`
+  files; `selfie_segmenter.tflite` is the [selfie segmenter model](https://ai.google.dev/edge/mediapipe/solutions/vision/image_segmenter#selfie-model)
+  (float16, Apache License 2.0). Loaded only when someone turns on a camera background.
