@@ -6,7 +6,7 @@ import { extname, join, normalize } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { addModeratorRole, type Db } from './db.ts';
 import { hashPassword, verifyPassword, newToken, newInviteCode } from './auth.ts';
-import { closeRoom, removeFromRoom, voiceToken, type VoiceOptions } from './voice.ts';
+import { closeRoom, removeFromRoom, setCanSpeak, voiceToken, type VoiceOptions } from './voice.ts';
 import { staticFiles } from './static.ts';
 import { gifSearch, download, type GifOptions } from './gifs.ts';
 import { fetchEmbed, fetchImage, linksIn, type Embed, type EmbedOptions } from './embeds.ts';
@@ -29,7 +29,7 @@ export interface AppOptions {
 }
 
 type User = { id: number; username: string; avatar: string | null };
-const PERMS = ['rooms', 'messages', 'remove', 'ban', 'roles', 'burrow', 'emoji'] as const;
+const PERMS = ['rooms', 'messages', 'remove', 'ban', 'roles', 'burrow', 'emoji', 'voice'] as const;
 type Perm = (typeof PERMS)[number];
 type Standing = { host: boolean; rank: number; perms: Set<Perm>; roleIds: number[] };
 const parsePerms = (text: string) => text.split(',').filter((p): p is Perm => (PERMS as readonly string[]).includes(p));
@@ -43,9 +43,11 @@ type Channel = {
   slow: number; // slow mode: seconds between someone's messages
   announce: number; // only some roles can post
   archivedAt: number | null;
+  userLimit: number; // seats at a fire; 0 is no limit
+  keepChat: number; // the fireside chat stays after everyone leaves
 };
 const CHANNEL_COLS = `id, server_id AS serverId, name, kind, private, parent_id AS parentId,
-  slow_seconds AS slow, announce, archived_at AS archivedAt`;
+  slow_seconds AS slow, announce, archived_at AS archivedAt, user_limit AS userLimit, keep_chat AS keepChat`;
 type Json = Record<string, unknown>;
 
 class HttpError extends Error {
@@ -107,6 +109,17 @@ const AVATAR_TYPES: { ext: string; type: string; magic: (b: Buffer) => boolean }
   { ext: 'gif', type: 'image/gif', magic: (b) => b.subarray(0, 4).toString('latin1') === 'GIF8' },
   { ext: 'webp', type: 'image/webp', magic: (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP' },
 ];
+// Soundboard clips, also recognised by their first bytes.
+const MAX_SOUND_BYTES = 1024 * 1024;
+const SOUND_TYPES: { ext: string; type: string; magic: (b: Buffer) => boolean }[] = [
+  { ext: 'mp3', type: 'audio/mpeg', magic: (b) => b.subarray(0, 3).toString('latin1') === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) },
+  { ext: 'ogg', type: 'audio/ogg', magic: (b) => b.subarray(0, 4).toString('latin1') === 'OggS' },
+  { ext: 'wav', type: 'audio/wav', magic: (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WAVE' },
+  { ext: 'webm', type: 'audio/webm', magic: (b) => b.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3])) },
+  { ext: 'm4a', type: 'audio/mp4', magic: (b) => b.subarray(4, 8).toString('latin1') === 'ftyp' },
+];
+const MAX_SOUNDS = 30;
+
 const EMOJI = /\p{Extended_Pictographic}|\p{Regional_Indicator}/u;
 // Shown in the page. Everything else downloads, so an uploaded .html or .svg can't run as part of Burrow.
 const INLINE_TYPES = new Set([
@@ -312,7 +325,7 @@ export function createApp(opts: AppOptions): Server {
     const server = db
       .prepare(
         `SELECT id, name, kind, owner_id AS ownerId, invite_code AS inviteCode, dm_key AS dmKey, description, rules,
-                welcome_channel_id AS welcomeChannelId,
+                welcome_channel_id AS welcomeChannelId, afk_channel_id AS afkChannelId, afk_minutes AS afkMinutes,
                 CASE WHEN icon IS NULL THEN NULL ELSE '/api/burrow-pictures/' || icon END AS icon,
                 CASE WHEN banner IS NULL THEN NULL ELSE '/api/burrow-pictures/' || banner END AS banner
          FROM servers WHERE id = ?`,
@@ -335,6 +348,7 @@ export function createApp(opts: AppOptions): Server {
       .filter((c) => canSee(c, viewerId))
       .map(({ serverId: _, private: priv, parentId: __, announce, archivedAt, ...c }) => ({
         ...c,
+        keepChat: !!c.keepChat,
         private: !!priv,
         announce: !!announce,
         archived: archivedAt !== null,
@@ -374,6 +388,8 @@ export function createApp(opts: AppOptions): Server {
       events: server.kind === 'burrow' ? eventsIn(serverId, viewerId) : [],
       threads: threadsIn(serverId, viewerId),
       emoji: emojiOf(serverId),
+      sounds: soundsOf(serverId),
+      serverMuted: serverMuted(serverId, viewerId),
       ...(server.kind === 'dm' ? { seen: dmSeen(serverId, viewerId) } : {}),
       roles,
       members: members.map((m) => {
@@ -407,12 +423,24 @@ export function createApp(opts: AppOptions): Server {
   const inVoice = new Map<number, number>(); // userId -> voice channel they are in
 
   const voiceFlags = new Map<number, { muted: boolean; deafened: boolean }>(); // userId -> mic off / not listening
+  const speaking = new Set<number>(); // people talking right now, as their apps report it
+  const lastActive = new Map<number, number>(); // userId -> when they last talked or touched the app, for the AFK fire
   const usersInVoice = (channelId: number) => [...inVoice].filter(([, c]) => c === channelId).map(([u]) => u);
-  /** Who's in a voice room, and which of them are muted or deafened, so everyone in the burrow can see. */
+  /** Muted for everyone in this burrow by a moderator. */
+  const serverMuted = (serverId: number, userId: number) =>
+    !!(db.prepare('SELECT voice_muted FROM members WHERE server_id = ? AND user_id = ?').get(serverId, userId) as { voice_muted: number } | undefined)?.voice_muted;
+  /** Who's in a voice room, and which of them are muted, deafened or talking, so everyone in the burrow can see. */
   const voiceSummary = (channelId: number) => {
     const userIds = usersInVoice(channelId);
     const flagged = (flag: 'muted' | 'deafened') => userIds.filter((u) => voiceFlags.get(u)?.[flag]);
-    return { voiceUsers: userIds, voiceMuted: flagged('muted'), voiceDeafened: flagged('deafened') };
+    const serverId = channelById(channelId)?.serverId;
+    return {
+      voiceUsers: userIds,
+      voiceMuted: flagged('muted'),
+      voiceDeafened: flagged('deafened'),
+      voiceServerMuted: serverId === undefined ? [] : userIds.filter((u) => serverMuted(serverId, u)),
+      voiceSpeaking: userIds.filter((u) => speaking.has(u)),
+    };
   };
   // Fireside chat: text for the people in a voice room, while they're there. It's kept in memory
   // only, sent to whoever is in the room, and gone once the last person leaves.
@@ -420,8 +448,23 @@ export function createApp(opts: AppOptions): Server {
   let firesideId = 0;
   const FIRESIDE_KEEP = 100;
   const voiceStateEvent = (channelId: number) => {
-    const { voiceUsers, voiceMuted, voiceDeafened } = voiceSummary(channelId);
-    return { type: 'voice_state', channelId, userIds: voiceUsers, muted: voiceMuted, deafened: voiceDeafened };
+    const { voiceUsers, voiceMuted, voiceDeafened, voiceServerMuted, voiceSpeaking } = voiceSummary(channelId);
+    return { type: 'voice_state', channelId, userIds: voiceUsers, muted: voiceMuted, deafened: voiceDeafened, serverMuted: voiceServerMuted, speaking: voiceSpeaking };
+  };
+  // Listen together: one YouTube video per fire, played in step for everyone there. Like the
+  // fireside chat, it's only kept while someone is at the fire.
+  type Listening = { videoId: string; title: string; playing: boolean; position: number; since: number; by: number };
+  const listening = new Map<number, Listening>(); // voice channel id -> what's playing
+  /** Where the video is now, in seconds, and the clock it was read at, so apps can line up. */
+  const listenEvent = (channelId: number) => {
+    const l = listening.get(channelId);
+    const at = Date.now();
+    return {
+      type: 'listen_state',
+      channelId,
+      at,
+      state: l ? { videoId: l.videoId, title: l.title, playing: l.playing, by: l.by, position: l.position + (l.playing ? (at - l.since) / 1000 : 0) } : null,
+    };
   };
 
   const sendTo = (userIds: Iterable<number>, event: Json) => {
@@ -447,19 +490,32 @@ export function createApp(opts: AppOptions): Server {
       return;
     }
     if (prev === undefined && channelId === null) return;
+    speaking.delete(userId);
     if (prev !== undefined) {
       inVoice.delete(userId);
-      if (!usersInVoice(prev).length) fireside.delete(prev);
+      // The last one out puts the fire out: its chat (unless it's kept) and whatever was playing.
+      if (!usersInVoice(prev).length) {
+        fireside.delete(prev);
+        listening.delete(prev);
+      }
       const old = channelById(prev);
       if (old) broadcastToChannel(old, voiceStateEvent(old.id));
     }
-    if (channelId !== null) {
+    if (channelId === null) lastActive.delete(userId);
+    else {
       const channel = channelById(channelId)!;
       inVoice.set(userId, channelId);
-      sendTo([userId], { type: 'fireside_history', channelId, messages: fireside.get(channelId) ?? [] });
+      lastActive.set(userId, Date.now());
+      sendTo([userId], { type: 'fireside_history', channelId, messages: firesideHistory(channel) });
+      if (listening.has(channelId)) sendTo([userId], listenEvent(channelId));
       broadcastToChannel(channel, voiceStateEvent(channelId));
     }
   };
+  const firesideHistory = (channel: Channel) =>
+    channel.keepChat
+      ? (db.prepare('SELECT id, user_id AS userId, author, content, created_at AS createdAt FROM fireside_messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?')
+          .all(channel.id, FIRESIDE_KEEP) as Json[]).reverse()
+      : fireside.get(channel.id) ?? [];
   const flagsFrom = (msg: Json) => ({ muted: msg.muted === true, deafened: msg.deafened === true });
 
   // LiveKit only checks who may join when they join, so people who lose access are disconnected
@@ -1050,6 +1106,21 @@ export function createApp(opts: AppOptions): Server {
       for (const id of roleList(channel.serverId, body.postRoleIds))
         db.prepare('INSERT INTO channel_post_roles (channel_id, role_id) VALUES (?, ?)').run(channel.id, id);
     }
+    if (body.userLimit !== undefined && channel.kind === 'voice') {
+      const limit = Math.floor(Number(body.userLimit) || 0);
+      if (limit < 0 || limit > 99) throw new HttpError(400, 'A fire can have up to 99 seats');
+      db.prepare('UPDATE channels SET user_limit = ? WHERE id = ?').run(limit, channel.id);
+    }
+    if (body.keepChat !== undefined && channel.kind === 'voice') {
+      db.prepare('UPDATE channels SET keep_chat = ? WHERE id = ?').run(body.keepChat ? 1 : 0, channel.id);
+      // Turned off: what was kept goes, and the chat now lives only while people are at the fire.
+      if (!body.keepChat) db.prepare('DELETE FROM fireside_messages WHERE channel_id = ?').run(channel.id);
+      else if (fireside.has(channel.id)) {
+        for (const m of fireside.get(channel.id)!)
+          db.prepare('INSERT INTO fireside_messages (channel_id, user_id, author, content, created_at) VALUES (?, ?, ?, ?, ?)').run(channel.id, m.userId as number, m.author as string, m.content as string, m.createdAt as number);
+        fireside.delete(channel.id);
+      }
+    }
     if (body.archived !== undefined && channel.kind === 'text') {
       if (body.archived && !channel.archivedAt) {
         const open = db.prepare("SELECT COUNT(*) AS n FROM channels WHERE server_id = ? AND kind = 'text' AND archived_at IS NULL").get(channel.serverId) as { n: number };
@@ -1083,7 +1154,262 @@ export function createApp(opts: AppOptions): Server {
     if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
     if (channel.kind !== 'voice') throw new HttpError(400, 'That is not a voice room');
     if (!opts.voice) throw new HttpError(503, 'Voice is not set up on this server');
-    return { url: opts.voice.url ?? null, token: voiceToken(opts.voice, user, `room-${channel.id}`) };
+    checkSeat(channel, user.id);
+    const canSpeak = !serverMuted(channel.serverId, user.id);
+    return { url: opts.voice.url ?? null, token: voiceToken(opts.voice, user, `room-${channel.id}`, undefined, canSpeak), canSpeak };
+  });
+
+  // ---- voice and the Campfire -----------------------------------------------
+
+  // Someone moved by a moderator (or to the AFK fire) gets a seat even at a full fire, for a little while.
+  const pendingMoves = new Map<number, { channelId: number; until: number }>();
+  /** A fire with a seat limit is full for everyone but people who manage voice, and people being moved there. */
+  const checkSeat = (channel: Channel, userId: number) => {
+    if (!channel.userLimit || inVoice.get(userId) === channel.id) return;
+    const move = pendingMoves.get(userId);
+    if (move && move.channelId === channel.id && move.until > Date.now()) return;
+    if (usersInVoice(channel.id).length >= channel.userLimit && !can(channel.serverId, userId, 'voice'))
+      throw new HttpError(403, `This fire is full (${channel.userLimit} seats)`);
+  };
+
+  /** Someone in a voice room of this burrow that you may move, mute or disconnect. */
+  const voiceTarget = (serverId: number, user: User, targetId: number) => {
+    const me = allowed(serverId, user, 'voice');
+    const target = standing(serverId, targetId);
+    if (!target) throw new HttpError(404, "They aren't in this burrow");
+    if (targetId !== user.id && (target.host || target.rank <= me.rank)) throw new HttpError(403, "You can't do that to them");
+    return target;
+  };
+  const moveTo = (userId: number, channelId: number, extra: Json = {}) => {
+    pendingMoves.set(userId, { channelId, until: Date.now() + 30_000 });
+    sendTo([userId], { type: 'voice_move', channelId, ...extra });
+  };
+
+  // Moving someone to another fire in the same burrow. Their app takes them there.
+  route('POST', '/api/voice/move', ({ user, body }) => {
+    const to = channelById(Number(body.channelId));
+    const targetId = Number(body.userId);
+    const from = channelById(inVoice.get(targetId) ?? -1);
+    if (!to || to.kind !== 'voice' || !canSee(to, user.id)) throw new HttpError(404, 'Room not found');
+    voiceTarget(to.serverId, user, targetId);
+    if (!from || from.serverId !== to.serverId) throw new HttpError(400, "They aren't at a fire in this burrow");
+    if (!canSee(to, targetId)) throw new HttpError(403, "They can't see that room");
+    if (from.id !== to.id) moveTo(targetId, to.id, { by: user.username });
+    return { ok: true };
+  });
+
+  route('POST', '/api/voice/disconnect', ({ user, body }) => {
+    const targetId = Number(body.userId);
+    const from = channelById(inVoice.get(targetId) ?? -1);
+    if (!from) throw new HttpError(400, "They aren't at a fire");
+    voiceTarget(from.serverId, user, targetId);
+    sendTo([targetId], { type: 'voice_kicked', by: user.username });
+    kickFromVoice(targetId);
+    return { ok: true };
+  });
+
+  // Muted for everyone, in every voice room of the burrow, until a moderator lets them speak again.
+  // LiveKit stops taking their microphone too, so it doesn't rely on their app playing along.
+  route('POST', '/api/servers/:id/members/:id/voice-mute', ({ user, params, body }) => {
+    const [serverId, targetId] = params.map(Number);
+    if (targetId === user.id) throw new HttpError(400, "You can't mute yourself for everyone");
+    voiceTarget(serverId, user, targetId);
+    const muted = body.muted === true;
+    db.prepare('UPDATE members SET voice_muted = ? WHERE server_id = ? AND user_id = ?').run(muted ? 1 : 0, serverId, targetId);
+    sendTo([targetId], { type: 'server_muted', serverId, muted });
+    const channel = channelById(inVoice.get(targetId) ?? -1);
+    if (channel?.serverId === serverId) {
+      tellLiveKit(`change whether user ${targetId} can speak`, (v) => setCanSpeak(v, `room-${channel.id}`, String(targetId), !muted));
+      broadcastToChannel(channel, voiceStateEvent(channel.id));
+    }
+    return { ok: true };
+  });
+
+  // The AFK fire: people who haven't talked or touched the app for a while are moved there.
+  const checkAfk = (t = Date.now()) => {
+    for (const [userId, channelId] of inVoice) {
+      const channel = channelById(channelId);
+      if (!channel) continue;
+      const afk = db.prepare("SELECT afk_channel_id AS id, afk_minutes AS minutes FROM servers WHERE id = ? AND kind = 'burrow'").get(channel.serverId) as
+        | { id: number | null; minutes: number }
+        | undefined;
+      if (!afk?.id || afk.id === channelId) continue;
+      if (t - (lastActive.get(userId) ?? t) < afk.minutes * 60_000) continue;
+      const to = channelById(afk.id);
+      if (to?.kind !== 'voice' || to.serverId !== channel.serverId || !canSee(to, userId)) continue;
+      lastActive.set(userId, t);
+      moveTo(userId, to.id, { afk: true });
+    }
+  };
+  const afkTimer = setInterval(() => checkAfk(), 30_000);
+  afkTimer.unref();
+
+  // ---- the soundboard: each burrow's short clips, played for everyone at its fires
+
+  const soundsOf = (serverId: number) =>
+    db.prepare("SELECT id, name, emoji, '/api/sounds/' || file AS url FROM sounds WHERE server_id = ? ORDER BY name").all(serverId);
+  const soundPath = (file: string) => picturePath('sounds', file);
+  const soundName = (value: unknown) => {
+    const name = typeof value === 'string' ? value.trim() : '';
+    if (!name || name.length > 32) throw new HttpError(400, 'Sound names are 1 to 32 characters');
+    return name;
+  };
+  // An emoji shown on the sound's button: one emoji, or one of the burrow's own.
+  const soundEmoji = (value: unknown) => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    if (text.length > 64) throw new HttpError(400, 'Pick one emoji');
+    return text;
+  };
+
+  const handleSoundUpload = async (req: IncomingMessage, res: ServerResponse, serverId: number, url: URL) => {
+    const user = pictureUploader(req);
+    allowed(serverId, user, 'emoji');
+    const name = soundName(url.searchParams.get('name'));
+    const emoji = soundEmoji(url.searchParams.get('emoji'));
+    const check = () => {
+      const count = (db.prepare('SELECT COUNT(*) AS n FROM sounds WHERE server_id = ?').get(serverId) as { n: number }).n;
+      if (count >= MAX_SOUNDS) throw new HttpError(400, `A burrow can have up to ${MAX_SOUNDS} sounds`);
+    };
+    check();
+    const tooBig = new HttpError(413, `Sounds can be at most ${MAX_SOUND_BYTES / 1024} KB`);
+    if (Number(req.headers['content-length']) > MAX_SOUND_BYTES) throw tooBig;
+    const chunks: Buffer[] = [];
+    let size = 0;
+    await new Promise<void>((resolve, reject) => {
+      req.on('data', (c: Buffer) => {
+        size += c.length;
+        if (size > MAX_SOUND_BYTES) {
+          req.pause();
+          reject(tooBig);
+        } else chunks.push(c);
+      });
+      req.on('end', resolve);
+      req.on('error', reject);
+    });
+    const data = Buffer.concat(chunks);
+    const kind = SOUND_TYPES.find((t) => t.magic(data));
+    if (!kind) throw new HttpError(400, 'Sounds must be MP3, OGG, WAV, WebM or M4A audio');
+    allowed(serverId, user, 'emoji');
+    check();
+    const file = `${randomBytes(16).toString('base64url')}.${kind.ext}`;
+    await mkdir(join(opts.uploadDir!, 'sounds'), { recursive: true });
+    await writeFile(soundPath(file), data);
+    db.prepare('INSERT INTO sounds (server_id, name, emoji, file, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(serverId, name, emoji, file, user.id, now());
+    sendServerUpdate(serverId);
+    send(res, 200, serverSummary(serverId, user.id));
+  };
+
+  const serveSound = async (req: IncomingMessage, res: ServerResponse, file: string) => {
+    const kind = SOUND_TYPES.find((t) => file.endsWith('.' + t.ext))!;
+    const info = opts.uploadDir ? await stat(soundPath(file)).catch(() => null) : null;
+    if (!info) throw new HttpError(404, 'Sound not found');
+    res.writeHead(200, {
+      'content-type': kind.type,
+      'content-length': info.size,
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; sandbox",
+      'cache-control': 'public, max-age=31536000, immutable',
+    });
+    if (req.method === 'HEAD') return res.end();
+    createReadStream(soundPath(file)).pipe(res);
+  };
+
+  const managedSound = (id: number, user: User) => {
+    const row = db.prepare('SELECT id, server_id, file FROM sounds WHERE id = ?').get(id) as { id: number; server_id: number; file: string } | undefined;
+    if (!row || !isMember(row.server_id, user.id)) throw new HttpError(404, 'Sound not found');
+    allowed(row.server_id, user, 'emoji');
+    return row;
+  };
+  route('PATCH', '/api/sounds/:id', ({ user, params, body }) => {
+    const row = managedSound(Number(params[0]), user);
+    if (body.name !== undefined) db.prepare('UPDATE sounds SET name = ? WHERE id = ?').run(soundName(body.name), row.id);
+    if (body.emoji !== undefined) db.prepare('UPDATE sounds SET emoji = ? WHERE id = ?').run(soundEmoji(body.emoji), row.id);
+    sendServerUpdate(row.server_id);
+    return serverSummary(row.server_id, user.id);
+  });
+  route('DELETE', '/api/sounds/:id', ({ user, params }) => {
+    const row = managedSound(Number(params[0]), user);
+    db.prepare('DELETE FROM sounds WHERE id = ?').run(row.id);
+    if (opts.uploadDir) unlink(soundPath(row.file)).catch(() => {});
+    sendServerUpdate(row.server_id);
+    return serverSummary(row.server_id, user.id);
+  });
+
+  const lastSound = new Map<number, number>(); // userId -> when they last played one
+  /** Plays a clip for everyone at your fire. Each app fetches and plays it itself. */
+  const playSound = (user: User, soundId: number) => {
+    const channel = channelById(inVoice.get(user.id) ?? -1);
+    if (!channel) throw new HttpError(400, 'Join a fire to play sounds');
+    const sound = db.prepare("SELECT id, '/api/sounds/' || file AS url FROM sounds WHERE id = ? AND server_id = ?").get(soundId, channel.serverId) as Json | undefined;
+    if (!sound) throw new HttpError(404, 'Sound not found');
+    if (serverMuted(channel.serverId, user.id)) throw new HttpError(403, "You've been muted here");
+    const t = Date.now();
+    if (t - (lastSound.get(user.id) ?? 0) < 2000) throw new HttpError(429, 'One sound at a time');
+    lastSound.set(user.id, t);
+    lastActive.set(user.id, t);
+    sendTo(usersInVoice(channel.id), { type: 'soundboard', channelId: channel.id, userId: user.id, soundId, url: sound.url });
+  };
+
+  // ---- listen together
+
+  const listenTogether = (user: User, msg: Json) => {
+    const channelId = inVoice.get(user.id);
+    if (channelId === undefined) throw new HttpError(400, 'Join a fire to listen together');
+    const t = Date.now();
+    const l = listening.get(channelId);
+    const here = (l: Listening) => l.position + (l.playing ? (t - l.since) / 1000 : 0);
+    const position = (value: unknown) => Math.max(0, Math.min(Number(value) || 0, 24 * 3600));
+    if (msg.action === 'start') {
+      const videoId = typeof msg.videoId === 'string' && /^[\w-]{11}$/.test(msg.videoId) ? msg.videoId : null;
+      if (!videoId) throw new HttpError(400, "That isn't a YouTube video");
+      listening.set(channelId, { videoId, title: '', playing: true, position: position(msg.position), since: t, by: user.id });
+    } else if (!l) {
+      return;
+    } else if (msg.action === 'title') {
+      // The app that started it says what it's called, once the video has loaded.
+      if (l.title || typeof msg.title !== 'string') return;
+      l.title = msg.title.trim().slice(0, 200);
+    } else if (msg.action === 'pause' || msg.action === 'play') {
+      Object.assign(l, { position: here(l), since: t, playing: msg.action === 'play' });
+    } else if (msg.action === 'seek') {
+      Object.assign(l, { position: position(msg.position), since: t });
+    } else if (msg.action === 'ended') {
+      // Stops at the end for everyone, rather than starting over.
+      Object.assign(l, { position: here(l), since: t, playing: false });
+    } else if (msg.action === 'stop') {
+      listening.delete(channelId);
+    } else return;
+    lastActive.set(user.id, t);
+    sendTo(usersInVoice(channelId), listenEvent(channelId));
+  };
+
+  // ---- calls in direct messages: a conversation's own voice room, and ringing the others
+
+  const callRoom = (serverId: number) =>
+    (db.prepare("SELECT id FROM channels WHERE server_id = ? AND kind = 'voice'").get(serverId) as { id: number } | undefined)?.id;
+  route('POST', '/api/dms/:id/call', ({ user, params }) => {
+    const serverId = Number(params[0]);
+    const kind = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind;
+    if (kind !== 'dm' || !isMember(serverId, user.id)) throw new HttpError(404, 'Conversation not found');
+    if (!opts.voice) throw new HttpError(503, 'Voice is not set up on this server');
+    let channelId = callRoom(serverId);
+    if (channelId === undefined) {
+      channelId = Number(db.prepare("INSERT INTO channels (server_id, name, kind, created_at) VALUES (?, 'Call', 'voice', ?)").run(serverId, now()).lastInsertRowid);
+      sendServerUpdate(serverId);
+    }
+    const inCall = new Set(usersInVoice(channelId));
+    const others = serverMemberIds(serverId).filter((id) => id !== user.id && !inCall.has(id));
+    sendTo(others, { type: 'ring', serverId, channelId, from: { id: user.id, username: user.username } });
+    return { channelId };
+  });
+  // Not picking up: the people in the call hear about it, and your other devices stop ringing.
+  route('POST', '/api/dms/:id/call/decline', ({ user, params }) => {
+    const serverId = Number(params[0]);
+    if (!isMember(serverId, user.id)) throw new HttpError(404, 'Conversation not found');
+    const channelId = callRoom(serverId);
+    if (channelId !== undefined) sendTo(usersInVoice(channelId), { type: 'ring_declined', serverId, userId: user.id, username: user.username });
+    sendTo([user.id], { type: 'ring_stop', serverId });
+    return { ok: true };
   });
 
   // The newest messages, or with ?before= older ones, ?after= newer ones (oldest first),
@@ -2298,6 +2624,16 @@ export function createApp(opts: AppOptions): Server {
         throw new HttpError(400, 'The welcome room must be a text room everyone can see');
       db.prepare('UPDATE servers SET welcome_channel_id = ? WHERE id = ?').run(channel?.id ?? null, serverId);
     }
+    if (body.afkChannelId !== undefined) {
+      const channel = body.afkChannelId === null ? null : channelById(Number(body.afkChannelId));
+      if (channel && (channel.serverId !== serverId || channel.kind !== 'voice')) throw new HttpError(400, 'The AFK fire must be one of this burrow\'s voice rooms');
+      db.prepare('UPDATE servers SET afk_channel_id = ? WHERE id = ?').run(channel?.id ?? null, serverId);
+    }
+    if (body.afkMinutes !== undefined) {
+      const minutes = Math.floor(Number(body.afkMinutes));
+      if (!(minutes >= 1 && minutes <= 240)) throw new HttpError(400, 'Pick between 1 minute and 4 hours');
+      db.prepare('UPDATE servers SET afk_minutes = ? WHERE id = ?').run(minutes, serverId);
+    }
     if (body.rules !== undefined) {
       const rules = typeof body.rules === 'string' ? body.rules.trim() : '';
       if (rules.length > MAX_RULES) throw new HttpError(400, `The rules can be at most ${MAX_RULES} characters`);
@@ -2691,9 +3027,13 @@ export function createApp(opts: AppOptions): Server {
       if (burrowUpload) return await handleBurrowPictureUpload(req, res, Number(burrowUpload[1]), burrowUpload[2] === 'banner' ? 'banner' : 'icon');
       const emojiUpload = req.method === 'POST' && url.pathname.match(/^\/api\/servers\/(\d+)\/emoji$/);
       if (emojiUpload) return await handleEmojiUpload(req, res, Number(emojiUpload[1]), url);
+      const soundUpload = req.method === 'POST' && url.pathname.match(/^\/api\/servers\/(\d+)\/sounds$/);
+      if (soundUpload) return await handleSoundUpload(req, res, Number(soundUpload[1]), url);
       const reading = req.method === 'GET' || req.method === 'HEAD';
       const picture = reading && url.pathname.match(/^\/api\/(avatars|burrow-pictures|emoji)\/([\w-]+\.(?:png|jpg|gif|webp))$/);
       if (picture) return await servePicture(req, res, picture[1], picture[2]);
+      const sound = reading && url.pathname.match(/^\/api\/sounds\/([\w-]+\.(?:mp3|ogg|wav|webm|m4a))$/);
+      if (sound) return await serveSound(req, res, sound[1]);
       const embedImage = reading && url.pathname.match(/^\/api\/embeds\/(\d+)\/(\d+)\/([\w-]+)$/);
       if (embedImage) return await serveEmbedImage(req, res, Number(embedImage[1]), Number(embedImage[2]), embedImage[3]);
       const gifPreview = reading && url.pathname.match(/^\/api\/gifs\/preview\/([\w-]+)$/);
@@ -2766,6 +3106,8 @@ export function createApp(opts: AppOptions): Server {
           const channel = channelById(Number(msg.channelId));
           if (!channel || channel.kind !== 'voice' || !canSee(channel, user.id))
             throw new HttpError(404, 'Room not found');
+          checkSeat(channel, user.id);
+          pendingMoves.delete(user.id);
           setVoice(user.id, channel.id, flagsFrom(msg));
         } else if (msg.type === 'voice_status') {
           // Muted or deafened, in the room they're already in.
@@ -2780,11 +3122,37 @@ export function createApp(opts: AppOptions): Server {
           if (!content) throw new HttpError(400, 'Message is empty');
           if (content.length > 1000) throw new HttpError(400, 'Message is too long');
           const message = { id: ++firesideId, userId: user.id, author: user.username, content, createdAt: Date.now() };
-          const list = fireside.get(channelId) ?? [];
-          list.push(message);
-          if (list.length > FIRESIDE_KEEP) list.shift();
-          fireside.set(channelId, list);
+          if (channelById(channelId)?.keepChat) {
+            const r = db
+              .prepare('INSERT INTO fireside_messages (channel_id, user_id, author, content, created_at) VALUES (?, ?, ?, ?, ?)')
+              .run(channelId, user.id, user.username, content, message.createdAt);
+            message.id = Number(r.lastInsertRowid);
+            db.prepare('DELETE FROM fireside_messages WHERE channel_id = ? AND id NOT IN (SELECT id FROM fireside_messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?)')
+              .run(channelId, channelId, FIRESIDE_KEEP);
+          } else {
+            const list = fireside.get(channelId) ?? [];
+            list.push(message);
+            if (list.length > FIRESIDE_KEEP) list.shift();
+            fireside.set(channelId, list);
+          }
           sendTo(usersInVoice(channelId), { type: 'fireside', channelId, message });
+        } else if (msg.type === 'voice_speaking') {
+          // Talking or not, so people outside the fire can see who it is.
+          const channelId = inVoice.get(user.id);
+          const on = msg.speaking === true;
+          if (channelId === undefined || speaking.has(user.id) === on) return;
+          if (on) {
+            speaking.add(user.id);
+            lastActive.set(user.id, Date.now());
+          } else speaking.delete(user.id);
+          broadcastToChannel(channelById(channelId)!, { type: 'voice_speaking', channelId, userId: user.id, speaking: on });
+        } else if (msg.type === 'voice_active') {
+          // Touched the app, so they aren't away.
+          if (inVoice.has(user.id)) lastActive.set(user.id, Date.now());
+        } else if (msg.type === 'soundboard') {
+          playSound(user, Number(msg.soundId));
+        } else if (msg.type === 'listen') {
+          listenTogether(user, msg);
         } else if (msg.type === 'typing') {
           const channel = channelById(Number(msg.channelId));
           if (channel && canSee(channel, user.id))
@@ -2811,9 +3179,10 @@ export function createApp(opts: AppOptions): Server {
   };
 
   // Tests set a due time in the past and then check the clock, rather than waiting for it.
-  Object.assign(server, { checkClock: tick });
+  Object.assign(server, { checkClock: tick, checkAfk });
   server.on('close', () => {
     wss.close();
+    clearInterval(afkTimer);
     if (wakeTimer) clearTimeout(wakeTimer);
   });
   return server;

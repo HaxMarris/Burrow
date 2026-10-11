@@ -19,14 +19,17 @@ function sign(opts: VoiceOptions, claims: Record<string, unknown>, ttlSeconds: n
   return `${header}.${payload}.${sig}`;
 }
 
+/** What someone may send: everything, or (muted for everyone by a moderator) everything but their microphone. */
+const sources = (canSpeak: boolean) => [...(canSpeak ? ['microphone'] : []), 'camera', 'screen_share', 'screen_share_audio'];
+
 /** A LiveKit access token (HS256 JWT) that lets one user join one voice room, with their mic, camera and screen. */
-export function voiceToken(opts: VoiceOptions, user: { id: number; username: string }, room: string, ttlSeconds = 6 * 3600) {
+export function voiceToken(opts: VoiceOptions, user: { id: number; username: string }, room: string, ttlSeconds = 6 * 3600, canSpeak = true) {
   return sign(
     opts,
     {
       sub: String(user.id),
       name: user.username,
-      video: { room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, canPublishSources: ['microphone', 'camera', 'screen_share', 'screen_share_audio'] },
+      video: { room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, canPublishSources: sources(canSpeak) },
     },
     ttlSeconds,
   );
@@ -50,3 +53,10 @@ export const removeFromRoom = (opts: VoiceOptions, room: string, identity: strin
 
 /** Disconnects everyone from a voice room, for when the room or its burrow is deleted. */
 export const closeRoom = (opts: VoiceOptions, room: string) => roomService(opts, 'DeleteRoom', room, {});
+
+/** Lets someone already in a room speak again, or stops their microphone being sent at all. */
+export const setCanSpeak = (opts: VoiceOptions, room: string, identity: string, canSpeak: boolean) =>
+  roomService(opts, 'UpdateParticipant', room, {
+    identity,
+    permission: { canSubscribe: true, canPublish: true, canPublishData: true, canPublishSources: sources(canSpeak).map((s) => s.toUpperCase()) },
+  });

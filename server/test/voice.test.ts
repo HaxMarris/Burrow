@@ -107,14 +107,14 @@ test('voice rooms', async () => {
   await samWs.next((e) => e.type === 'ready');
   samWs.ws.send(JSON.stringify({ type: 'voice_join', channelId: room.id }));
   const joined = await maxWs.next((e) => e.type === 'voice_state');
-  assert.deepEqual(joined, { type: 'voice_state', channelId: room.id, userIds: [sam.user.id], muted: [], deafened: [] });
+  assert.deepEqual(joined, { type: 'voice_state', channelId: room.id, userIds: [sam.user.id], muted: [], deafened: [], serverMuted: [], speaking: [] });
   const listed = (await call(base, '/api/servers', { token: max.token })).data[0];
   assert.deepEqual(listed.channels.find((c: any) => c.id === room.id).voiceUsers, [sam.user.id]);
 
   // Muting and deafening show for everyone in the burrow, not just the people in the room.
   samWs.ws.send(JSON.stringify({ type: 'voice_status', muted: true, deafened: true }));
   assert.deepEqual(await maxWs.next((e) => e.type === 'voice_state'),
-    { type: 'voice_state', channelId: room.id, userIds: [sam.user.id], muted: [sam.user.id], deafened: [sam.user.id] });
+    { type: 'voice_state', channelId: room.id, userIds: [sam.user.id], muted: [sam.user.id], deafened: [sam.user.id], serverMuted: [], speaking: [] });
   const flagged = (await call(base, '/api/servers', { token: max.token })).data[0].channels.find((c: any) => c.id === room.id);
   assert.deepEqual([flagged.voiceMuted, flagged.voiceDeafened], [[sam.user.id], [sam.user.id]]);
   samWs.ws.send(JSON.stringify({ type: 'voice_status', muted: true, deafened: false }));

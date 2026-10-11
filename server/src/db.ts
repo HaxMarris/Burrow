@@ -147,6 +147,7 @@ export function openDb(file: string): Db {
   }
   addChatExtras(db);
   addOrganization(db);
+  addVoiceExtras(db);
   return db;
 }
 
@@ -343,10 +344,41 @@ function addOrganization(db: Db) {
   `);
 }
 
+/** Added with the voice and Campfire update: seat limits, kept fireside chat, the AFK fire, server mute and the soundboard. */
+function addVoiceExtras(db: Db) {
+  addColumn(db, 'channels', 'user_limit', 'INTEGER NOT NULL DEFAULT 0'); // seats at a fire; 0 is no limit
+  addColumn(db, 'channels', 'keep_chat', 'INTEGER NOT NULL DEFAULT 0'); // fireside chat stays after everyone leaves
+  addColumn(db, 'servers', 'afk_channel_id', 'INTEGER'); // where idle people are moved
+  addColumn(db, 'servers', 'afk_minutes', 'INTEGER NOT NULL DEFAULT 15');
+  addColumn(db, 'members', 'voice_muted', 'INTEGER NOT NULL DEFAULT 0'); // muted for everyone by a moderator
+  db.exec(`
+    -- Fireside chat for fires that keep it; other fires keep theirs in memory only.
+    CREATE TABLE IF NOT EXISTS fireside_messages (
+      id         INTEGER PRIMARY KEY,
+      channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      author     TEXT NOT NULL,
+      content    TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS fireside_by_channel ON fireside_messages(channel_id, id);
+    -- Short clips anyone at a burrow's fire can play for everyone there.
+    CREATE TABLE IF NOT EXISTS sounds (
+      id         INTEGER PRIMARY KEY,
+      server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      name       TEXT NOT NULL,
+      emoji      TEXT NOT NULL DEFAULT '',
+      file       TEXT NOT NULL,
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL
+    );
+  `);
+}
+
 /** Every new burrow starts with a Moderator role, which the host can change or delete. */
 export function addModeratorRole(db: Db, serverId: number) {
   const r = db
-    .prepare("INSERT INTO roles (server_id, name, color, perms, position, created_at) VALUES (?, 'Moderator', '#4f8a5b', 'rooms,messages,remove,ban', 1, ?)")
+    .prepare("INSERT INTO roles (server_id, name, color, perms, position, created_at) VALUES (?, 'Moderator', '#4f8a5b', 'rooms,messages,remove,ban,voice', 1, ?)")
     .run(serverId, Date.now());
   return Number(r.lastInsertRowid);
 }
