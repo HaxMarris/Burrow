@@ -48,6 +48,23 @@
         <button type="submit" class="btn" id="reset-submit">Email me a code</button>
         <p class="muted small center"><a href="#" id="reset-resend" class="hidden">Send another code</a> <a href="#" id="reset-back">Back to log in</a></p>
       </form>
+      <form id="two-step-form" class="auth-card hidden">
+        <h1>Two-step login</h1>
+        <p class="muted">Enter the 6-digit code from your authenticator app, or one of your recovery codes.</p>
+        <label>Code <input id="two-step-code" inputmode="numeric" autocomplete="one-time-code" maxlength="11" placeholder="123456" required /></label>
+        <div id="two-step-error" class="error"></div>
+        <button type="submit" class="btn" id="two-step-submit">Log in</button>
+        <p class="muted small center"><a href="#" id="two-step-back">Back to log in</a></p>
+      </form>
+      <form id="link-form" class="auth-card hidden">
+        <h1>New password</h1>
+        <p class="muted" id="link-subtitle">Checking your reset link…</p>
+        <input type="text" id="link-username" autocomplete="username" hidden />
+        <label>New password <input id="link-password" type="password" autocomplete="new-password" minlength="8" placeholder="At least 8 characters" required /></label>
+        <div id="link-error" class="error"></div>
+        <button type="submit" class="btn" id="link-submit">Set new password</button>
+        <p class="muted small center"><a href="#" id="link-back">Back to log in</a></p>
+      </form>
       <form id="auth-form" class="auth-card">
         <div id="invite-card" class="invite-card hidden" aria-live="polite"></div>
         <h1 id="auth-title">Welcome back</h1>
@@ -63,6 +80,7 @@
         </label>
         <div id="auth-error" class="error"></div>
         <button type="submit" class="btn" id="auth-submit">Log in</button>
+        <button type="button" class="btn secondary passkey-btn hidden" id="passkey-login"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14a5 5 0 1 1 4.9-6H22v4h-2v3h-3v-3h-5.1A5 5 0 0 1 7 14Zm0-3a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/></svg>Log in with a passkey</button>
         <p class="muted small center"><a href="#" id="auth-toggle">Need an account? Register</a></p>
         <div id="get-desktop" class="get-desktop hidden">
           <p class="muted small center">Get the desktop app</p>

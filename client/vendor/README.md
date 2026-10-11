@@ -21,3 +21,6 @@
   (`window.MediaPipeVision`, source map reference removed); `vision_wasm_internal.js` and `.wasm` are its `wasm/`
   files; `selfie_segmenter.tflite` is the [selfie segmenter model](https://ai.google.dev/edge/mediapipe/solutions/vision/image_segmenter#selfie-model)
   (float16, Apache License 2.0). Loaded only when someone turns on a camera background.
+- `qrcode.js`: [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) 1.4.4 by Kazuhiko Arase
+  (MIT License), the npm package's `qrcode.js` unchanged. Draws the QR code for setting up two-step login in an
+  authenticator app. Loaded only then.

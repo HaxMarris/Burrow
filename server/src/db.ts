@@ -151,6 +151,7 @@ export function openDb(file: string): Db {
   addPresence(db);
   addModeration(db);
   addStreaming(db);
+  addProfiles(db);
   return db;
 }
 
@@ -501,6 +502,54 @@ function addStreaming(db: Db) {
   addColumn(db, 'messages', 'live', 'TEXT');
   // Nobody is still live after a restart.
   db.prepare(`UPDATE messages SET live = json_set(live, '$.endedAt', ?) WHERE live IS NOT NULL AND json_extract(live, '$.endedAt') IS NULL`).run(Date.now());
+}
+
+/** Added with the profiles, friends and DMs update. */
+function addProfiles(db: Db) {
+  addColumn(db, 'users', 'display_name', 'TEXT'); // shown instead of the username when set
+  addColumn(db, 'users', 'bio', "TEXT NOT NULL DEFAULT ''");
+  addColumn(db, 'users', 'banner', 'TEXT'); // picture file in uploads/avatars
+  addColumn(db, 'users', 'accent', 'TEXT'); // '#rrggbb' for the profile card
+  addColumn(db, 'users', 'totp_secret', 'TEXT'); // two-step login, when on
+  addColumn(db, 'users', 'totp_pending', 'TEXT'); // being set up, not on yet
+  addColumn(db, 'users', 'totp_last_step', 'INTEGER NOT NULL DEFAULT -1'); // so a code can't be used twice
+  addColumn(db, 'users', 'recovery_codes', "TEXT NOT NULL DEFAULT '[]'"); // sha256 of each unused one
+  addColumn(db, 'users', 'reset_link', 'TEXT'); // sha256 of a reset link made by whoever runs the server
+  addColumn(db, 'users', 'reset_link_expires', 'INTEGER');
+  addColumn(db, 'users', 'deleted_at', 'INTEGER');
+  addColumn(db, 'members', 'nickname', 'TEXT'); // your name in one burrow
+  addColumn(db, 'sessions', 'device', 'TEXT'); // the browser or app's user agent
+  addColumn(db, 'sessions', 'ip', 'TEXT');
+  db.exec(`
+    -- A friend request, or (once accepted_at is set) a friendship. user_a < user_b.
+    CREATE TABLE IF NOT EXISTS friends (
+      user_a       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      user_b       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      requested_by INTEGER NOT NULL,
+      created_at   INTEGER NOT NULL,
+      accepted_at  INTEGER,
+      PRIMARY KEY (user_a, user_b)
+    );
+    CREATE INDEX IF NOT EXISTS friends_by_b ON friends(user_b);
+    CREATE TABLE IF NOT EXISTS blocks (
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      blocked_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, blocked_id)
+    );
+    CREATE INDEX IF NOT EXISTS blocks_by_blocked ON blocks(blocked_id);
+    CREATE TABLE IF NOT EXISTS passkeys (
+      id           TEXT PRIMARY KEY, -- the credential id, base64url
+      user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name         TEXT NOT NULL,
+      public_key   TEXT NOT NULL, -- JWK
+      alg          INTEGER NOT NULL,
+      sign_count   INTEGER NOT NULL DEFAULT 0,
+      created_at   INTEGER NOT NULL,
+      last_used_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS passkeys_by_user ON passkeys(user_id);
+  `);
 }
 
 /** Every new burrow starts with a Moderator role, which the host can change or delete. */

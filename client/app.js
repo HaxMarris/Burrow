@@ -103,6 +103,7 @@ async function showAuth() {
   if (!isDesktop && !/Android|iPhone|iPad/.test(navigator.userAgent)) showDesktopDownloads();
   renderAuthMode();
   showAuthInvite();
+  if (resetLinkToken && !isDesktop) showResetLink();
 }
 
 // Download buttons for the desktop app, on the web only. They open the latest release page,
@@ -147,14 +148,14 @@ async function renderAuthMode() {
     try { canEmail = (await api('/api/config')).email; } catch {}
   }
   $('#forgot-row').classList.toggle('hidden', registering || !canEmail);
+  $('#passkey-login').classList.toggle('hidden', registering || !passkeysWork());
 }
 
 // ---- forgot your password: a code to your confirmed email, then a new password
 
 let resetSent = false;
 function showReset(on) {
-  $('#auth-form').classList.toggle('hidden', on);
-  $('#reset-form').classList.toggle('hidden', !on);
+  showAuthCard(on ? 'reset-form' : 'auth-form');
   resetSent = false;
   $('#reset-step2').classList.add('hidden');
   $('#reset-resend').classList.add('hidden');
@@ -187,18 +188,13 @@ $('#reset-form').addEventListener('submit', async (e) => {
   $('#reset-submit').disabled = true;
   try {
     if (!resetSent) return await sendResetCode();
-    const { token, user } = await api('/api/password/reset', {
+    const result = await api('/api/password/reset', {
       method: 'POST',
       body: { username: $('#reset-username').value.trim(), code: $('#reset-code').value.trim(), newPassword: $('#reset-password').value },
     });
-    state.token = token;
-    state.me = user;
-    store.set('token', token);
-    store.set('serverUrl', state.serverUrl);
     $('#reset-code').value = $('#reset-password').value = '';
     showReset(false);
-    await enterApp();
-    toast('Password changed. Your other devices were logged out.');
+    if (await finishLogin(result)) toast('Password changed. Your other devices were logged out.');
   } catch (err) {
     $('#reset-error').textContent = err.message === 'Failed to fetch' ? "Couldn't reach that server." : err.message;
   } finally {
@@ -236,17 +232,114 @@ $('#auth-form').addEventListener('submit', async (e) => {
     await resolveServerUrl();
     const body = { username: $('#username').value.trim(), password: $('#password').value };
     if (registering) body.registrationCode = $('#reg-code').value.trim();
-    const { token, user } = await api(registering ? '/api/register' : '/api/login', { method: 'POST', body });
-    state.token = token;
-    state.me = user;
-    store.set('token', token);
-    store.set('serverUrl', state.serverUrl);
+    const result = await api(registering ? '/api/register' : '/api/login', { method: 'POST', body });
     $('#password').value = '';
-    await enterApp();
+    await finishLogin(result);
   } catch (err) {
     $('#auth-error').textContent = err.message === 'Failed to fetch' ? "Couldn't reach that server." : err.message;
   } finally {
     $('#auth-submit').disabled = false;
+  }
+});
+
+// A login that passed: straight in, or on to the code from their authenticator app first.
+// Returns true once they're in.
+let twoStepTicket = null;
+async function finishLogin(result) {
+  if (result.twoStep) {
+    twoStepTicket = result.ticket;
+    showAuthCard('two-step-form');
+    $('#two-step-code').value = '';
+    $('#two-step-error').textContent = '';
+    $('#two-step-code').focus();
+    return false;
+  }
+  state.token = result.token;
+  state.me = result.user;
+  store.set('token', result.token);
+  store.set('serverUrl', state.serverUrl);
+  showAuthCard('auth-form');
+  await enterApp();
+  return true;
+}
+// One card on the login screen at a time.
+function showAuthCard(id) {
+  for (const f of ['auth-form', 'reset-form', 'two-step-form', 'link-form']) $('#' + f).classList.toggle('hidden', f !== id);
+}
+$('#two-step-back').addEventListener('click', (e) => { e.preventDefault(); twoStepTicket = null; showAuthCard('auth-form'); });
+$('#two-step-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('#two-step-error').textContent = '';
+  $('#two-step-submit').disabled = true;
+  try {
+    const result = await api('/api/login/two-step', { method: 'POST', body: { ticket: twoStepTicket, code: $('#two-step-code').value.trim() } });
+    twoStepTicket = null;
+    await finishLogin(result);
+  } catch (err) {
+    $('#two-step-error').textContent = err.message;
+    if (/Log in again/.test(err.message)) setTimeout(() => showAuthCard('auth-form'), 1500);
+  } finally {
+    $('#two-step-submit').disabled = false;
+  }
+});
+
+// Passkeys: Face ID, Windows Hello, a phone or a security key. Web only: the desktop app
+// runs from a file, which passkeys can't belong to.
+const b64u = {
+  from: (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)).buffer,
+  to: (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+};
+const passkeysWork = () => !isDesktop && !!window.PublicKeyCredential && window.isSecureContext;
+$('#passkey-login').addEventListener('click', async () => {
+  $('#auth-error').textContent = '';
+  try {
+    const o = await api('/api/login/passkey/options', { method: 'POST', body: {} });
+    const cred = await navigator.credentials.get({
+      publicKey: { challenge: b64u.from(o.challenge), rpId: o.rpId, userVerification: o.userVerification, timeout: o.timeout, allowCredentials: [] },
+    });
+    if (!cred) return;
+    const r = cred.response;
+    const result = await api('/api/login/passkey', {
+      method: 'POST',
+      body: { id: o.id, credential: { id: cred.id, response: { clientDataJSON: b64u.to(r.clientDataJSON), authenticatorData: b64u.to(r.authenticatorData), signature: b64u.to(r.signature) } } },
+    });
+    await finishLogin(result);
+  } catch (err) {
+    if (err.name === 'NotAllowedError' || err.name === 'AbortError') return; // closed the prompt
+    $('#auth-error').textContent = err.message === 'Failed to fetch' ? "Couldn't reach that server." : err.message;
+  }
+});
+
+// A reset link from whoever runs the server: /?reset=…
+let resetLinkToken = new URLSearchParams(location.search).get('reset');
+async function showResetLink() {
+  showAuthCard('link-form');
+  $('#link-error').textContent = '';
+  try {
+    const { username } = await api(`/api/password/link?token=${encodeURIComponent(resetLinkToken)}`);
+    $('#link-username').value = username;
+    $('#link-subtitle').textContent = `Choose a new password for ${username}. You'll be logged out everywhere else.`;
+    $('#link-password').focus();
+  } catch (err) {
+    $('#link-subtitle').textContent = err.message;
+    $('#link-submit').disabled = true;
+  }
+}
+const forgetResetLink = () => { resetLinkToken = null; history.replaceState(null, '', location.pathname); };
+$('#link-back').addEventListener('click', (e) => { e.preventDefault(); forgetResetLink(); showAuthCard('auth-form'); });
+$('#link-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('#link-error').textContent = '';
+  $('#link-submit').disabled = true;
+  try {
+    const result = await api('/api/password/link', { method: 'POST', body: { token: resetLinkToken, newPassword: $('#link-password').value } });
+    forgetResetLink();
+    $('#link-password').value = '';
+    if (await finishLogin(result)) toast('Password changed. Your other devices were logged out.');
+  } catch (err) {
+    $('#link-error').textContent = err.message;
+  } finally {
+    $('#link-submit').disabled = false;
   }
 });
 
@@ -268,7 +361,7 @@ async function enterApp() {
   state.folders = state.me.folders ?? [];
   $('#auth').classList.add('hidden');
   $('#app').classList.remove('hidden');
-  $('#me-name').textContent = state.me.username;
+  $('#me-name').textContent = state.me.displayName || state.me.username;
   state.avatars.set(state.me.id, state.me.avatar ?? null);
   setAvatar($('#me-avatar'), state.me.username, state.me.avatar);
   setAvatar($('#tab-avatar'), state.me.username, state.me.avatar);
@@ -285,6 +378,7 @@ async function enterApp() {
   await loadServers();
   connect();
   loadSavedAndScheduled();
+  loadFriends();
   openPendingInvite();
   startPush();
   openLinkedMessage();
@@ -323,14 +417,15 @@ function connect() {
     if (idleSent) ws.send(JSON.stringify({ type: 'idle', idle: true }));
     if (sharedActivity) ws.send(JSON.stringify({ type: 'activity', name: sharedActivity }));
     // Catch up on anything missed while disconnected.
-    if (wasRetry) loadServers().catch(() => {});
+    if (wasRetry) { loadServers().catch(() => {}); loadFriends(); }
   };
   ws.onmessage = (e) => handleEvent(JSON.parse(e.data));
   ws.onclose = (e) => {
     // The password was changed on another device, which signs this one out.
     if (e.code === 4001 && state.ws === ws) {
       logout(false);
-      $('#auth-error').textContent = 'Your password was changed, so please log in again.';
+      $('#auth-error').textContent = e.reason === 'Account deleted' ? 'Your account was deleted.'
+        : e.reason === 'Signed out' ? 'This device was signed out from another one.' : 'Your password was changed, so please log in again.';
       return;
     }
     setConnected(false, 'Reconnecting…');
@@ -354,7 +449,7 @@ function handleEvent(ev) {
       if (where) {
         const c = where.c;
         if (mine) Object.assign(c, { lastReadId: Math.max(c.lastReadId ?? 0, m.id), unread: 0, mentions: 0 });
-        else if (m.id > (c.lastReadId ?? 0)) {
+        else if (m.id > (c.lastReadId ?? 0) && !isBlocked(m.authorId)) {
           c.unread = (c.unread ?? 0) + 1;
           if (isDm(where.s) || mentionsMe(m)) c.mentions = (c.mentions ?? 0) + 1;
         }
@@ -375,7 +470,7 @@ function handleEvent(ev) {
         renderChannels();
       }
       if (mine) startSlowWait(m.channelId);
-      if (!mine && (document.hidden || m.channelId !== state.channelId) && !quietFor(m) && !hushed()) {
+      if (!mine && !isBlocked(m.authorId) && (document.hidden || m.channelId !== state.channelId) && !quietFor(m) && !hushed()) {
         notify(m);
         playSound('message');
       }
@@ -440,18 +535,35 @@ function handleEvent(ev) {
     case 'presence':
       for (const s of state.servers.values())
         for (const mem of s.members) if (mem.id === ev.userId) Object.assign(mem, { online: ev.online, status: ev.status, custom: ev.custom, activity: ev.activity });
+      for (const list of Object.values(state.friends ?? {})) for (const f of list) if (f.id === ev.userId) Object.assign(f, { online: ev.online, status: ev.status, custom: ev.custom, activity: ev.activity });
+      if (state.inDms && state.friends?.friends.some((f) => f.id === ev.userId)) renderChannels();
+      if ($('#friends-panel')) renderFriendsPanel();
       if (ev.userId === state.me.id) Object.assign(state.me, { customStatus: ev.custom });
       renderMembers();
       break;
-    case 'me_updated':
+    case 'me_updated': {
+      const blockedBefore = String(state.me.blockedIds ?? []);
       Object.assign(state.me, ev.me);
       renderMyStatus();
+      $('#me-name').textContent = state.me.displayName || state.me.username;
+      if (String(state.me.blockedIds ?? []) !== blockedBefore) renderMessages();
       break;
+    }
     case 'typing':
       showTyping(ev.channelId, ev.username);
       break;
     case 'user_updated':
       applyUser(ev.user);
+      break;
+    case 'friends':
+      setFriends(ev);
+      break;
+    case 'messages_purged':
+      // Someone deleted their account and took their messages with them.
+      if (ev.channelId === state.channelId) {
+        state.messages = state.messages.filter((m) => m.authorId !== ev.userId);
+        renderMessages();
+      }
       break;
     case 'favorites':
       state.favorites = ev.serverIds;
@@ -582,7 +694,8 @@ function notify(m) {
   const mentioned = isDm(server) || mentionsMe(m);
   if (!mentioned && !document.hidden) return;
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const title = isDm(server) ? (server.group ? `${m.author} in ${dmTitle(server)}` : `${m.author} (direct message)`) : `${m.author} in ${channel?.name ?? 'Burrow'}`;
+  const who = authorName(m);
+  const title = isDm(server) ? (server.group ? `${who} in ${dmTitle(server)}` : `${who} (direct message)`) : `${who} in ${channel?.name ?? 'Burrow'}`;
   const body = plainText(m.content).slice(0, 200) || (m.poll ? `Poll: ${m.poll.question}` : m.live ? 'Is live, sharing their screen' : m.sticker ? 'Sent a sticker' : 'Sent a file');
   const n = new Notification(title, { body, silent: !mentioned });
   n.onclick = () => { window.focus(); jumpTo(m.channelId, m.id); };
@@ -958,7 +1071,7 @@ function renderChannels() {
     li.title = joined ? 'Open the fire' : 'Join voice';
     li.onclick = () => (joined ? goToVoice() : joinVoice(c.id));
     const people = ids.map((id) => {
-      const name = s.members.find((m) => m.id === id)?.username ?? '?';
+      const name = nameOfPerson(s.members.find((m) => m.id === id)) ?? '?';
       const row = document.createElement('div');
       row.className = 'voice-person' + (talking(id) ? ' speaking' : '');
       const av = document.createElement('span');
@@ -1091,7 +1204,7 @@ async function selectChannel(id, { around = null, present = false } = {}) {
 function renderMembers() {
   const s = state.servers.get(state.serverId);
   // Highest roles first, then by name.
-  const members = [...(s?.members ?? [])].sort((a, b) => rankOf(s, a) - rankOf(s, b) || a.username.localeCompare(b.username));
+  const members = [...(s?.members ?? [])].sort((a, b) => rankOf(s, a) - rankOf(s, b) || nameOfPerson(a).localeCompare(nameOfPerson(b)));
   const section = (title, list) => {
     if (!list.length) return [];
     const h = document.createElement('h3');
@@ -1109,7 +1222,7 @@ function renderMembers() {
         text.className = 'member-text';
         const name = document.createElement('span');
         name.className = 'member-name';
-        name.textContent = m.username;
+        name.textContent = nameOfPerson(m);
         const color = roleColor(s, m.id);
         if (color) name.style.color = color;
         text.append(name);
@@ -1123,9 +1236,10 @@ function renderMembers() {
         li.append(av, text);
         if (m.id !== state.me.id) {
           li.classList.add('can-dm');
-          li.title = `${m.username}: message, volume and more`;
-          li.onclick = () => openPerson(s, m);
-        }
+          li.title = `${nameOfPerson(m)} (@${m.username}): profile, message, volume and more`;
+        } else li.title = 'Your profile and nickname';
+        li.classList.add('can-dm');
+        li.onclick = () => openPerson(s, m);
         const top = rolesOf(s, m)[0];
         if (isHost(s, m.id) || top) {
           const badge = document.createElement('span');
@@ -1142,7 +1256,7 @@ function renderMembers() {
           li.append(badge);
         }
         if (canActOn(s, m)) {
-          const more = iconButton('⋯', `Manage ${m.username}`, (e) => { e.stopPropagation(); openMemberMenu(s, m); });
+          const more = iconButton('⋯', `Manage ${nameOfPerson(m)}`, (e) => { e.stopPropagation(); openMemberMenu(s, m); });
           more.classList.add('member-more');
           // Before the badge, so badges stay lined up on the right.
           li.insertBefore(more, li.querySelector('.owner-badge'));
@@ -1204,7 +1318,7 @@ function renderMessages({ stick = false } = {}) {
       if (p?.deleted) start.insertAdjacentHTML('beforeend', '<p class="muted small">The message this thread started from was deleted.</p>');
       else if (p) start.append(messageCard(p, null, { onOpen: () => jumpTo(ch.parentId, p.id) }));
     } else start.innerHTML = isDm(server)
-      ? `<h2>This is the beginning of ${server.group ? escapeHtml(dmTitle(server)) : `your conversation with ${escapeHtml(partner(server).username)}`}</h2>`
+      ? `<h2>This is the beginning of ${server.group ? escapeHtml(dmTitle(server)) : `your conversation with ${escapeHtml(nameOfPerson(partner(server)))}`}</h2>`
       : `<h2>This is the beginning of ${escapeHtml(ch.name)}</h2><div class="muted">${ch.topic ? escapeHtml(ch.topic) : 'Pull up a stump and say hello.'}</div>`;
     frag.append(start);
   }
@@ -1226,6 +1340,10 @@ let tailBody = null;
 
 // Adds message m (and a day divider or a new author group when it needs one) after prev.
 // body is prev's group column; returns m's.
+const revealedBlocked = new Set();
+const isBlocked = (userId) => !!state.me?.blockedIds?.includes(userId);
+const hiddenByBlock = (m) => isBlocked(m.authorId) && !revealedBlocked.has(m.id);
+
 function addMessageNodes(parent, m, prev, body) {
   let newGroup = false;
   if (!prev || new Date(prev.createdAt).toDateString() !== new Date(m.createdAt).toDateString()) {
@@ -1244,18 +1362,34 @@ function addMessageNodes(parent, m, prev, body) {
     parent.append(d);
     newGroup = true;
   }
-  const grouped = !newGroup && prev && !m.replyTo && !m.forwarded && prev.authorId === m.authorId && m.createdAt - prev.createdAt < GROUP_WINDOW;
+  // Someone you blocked: a folded line, without their name or picture, until you ask to see it.
+  if (hiddenByBlock(m)) {
+    const line = document.createElement('div');
+    line.className = 'blocked-line';
+    line.dataset.id = m.id;
+    const show = document.createElement('button');
+    show.type = 'button';
+    show.textContent = 'Message from someone you blocked · Show';
+    show.onclick = () => { revealedBlocked.add(m.id); renderMessages(); };
+    line.append(show);
+    parent.append(line);
+    return null;
+  }
+  const grouped = !newGroup && body && prev && !hiddenByBlock(prev) && !m.replyTo && !m.forwarded && prev.authorId === m.authorId && m.createdAt - prev.createdAt < GROUP_WINDOW;
   if (!grouped) {
     const group = document.createElement('div');
     group.className = 'group' + (m.authorId === state.me.id ? ' mine' : '');
     const av = document.createElement('span');
     av.className = 'avatar lg';
-    setAvatar(av, m.author, avatarOf(m.authorId, m.authorAvatar));
+    setAvatar(av, authorName(m), avatarOf(m.authorId, m.authorAvatar));
     body = document.createElement('div');
     const time = new Date(m.createdAt);
     const color = roleColor(state.servers.get(state.serverId), m.authorId);
-    body.innerHTML = `<div class="head"><span class="author"${color ? ` style="color:${escapeHtml(color)}"` : ''}>${escapeHtml(m.author)}</span>
+    body.innerHTML = `<div class="head"><span class="author"${color ? ` style="color:${escapeHtml(color)}"` : ''}>${escapeHtml(authorName(m))}</span>
         <span class="time" title="${escapeHtml(time.toLocaleString())}">${escapeHtml(formatTime(time))}</span></div>`;
+    // Their name and picture open their card.
+    av.classList.add('opens-card');
+    av.onclick = body.querySelector('.author').onclick = () => openPersonById(m.authorId);
     group.append(av, body);
     parent.append(group);
   }
@@ -1452,9 +1586,9 @@ function updateMentions() {
   if (!s || !hit) return closeMentions();
   const q = hit[2].toLowerCase();
   const people = s.members
-    .filter((m) => m.id !== state.me.id && m.username.toLowerCase().includes(q))
+    .filter((m) => m.id !== state.me.id && !m.deleted && (m.username.toLowerCase().includes(q) || nameOfPerson(m).toLowerCase().includes(q)))
     .sort((a, b) => b.username.toLowerCase().startsWith(q) - a.username.toLowerCase().startsWith(q)
-      || !!b.online - !!a.online || a.username.localeCompare(b.username));
+      || !!b.online - !!a.online || nameOfPerson(a).localeCompare(nameOfPerson(b)));
   // People allowed to can ping everyone, everyone online, or a role.
   const groups = !isDm(s) && can(s, 'everyone') ? [
     { username: 'everyone', ping: 'Everyone who can see this room' },
@@ -1480,8 +1614,9 @@ function renderMentions() {
       if (m.color) av.style.background = m.color;
     } else setAvatar(av, m.username, avatarOf(m.id, m.avatar));
     const name = document.createElement('span');
-    name.textContent = m.username;
+    name.textContent = m.ping ? m.username : nameOfPerson(m);
     b.append(av, name);
+    if (!m.ping && nameOfPerson(m) !== m.username) b.insertAdjacentHTML('beforeend', `<span class="small muted">@${escapeHtml(m.username)}</span>`);
     if (m.ping) b.insertAdjacentHTML('beforeend', `<span class="small muted">${escapeHtml(m.ping)}</span>`);
     b.onpointerdown = (e) => e.preventDefault(); // keep the keyboard up
     b.onclick = () => { mention.index = i; completeMention(); };
@@ -1917,7 +2052,7 @@ function openMemberMenu(s, m) {
   const editRoles = can(s, 'roles') && (self || above) && roles.length;
   const removable = !self && above;
   const current = rolesOf(s, m);
-  modal(`<h2>${escapeHtml(m.username)}</h2>
+  modal(`<h2>${escapeHtml(nameOfPerson(m))}</h2>
     <p class="muted">${isHost(s, m.id) ? 'Host of' : current.length ? `${current.map((r) => escapeHtml(r.name)).join(', ')} in` : 'Member of'} ${escapeHtml(s.name)}</p>
     ${editRoles ? `<h4>Roles</h4><ul class="access-list" id="member-roles">${roles.map((r) => `<li><label class="check"><input type="checkbox" value="${r.id}" ${m.roleIds.includes(r.id) ? 'checked' : ''} ${r.position > myRank ? '' : 'disabled'} /> ${roleDot(r.color)}${escapeHtml(r.name)}</label></li>`).join('')}</ul>
       <button class="btn" id="member-save-roles">Save roles</button>` : ''}
@@ -1940,8 +2075,8 @@ function openMemberMenu(s, m) {
   $('#member-voice-mute')?.addEventListener('click', () => act('voice-mute', { muted: !m.voiceMuted }));
   $('#member-timeout')?.addEventListener('click', () => act('timeout', { minutes: Number($('#member-timeout-for').value) }));
   $('#member-timeout-end')?.addEventListener('click', () => act('timeout', { minutes: 0 }));
-  $('#member-remove')?.addEventListener('click', () => confirm(`Remove ${m.username} from ${s.name}?`) && act('remove', { ban: false }));
-  $('#member-ban')?.addEventListener('click', () => confirm(`Ban ${m.username} from ${s.name}?`) && act('remove', { ban: true }));
+  $('#member-remove')?.addEventListener('click', () => confirm(`Remove ${nameOfPerson(m)} from ${s.name}?`) && act('remove', { ban: false }));
+  $('#member-ban')?.addEventListener('click', () => confirm(`Ban ${nameOfPerson(m)} from ${s.name}?`) && act('remove', { ban: true }));
 }
 
 async function renderBans(s) {
@@ -2060,8 +2195,18 @@ function roomIcon() {
 const CHAT_ICON = '<svg viewBox="0 0 24 24"><path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9l-5 4V5a1 1 0 0 1 1-1Z" fill="currentColor"/></svg>';
 
 const isDm = (s) => s?.kind === 'dm';
+const FRIENDS_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm7.5 0a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM9 13c-3.3 0-7 1.7-7 4.5V20h14v-2.5C16 14.7 12.3 13 9 13Zm7.5 0c-.6 0-1.2.1-1.8.2 1.4 1 2.3 2.4 2.3 4.3V20h5v-2.5c0-2.6-2.9-4.5-5.5-4.5Z" fill="currentColor"/></svg>';
 // The other person in a conversation.
 const partner = (s) => s.members.find((m) => m.id !== state.me.id) ?? s.members[0];
+// The name someone goes by: their nickname in this burrow, else their display name, else their username.
+const nameOfPerson = (m) => m?.nickname || m?.displayName || m?.username || 'Someone';
+// A message's author as they're called now (names change), falling back to the name it came with.
+const authorName = (m) => {
+  let s = state.servers.get(state.serverId);
+  if (!s?.channels.some((c) => c.id === m.channelId) && !s?.threads?.some((c) => c.id === m.channelId)) s = roomById(m.channelId)?.s;
+  const mem = s?.members.find((x) => x.id === m.authorId);
+  return mem ? nameOfPerson(mem) : m.author;
+};
 
 function addDm(s) {
   rememberAvatars(s);
@@ -2121,6 +2266,16 @@ function renderDmList() {
     hint.textContent = 'No conversations yet. Press + or click someone in a burrow\'s member list.';
     items.push(hint);
   }
+  // Friends first: who's online, and requests waiting on you.
+  const friends = document.createElement('li');
+  friends.className = 'dm friends-row';
+  friends.id = 'friends-row';
+  const online = state.friends?.friends.filter((f) => f.online).length ?? 0;
+  const asks = state.friends?.incoming.length ?? 0;
+  friends.innerHTML = `<span class="avatar xs group-avatar">${FRIENDS_ICON}</span><span class="dm-name">Friends${online ? `<span class="small muted"> · ${online} online</span>` : ''}</span>
+    <span class="ping-count ${asks ? '' : 'hidden'}">${asks > 99 ? '99+' : asks}</span>`;
+  friends.onclick = () => openFriends();
+  items.unshift(friends);
   $('#channel-list').replaceChildren(...items);
   // Calls show in the conversation itself, not as a burrow's Campfire.
   $('#fire-main').replaceChildren();
@@ -2153,38 +2308,102 @@ function openNewDm() {
 
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 
-function openAccount() {
+// Your account, in four tabs: how others see you, how the app behaves, how you log in, and your data.
+const ACCOUNT_TABS = [['profile', 'Profile'], ['settings', 'Settings'], ['security', 'Login and security'], ['data', 'Your data']];
+function openAccount(tab = store.get('accountTab') || 'profile') {
+  const me = state.me;
   modal(`<h2>Your account</h2>
-    ${state.maxUploadBytes ? `<div class="account-picture">
-      <span class="avatar xl" id="account-avatar"></span>
-      <div class="buttons">
-        <div>
-          <button type="button" class="btn secondary" id="avatar-pick">Upload picture</button>
-          <button type="button" class="btn secondary" id="avatar-remove">Remove</button>
+    <div class="tabs" role="tablist">${ACCOUNT_TABS.map(([id, label]) => `<button type="button" role="tab" data-tab="${id}">${label}</button>`).join('')}</div>
+    <section data-pane="profile" class="account-pane">
+      <div class="profile-preview" id="profile-preview"></div>
+      ${state.maxUploadBytes ? `<div class="account-picture">
+        <span class="avatar xl" id="account-avatar"></span>
+        <div class="buttons">
+          <div>
+            <button type="button" class="btn secondary" id="avatar-pick">Upload picture</button>
+            <button type="button" class="btn secondary" id="avatar-remove">Remove</button>
+          </div>
+          <span class="small muted">PNG, JPEG, GIF or WebP. It's cropped to a square.</span>
         </div>
-        <span class="small muted">PNG, JPEG, GIF or WebP. It's cropped to a square.</span>
+        <input type="file" id="avatar-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
       </div>
-      <input type="file" id="avatar-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
-    </div>
-    <div class="error" id="avatar-error"></div>` : ''}
-    ${themeSettings()}
-    <h3>Direct messages</h3>
-    <label class="check"><input type="checkbox" id="read-receipts" ${state.me.readReceipts !== false ? 'checked' : ''} /> Show when I've read a message</label>
-    <span class="small muted">Shows "Seen" under messages in direct messages. You only see it for others while yours is on too.</span>
-    ${notificationSettings()}
-    ${voiceSettings()}
-    ${soundSettings()}
-    ${state.emailEnabled ? `<h3>Email</h3>${emailSettings()}` : ''}
-    <h3>Change password</h3>
-    <form id="password-form">
-      <input type="text" autocomplete="username" value="${escapeHtml(state.me.username)}" hidden />
-      <label>Current password<input type="password" id="pw-current" autocomplete="current-password" required /></label>
-      <label>New password<input type="password" id="pw-new" autocomplete="new-password" minlength="8" required /></label>
-      <label>New password again<input type="password" id="pw-confirm" autocomplete="new-password" minlength="8" required /></label>
-      <span class="small muted">This logs you out on your other devices.</span>
-      <div class="error" id="pw-status"></div>
-      <div class="modal-row"><button type="button" class="btn secondary" data-close>Close</button><button type="submit" class="btn">Change password</button></div>
-    </form>`);
+      <div class="error" id="avatar-error"></div>
+      <div class="banner-row">
+        <button type="button" class="btn secondary" id="banner-pick">${me.banner ? 'Change banner' : 'Add a banner'}</button>
+        <button type="button" class="btn secondary ${me.banner ? '' : 'hidden'}" id="banner-remove">Remove banner</button>
+        <input type="file" id="banner-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+      </div>` : ''}
+      <form id="profile-form">
+        <label>Display name<input id="profile-name" maxlength="32" placeholder="${escapeHtml(me.username)}" value="${escapeHtml(me.displayName ?? '')}" /></label>
+        <span class="small muted">What people see. You still log in as ${escapeHtml(me.username)}, and people @mention you as @${escapeHtml(me.username)}.</span>
+        <label>About me<textarea id="profile-bio" maxlength="190" rows="3" placeholder="A line or two about you">${escapeHtml(me.bio ?? '')}</textarea></label>
+        <div class="accent-row">
+          <label class="accent-pick">Card colour<input type="color" id="profile-accent" value="${escapeHtml(me.accent || '#4f8a5b')}" /></label>
+          <label class="check"><input type="checkbox" id="profile-accent-off" ${me.accent ? '' : 'checked'} /> No colour</label>
+        </div>
+        <div class="error" id="profile-error"></div>
+        <div class="modal-row"><button type="submit" class="btn">Save profile</button></div>
+      </form>
+      <span class="small muted">A different name in one burrow? Click yourself in its member list and pick "Change nickname".</span>
+    </section>
+    <section data-pane="settings" class="account-pane">
+      ${themeSettings()}
+      <h3>Direct messages</h3>
+      <label class="check"><input type="checkbox" id="read-receipts" ${me.readReceipts !== false ? 'checked' : ''} /> Show when I've read a message</label>
+      <span class="small muted">Shows "Seen" under messages in direct messages. You only see it for others while yours is on too.</span>
+      ${notificationSettings()}
+      ${voiceSettings()}
+      ${soundSettings()}
+    </section>
+    <section data-pane="security" class="account-pane">
+      <h3>Username</h3>
+      <div id="username-box"></div>
+      ${state.emailEnabled ? `<h3>Email</h3>${emailSettings()}` : ''}
+      <h3>Password</h3>
+      <form id="password-form">
+        <input type="text" autocomplete="username" value="${escapeHtml(me.username)}" hidden />
+        <label>Current password<input type="password" id="pw-current" autocomplete="current-password" required /></label>
+        <label>New password<input type="password" id="pw-new" autocomplete="new-password" minlength="8" required /></label>
+        <label>New password again<input type="password" id="pw-confirm" autocomplete="new-password" minlength="8" required /></label>
+        <span class="small muted">This logs you out on your other devices.</span>
+        <div class="error" id="pw-status"></div>
+        <div class="modal-row"><button type="submit" class="btn">Change password</button></div>
+      </form>
+      <h3>Two-step login</h3>
+      <div id="two-step-box"></div>
+      <h3>Passkeys</h3>
+      <div id="passkey-box"></div>
+      <h3>Your devices</h3>
+      <div id="device-box"><span class="small muted">Loading…</span></div>
+    </section>
+    <section data-pane="data" class="account-pane">
+      <h3>Export my data</h3>
+      <p class="small muted">A zip with your account details, every message you've sent (as JSON) and the files you sent.</p>
+      <div><button type="button" class="btn secondary" id="export-btn">Download my data</button></div>
+      <div class="error" id="export-error"></div>
+      <h3>Delete my account</h3>
+      <form id="delete-form" class="danger-zone">
+        <p class="small muted">You'll leave every burrow and group. Burrows you host with other people in them need a new host first.</p>
+        <label class="check"><input type="radio" name="delete-messages" value="keep" checked /> Keep my messages, shown as from "Deleted user"</label>
+        <label class="check"><input type="radio" name="delete-messages" value="delete" /> Delete my messages and files too</label>
+        <input type="text" autocomplete="username" value="${escapeHtml(me.username)}" hidden />
+        <label>Password<input type="password" id="delete-password" autocomplete="current-password" required /></label>
+        ${me.twoStep ? '<label>Code from your authenticator app<input id="delete-code" inputmode="numeric" autocomplete="one-time-code" maxlength="11" required /></label>' : ''}
+        <div class="error" id="delete-error"></div>
+        <div class="modal-row"><button type="submit" class="btn danger">Delete my account</button></div>
+      </form>
+    </section>
+    <div class="modal-row"><button type="button" class="btn secondary" data-close>Close</button></div>`, 'account-modal');
+  const show = (id) => {
+    if (!ACCOUNT_TABS.some(([t]) => t === id)) id = 'profile';
+    store.set('accountTab', id);
+    for (const b of document.querySelectorAll('#modal-card [data-tab]')) b.setAttribute('aria-selected', String(b.dataset.tab === id));
+    for (const p of document.querySelectorAll('#modal-card [data-pane]')) p.classList.toggle('hidden', p.dataset.pane !== id);
+    if (id === 'security') loadDevices();
+  };
+  for (const b of document.querySelectorAll('#modal-card [data-tab]')) b.onclick = () => show(b.dataset.tab);
+  show(tab);
+  wireProfileSettings();
   wireThemeSettings();
   $('#read-receipts').onchange = async (e) => {
     try { state.me.readReceipts = (await api('/api/me', { method: 'PATCH', body: { readReceipts: e.target.checked } })).readReceipts; }
@@ -2193,26 +2412,7 @@ function openAccount() {
   wireNotificationSettings();
   wireVoiceSettings();
   wireSoundSettings();
-  if (state.maxUploadBytes) {
-    setAvatar($('#account-avatar'), state.me.username, state.me.avatar);
-    $('#avatar-remove').classList.toggle('hidden', !state.me.avatar);
-    $('#avatar-pick').onclick = () => $('#avatar-input').click();
-    $('#avatar-input').onchange = async (e) => {
-      const file = e.target.files[0];
-      e.target.value = '';
-      if (!file) return;
-      $('#avatar-error').textContent = '';
-      $('#avatar-pick').disabled = true;
-      $('#avatar-pick').textContent = 'Uploading…';
-      try { applyUser(await uploadPicture('/api/me/avatar', await squarePicture(file))); }
-      catch (err) { $('#avatar-error').textContent = err.message; }
-      finally { $('#avatar-pick').disabled = false; $('#avatar-pick').textContent = 'Upload picture'; }
-    };
-    $('#avatar-remove').onclick = async () => {
-      try { applyUser(await api('/api/me/avatar', { method: 'DELETE' })); }
-      catch (err) { $('#avatar-error').textContent = err.message; }
-    };
-  }
+  renderUsernameBox();
   $('#password-form').onsubmit = async (e) => {
     e.preventDefault();
     const status = (text, ok = false) => { $('#pw-status').textContent = text; $('#pw-status').className = ok ? 'success' : 'error'; };
@@ -2224,6 +2424,326 @@ function openAccount() {
       status('Password changed.', true);
     } catch (err) { status(err.message); }
   };
+  renderTwoStepBox();
+  renderPasskeyBox();
+  $('#export-btn').onclick = exportMyData;
+  $('#delete-form').onsubmit = deleteMyAccount;
+}
+
+function wireProfileSettings() {
+  const me = state.me;
+  const preview = () => {
+    const box = $('#profile-preview');
+    if (!box) return;
+    const accent = $('#profile-accent-off').checked ? null : $('#profile-accent').value;
+    box.replaceChildren(profileHeader({ ...me, displayName: $('#profile-name').value.trim() || null, bio: $('#profile-bio').value, accent }, null));
+  };
+  preview();
+  for (const id of ['#profile-name', '#profile-bio', '#profile-accent']) $(id).addEventListener('input', () => {
+    if (id === '#profile-accent') $('#profile-accent-off').checked = false;
+    preview();
+  });
+  $('#profile-accent-off').onchange = preview;
+  $('#profile-form').onsubmit = async (e) => {
+    e.preventDefault();
+    $('#profile-error').textContent = '';
+    try {
+      Object.assign(state.me, await api('/api/me', {
+        method: 'PATCH',
+        body: { displayName: $('#profile-name').value, bio: $('#profile-bio').value, accent: $('#profile-accent-off').checked ? null : $('#profile-accent').value },
+      }));
+      $('#me-name').textContent = state.me.displayName || state.me.username;
+      toast('Profile saved.');
+    } catch (err) { $('#profile-error').textContent = err.message; }
+  };
+  if (!state.maxUploadBytes) return;
+  setAvatar($('#account-avatar'), me.username, me.avatar);
+  $('#avatar-remove').classList.toggle('hidden', !me.avatar);
+  $('#avatar-pick').onclick = () => $('#avatar-input').click();
+  $('#avatar-input').onchange = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    $('#avatar-error').textContent = '';
+    $('#avatar-pick').disabled = true;
+    $('#avatar-pick').textContent = 'Uploading…';
+    try { applyUser(await uploadPicture('/api/me/avatar', await squarePicture(file))); preview(); }
+    catch (err) { $('#avatar-error').textContent = err.message; }
+    finally { $('#avatar-pick').disabled = false; $('#avatar-pick').textContent = 'Upload picture'; }
+  };
+  $('#avatar-remove').onclick = async () => {
+    try { applyUser(await api('/api/me/avatar', { method: 'DELETE' })); preview(); }
+    catch (err) { $('#avatar-error').textContent = err.message; }
+  };
+  const bannerDone = (me2) => {
+    Object.assign(state.me, me2);
+    $('#banner-pick').textContent = state.me.banner ? 'Change banner' : 'Add a banner';
+    $('#banner-remove').classList.toggle('hidden', !state.me.banner);
+    preview();
+  };
+  $('#banner-pick').onclick = () => $('#banner-input').click();
+  $('#banner-input').onchange = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    $('#avatar-error').textContent = '';
+    $('#banner-pick').disabled = true;
+    try { bannerDone(await uploadPicture('/api/me/banner', await bannerPicture(file))); }
+    catch (err) { $('#avatar-error').textContent = err.message; }
+    finally { $('#banner-pick').disabled = false; }
+  };
+  $('#banner-remove').onclick = async () => {
+    try { bannerDone(await api('/api/me/banner', { method: 'DELETE' })); } catch (err) { $('#avatar-error').textContent = err.message; }
+  };
+}
+
+// The fields that need your password (and code, with two-step login on) before a big change.
+function confirmFields(prefix) {
+  return `<input type="text" autocomplete="username" value="${escapeHtml(state.me.username)}" hidden />
+    <label>Your password<input type="password" id="${prefix}-password" autocomplete="current-password" required /></label>
+    ${state.me.twoStep ? `<label>Code from your authenticator app<input id="${prefix}-code" inputmode="numeric" autocomplete="one-time-code" maxlength="11" required /></label>` : ''}`;
+}
+const confirmValues = (prefix) => ({ password: $(`#${prefix}-password`)?.value ?? '', code: $(`#${prefix}-code`)?.value.trim() ?? '' });
+
+function renderUsernameBox(editing = false) {
+  const box = $('#username-box');
+  if (!box) return;
+  if (!editing) {
+    box.innerHTML = `<div class="setting-row"><span>You log in as <b>${escapeHtml(state.me.username)}</b></span><button type="button" class="btn secondary" id="username-edit">Change</button></div>`;
+    $('#username-edit').onclick = () => renderUsernameBox(true);
+    return;
+  }
+  box.innerHTML = `<form id="username-form">
+    <label>New username<input id="username-new" maxlength="32" pattern="[A-Za-z0-9_.\\-]+" value="${escapeHtml(state.me.username)}" required /></label>
+    <span class="small muted">Letters, numbers, _ . and -. People will @mention you by the new one; old mentions of the old one stop pinging you.</span>
+    ${confirmFields('username')}
+    <div class="error" id="username-error"></div>
+    <div class="modal-row"><button type="button" class="btn secondary" id="username-cancel">Cancel</button><button type="submit" class="btn">Change username</button></div>
+  </form>`;
+  $('#username-new').select();
+  $('#username-cancel').onclick = () => renderUsernameBox(false);
+  $('#username-form').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      applyUser(await api('/api/me/username', { method: 'POST', body: { username: $('#username-new').value.trim(), ...confirmValues('username') } }));
+      renderUsernameBox(false);
+      toast(`You now log in as ${state.me.username}.`);
+    } catch (err) { $('#username-error').textContent = err.message; }
+  };
+}
+
+// Two-step login is a choice: off until you turn it on here.
+function renderTwoStepBox(step = null) {
+  const box = $('#two-step-box');
+  if (!box) return;
+  const me = state.me;
+  if (step?.codes) {
+    box.innerHTML = `<p class="small">Two-step login is on. Save these recovery codes somewhere safe. Each one works once, if you ever lose your phone.</p>
+      <pre class="recovery-codes">${step.codes.map(escapeHtml).join('\n')}</pre>
+      <div class="settings-buttons"><button type="button" class="btn secondary" id="codes-copy">Copy</button><button type="button" class="btn secondary" id="codes-save">Download</button><button type="button" class="btn" id="codes-done">I saved them</button></div>`;
+    const text = `Burrow recovery codes for ${me.username}\n\n${step.codes.join('\n')}\n`;
+    $('#codes-copy').onclick = () => navigator.clipboard.writeText(text).then(() => toast('Copied.'), () => toast("Couldn't copy. Select them instead."));
+    $('#codes-save').onclick = () => downloadBlob(new Blob([text], { type: 'text/plain' }), 'burrow-recovery-codes.txt');
+    $('#codes-done').onclick = () => renderTwoStepBox();
+    return;
+  }
+  if (step?.setup) {
+    box.innerHTML = `<p class="small">Scan this with an authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Authy and others), then type the 6-digit code it shows.</p>
+      <div class="qr-box" id="qr-box"></div>
+      <details class="small"><summary>Can't scan it? Type this key instead</summary><code class="secret-key">${escapeHtml(step.setup.secret.replace(/(.{4})/g, '$1 ').trim())}</code></details>
+      <form id="two-step-enable"><label>Code from the app<input id="two-step-new-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456" required /></label>
+      <div class="error" id="two-step-box-error"></div>
+      <div class="modal-row"><button type="button" class="btn secondary" id="two-step-cancel">Cancel</button><button type="submit" class="btn">Turn on</button></div></form>`;
+    drawQr($('#qr-box'), step.setup.uri);
+    $('#two-step-new-code').focus();
+    $('#two-step-cancel').onclick = () => renderTwoStepBox();
+    $('#two-step-enable').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const r = await api('/api/me/two-step/enable', { method: 'POST', body: { code: $('#two-step-new-code').value.trim() } });
+        Object.assign(state.me, r.me);
+        renderTwoStepBox({ codes: r.recoveryCodes });
+        resetDeleteForm();
+      } catch (err) { $('#two-step-box-error').textContent = err.message; }
+    };
+    return;
+  }
+  if (step?.confirm) {
+    const turningOff = step.confirm === 'off';
+    box.innerHTML = `<form id="two-step-confirm">
+      ${turningOff || step.confirm === 'codes' ? confirmFields('ts') : `<input type="text" autocomplete="username" value="${escapeHtml(me.username)}" hidden /><label>Your password<input type="password" id="ts-password" autocomplete="current-password" required /></label>`}
+      <div class="error" id="two-step-box-error"></div>
+      <div class="modal-row"><button type="button" class="btn secondary" id="two-step-cancel">Cancel</button>
+      <button type="submit" class="btn ${turningOff ? 'danger' : ''}">${turningOff ? 'Turn off' : step.confirm === 'codes' ? 'Get new codes' : 'Next'}</button></div></form>`;
+    $('#ts-password').focus();
+    $('#two-step-cancel').onclick = () => renderTwoStepBox();
+    $('#two-step-confirm').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        if (turningOff) {
+          Object.assign(state.me, await api('/api/me/two-step/disable', { method: 'POST', body: confirmValues('ts') }));
+          renderTwoStepBox();
+          resetDeleteForm();
+          toast('Two-step login is off.');
+        } else if (step.confirm === 'codes') {
+          const r = await api('/api/me/two-step/recovery', { method: 'POST', body: confirmValues('ts') });
+          Object.assign(state.me, r.me);
+          renderTwoStepBox({ codes: r.recoveryCodes });
+        } else {
+          renderTwoStepBox({ setup: await api('/api/me/two-step/setup', { method: 'POST', body: confirmValues('ts') }) });
+        }
+      } catch (err) { $('#two-step-box-error').textContent = err.message; }
+    };
+    return;
+  }
+  box.innerHTML = me.twoStep
+    ? `<div class="setting-row"><span><b>On.</b> Logging in asks for a code from your authenticator app. ${me.recoveryCodesLeft} recovery code${me.recoveryCodesLeft === 1 ? '' : 's'} left.</span></div>
+      <div class="settings-buttons"><button type="button" class="btn secondary" id="two-step-codes">New recovery codes</button><button type="button" class="btn secondary" id="two-step-off">Turn off</button></div>`
+    : `<div class="setting-row"><span class="small muted">Optional. With it on, logging in with your password also asks for a code from an app on your phone.</span>
+      <button type="button" class="btn secondary" id="two-step-on">Turn on</button></div>`;
+  $('#two-step-on')?.addEventListener('click', () => renderTwoStepBox({ confirm: 'on' }));
+  $('#two-step-off')?.addEventListener('click', () => renderTwoStepBox({ confirm: 'off' }));
+  $('#two-step-codes')?.addEventListener('click', () => renderTwoStepBox({ confirm: 'codes' }));
+}
+
+// The delete form asks for a code only while two-step login is on.
+function resetDeleteForm() {
+  const form = $('#delete-form');
+  if (!form) return;
+  $('#delete-code')?.closest('label').remove();
+  if (state.me.twoStep) $('#delete-password').closest('label').insertAdjacentHTML('afterend', '<label>Code from your authenticator app<input id="delete-code" inputmode="numeric" autocomplete="one-time-code" maxlength="11" required /></label>');
+}
+
+let qrLoading = null;
+async function drawQr(box, text) {
+  try {
+    if (!window.qrcode) await (qrLoading ??= loadScript('vendor/qrcode.js'));
+    const qr = window.qrcode(0, 'M');
+    qr.addData(text);
+    qr.make();
+    box.innerHTML = qr.createSvgTag({ cellSize: 5, margin: 3, scalable: true });
+  } catch {
+    box.textContent = "Couldn't draw the code. Type the key below instead.";
+  }
+}
+
+function downloadBlob(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+}
+
+async function renderPasskeyBox(adding = false) {
+  const box = $('#passkey-box');
+  if (!box) return;
+  if (!passkeysWork()) {
+    box.innerHTML = `<span class="small muted">${isDesktop
+      ? 'Add passkeys from Burrow in your web browser. You can then use them to log in there.'
+      : "This browser can't use passkeys here."}</span>`;
+    return;
+  }
+  if (adding) {
+    box.innerHTML = `<form id="passkey-form">
+      <span class="small muted">Log in with Face ID, Touch ID, Windows Hello, your phone or a security key instead of your password.</span>
+      ${confirmFields('pk')}
+      <label>Name (optional)<input id="pk-name" maxlength="40" placeholder="e.g. My laptop" /></label>
+      <div class="error" id="pk-error"></div>
+      <div class="modal-row"><button type="button" class="btn secondary" id="pk-cancel">Cancel</button><button type="submit" class="btn">Add passkey</button></div>
+    </form>`;
+    $('#pk-password').focus();
+    $('#pk-cancel').onclick = () => renderPasskeyBox();
+    $('#passkey-form').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const o = await api('/api/me/passkeys/options', { method: 'POST', body: confirmValues('pk') });
+        const cred = await navigator.credentials.create({
+          publicKey: {
+            ...o,
+            challenge: b64u.from(o.challenge),
+            user: { ...o.user, id: b64u.from(o.user.id) },
+            excludeCredentials: o.excludeCredentials.map((c) => ({ ...c, id: b64u.from(c.id) })),
+          },
+        });
+        if (!cred) return;
+        await api('/api/me/passkeys', {
+          method: 'POST',
+          body: { name: $('#pk-name').value, credential: { id: cred.id, response: { clientDataJSON: b64u.to(cred.response.clientDataJSON), attestationObject: b64u.to(cred.response.attestationObject) } } },
+        });
+        toast('Passkey added. Use "Log in with a passkey" next time.');
+        renderPasskeyBox();
+      } catch (err) {
+        $('#pk-error').textContent = err.name === 'NotAllowedError' ? 'The passkey prompt was closed or timed out.' : err.name === 'InvalidStateError' ? 'This device already has a passkey for you.' : err.message;
+      }
+    };
+    return;
+  }
+  let list = [];
+  try { list = await api('/api/me/passkeys'); } catch {}
+  box.innerHTML = `${list.length ? `<ul class="plain-list">${list.map((p) => `<li><span><b>${escapeHtml(p.name)}</b><span class="small muted"> · added ${escapeHtml(formatDay(p.createdAt))}${p.lastUsedAt ? ` · last used ${escapeHtml(formatDay(p.lastUsedAt))}` : ''}</span></span>
+      <button type="button" class="link-btn danger-link" data-remove-passkey="${escapeHtml(p.id)}">Remove</button></li>`).join('')}</ul>`
+    : '<span class="small muted">Log in with Face ID, Touch ID, Windows Hello, your phone or a security key instead of your password.</span>'}
+    <div><button type="button" class="btn secondary" id="passkey-add">Add a passkey</button></div>`;
+  $('#passkey-add').onclick = () => renderPasskeyBox(true);
+  for (const b of box.querySelectorAll('[data-remove-passkey]')) b.onclick = async () => {
+    if (!confirm('Remove this passkey? You can add it again later.')) return;
+    try { await api(`/api/me/passkeys/${encodeURIComponent(b.dataset.removePasskey)}`, { method: 'DELETE' }); renderPasskeyBox(); } catch (err) { alertError(err); }
+  };
+}
+
+const formatDay = (t) => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: new Date(t).getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
+
+async function loadDevices() {
+  const box = $('#device-box');
+  if (!box) return;
+  let list;
+  try { list = await api('/api/me/sessions'); } catch (err) { box.innerHTML = `<span class="error">${escapeHtml(err.message)}</span>`; return; }
+  const ago = (t) => {
+    const m = Math.round((Date.now() - t) / 60000);
+    return m < 60 ? 'in the last hour' : m < 1440 ? `${Math.round(m / 60)} hours ago` : formatDay(t);
+  };
+  box.innerHTML = `<ul class="plain-list device-list">${list.map((d) => `<li>
+      <span><span><b>${escapeHtml(d.device)}</b>${d.current ? ' <span class="owner-badge">this device</span>' : ''}</span>
+        <span class="small muted">${d.current || d.online ? 'Online now' : `Last used ${escapeHtml(ago(d.lastUsedAt))}`}${d.ip ? ` · ${escapeHtml(d.ip)}` : ''} · logged in ${escapeHtml(formatDay(d.createdAt))}</span></span>
+      ${d.current ? '' : `<button type="button" class="link-btn danger-link" data-signout="${escapeHtml(d.id)}">Sign out</button>`}
+    </li>`).join('')}</ul>
+    ${list.length > 1 ? '<div><button type="button" class="btn secondary" id="signout-others">Sign out everywhere else</button></div>' : ''}`;
+  for (const b of box.querySelectorAll('[data-signout]')) b.onclick = async () => {
+    try { await api(`/api/me/sessions/${b.dataset.signout}`, { method: 'DELETE' }); loadDevices(); } catch (err) { alertError(err); }
+  };
+  $('#signout-others')?.addEventListener('click', async () => {
+    if (!confirm('Sign out of Burrow on every other device?')) return;
+    try { await api('/api/me/sessions', { method: 'DELETE' }); toast('Signed out everywhere else.'); loadDevices(); } catch (err) { alertError(err); }
+  });
+}
+
+async function exportMyData() {
+  const b = $('#export-btn');
+  $('#export-error').textContent = '';
+  b.disabled = true;
+  b.textContent = 'Packing it up…';
+  try {
+    const res = await fetch(state.serverUrl + '/api/me/export', { headers: { authorization: 'Bearer ' + state.token } });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Download failed (${res.status})`);
+    downloadBlob(await res.blob(), `burrow-${state.me.username}.zip`);
+  } catch (err) { $('#export-error').textContent = err.message; }
+  finally { b.disabled = false; b.textContent = 'Download my data'; }
+}
+
+async function deleteMyAccount(e) {
+  e.preventDefault();
+  const deleteMessages = document.querySelector('input[name="delete-messages"]:checked').value === 'delete';
+  $('#delete-error').textContent = '';
+  if (!confirm(`Delete your Burrow account${deleteMessages ? ' and everything you sent' : ''}? This can't be undone.`)) return;
+  try {
+    await api('/api/me', { method: 'DELETE', body: { password: $('#delete-password').value, code: $('#delete-code')?.value.trim() ?? '', deleteMessages } });
+    closeModal();
+    logout(false);
+    $('#auth-error').textContent = 'Your account was deleted.';
+  } catch (err) { $('#delete-error').textContent = err.message; }
 }
 
 // Crops to the middle square and shrinks to 256 px, so pictures load fast everywhere.
@@ -2265,7 +2785,7 @@ function setReply(m) {
   const bar = $('#reply-bar');
   bar.classList.toggle('hidden', !m);
   if (m) {
-    $('#reply-name').textContent = m.author;
+    $('#reply-name').textContent = authorName(m);
     input.focus();
   }
 }
@@ -2299,7 +2819,7 @@ function renderReactions(m) {
     const b = document.createElement('button');
     b.className = 'reaction' + (r.userIds.includes(state.me.id) ? ' mine' : '');
     const server = state.servers.get(state.serverId);
-    b.title = r.userIds.map((id) => server?.members.find((x) => x.id === id)?.username ?? 'someone').join(', ');
+    b.title = r.userIds.map((id) => nameOfPerson(server?.members.find((x) => x.id === id))).join(', ');
     b.innerHTML = `<span class="r-emoji">${emojiHtml(r.emoji)}</span><span class="r-count">${r.userIds.length}</span>`;
     b.onclick = () => toggleReaction(m, r.emoji);
     row.append(b);
@@ -3012,9 +3532,11 @@ let sideBySide = false;  // every shared screen shown big, next to each other
 let poppedKey = null;    // the tile playing in its own picture-in-picture window
 
 function nameOf(userId, fallback = '?') {
+  const here = state.servers.get(state.serverId)?.members.find((m) => m.id === userId);
+  if (here) return nameOfPerson(here);
   for (const s of state.servers.values()) {
     const m = s.members.find((m) => m.id === userId);
-    if (m) return m.username;
+    if (m) return m.displayName || m.username;
   }
   return fallback;
 }
@@ -3888,8 +4410,8 @@ function renderLiveCard(m) {
   const minutes = live.endedAt ? Math.max(1, Math.round((live.endedAt - m.createdAt) / 60000)) : 0;
   card.innerHTML = `<span class="live-badge">${live.endedAt ? 'ENDED' : 'LIVE'}</span><span class="live-text"></span>`;
   card.querySelector('.live-text').textContent = live.endedAt
-    ? `${m.author} was live at ${place} for ${minutes} minute${minutes === 1 ? '' : 's'}`
-    : `${m.author} is sharing their screen at ${place}`;
+    ? `${authorName(m)} was live at ${place} for ${minutes} minute${minutes === 1 ? '' : 's'}`
+    : `${authorName(m)} is sharing their screen at ${place}`;
   if (!live.endedAt && where && m.authorId !== state.me.id) {
     const here = state.voice?.channelId === where.id;
     const b = document.createElement('button');
@@ -3981,7 +4503,7 @@ function renderFire(status) {
   }
   ids.forEach((id, i) => {
     const me = id === state.me.id;
-    const name = nameOf(id, me ? state.me.username : '?');
+    const name = nameOf(id, me ? state.me.displayName || state.me.username : '?');
     let seat = seats.get(id);
     if (!seat) {
       const el = document.createElement('div');
@@ -6641,7 +7163,7 @@ function renderSeen() {
   if (!line) return;
   const mark = document.createElement('div');
   mark.className = 'seen-mark';
-  mark.textContent = `Seen by ${partner(where.s).username}`;
+  mark.textContent = `Seen by ${nameOfPerson(partner(where.s))}`;
   line.after(mark);
 }
 
@@ -6748,7 +7270,7 @@ function messageCard(m, place, { onOpen, buttons = [], note = '' } = {}) {
   av.className = 'avatar xs';
   setAvatar(av, m.author, avatarOf(m.authorId, m.authorAvatar));
   const who = document.createElement('b');
-  who.textContent = m.author;
+  who.textContent = authorName(m);
   const when = document.createElement('span');
   when.className = 'muted small';
   when.textContent = formatTime(new Date(m.createdAt)) + (place ? ` · ${placeLabel(place)}` : '');
@@ -6867,7 +7389,7 @@ function forwardTargets() {
   for (const id of state.dmOrder) {
     const s = state.servers.get(id);
     const c = s.channels[0];
-    if (c) out.push({ id: c.id, label: s.group ? dmTitle(s) : `Direct message with ${partner(s).username}` });
+    if (c) out.push({ id: c.id, label: s.group ? dmTitle(s) : `Direct message with ${nameOfPerson(partner(s))}` });
   }
   return out;
 }
@@ -7618,7 +8140,7 @@ function renderPoll(m) {
     const pct = voters ? Math.round((n / voters) * 100) : 0;
     b.className = 'poll-option' + (mine.includes(i) ? ' mine' : '') + (p.closed && n === most && n ? ' winner' : '');
     b.disabled = p.closed;
-    b.title = n ? o.userIds.map((id) => server?.members.find((x) => x.id === id)?.username ?? 'someone').join(', ') : 'No votes yet';
+    b.title = n ? o.userIds.map((id) => nameOfPerson(server?.members.find((x) => x.id === id))).join(', ') : 'No votes yet';
     b.innerHTML = `<span class="poll-fill" style="width:${voters ? (n / voters) * 100 : 0}%"></span><span class="poll-text"></span><span class="poll-count">${n} · ${pct}%</span>`;
     b.querySelector('.poll-text').textContent = o.text;
     b.onclick = () => {
@@ -7918,7 +8440,7 @@ function openSearch() {
     $('#search-room').classList.toggle('hidden', !rooms.length);
     const people = new Map();
     const sources = s ? [s] : scope() === 'dms' ? state.dmOrder.map((id) => state.servers.get(id)) : [...state.servers.values()];
-    for (const src of sources) for (const m of src?.members ?? []) people.set(m.id, m.username);
+    for (const src of sources) for (const m of src?.members ?? []) people.set(m.id, nameOfPerson(m));
     $('#search-from').innerHTML = '<option value="">From anyone</option>' + [...people].sort((a, b) => a[1].localeCompare(b[1]))
       .map(([id, name]) => `<option value="${id}">From ${escapeHtml(name)}${id === state.me.id ? ' (you)' : ''}</option>`).join('');
   };
@@ -8464,7 +8986,7 @@ function openEditBurrow(serverId) {
     </div>` : ''}
     ${host && others.length ? `<h3>Hand the burrow over</h3>
     <p class="small muted">Someone else becomes the host and can do everything. You stay in the burrow with your roles.</p>
-    <div class="transfer-row"><select id="transfer-to">${others.map((m) => `<option value="${m.id}">${escapeHtml(m.username)}</option>`).join('')}</select>
+    <div class="transfer-row"><select id="transfer-to">${others.map((m) => `<option value="${m.id}">${escapeHtml(nameOfPerson(m))}</option>`).join('')}</select>
       <button type="button" class="btn danger" id="transfer-go">Hand over</button></div>` : ''}`);
   const done = (updated) => { handleEvent({ type: 'server_updated', server: updated }); };
   $('#burrow-form').onsubmit = async (e) => {
@@ -8515,8 +9037,8 @@ function openEditBurrow(serverId) {
   }
   $('#transfer-go')?.addEventListener('click', async () => {
     const to = others.find((m) => m.id === Number($('#transfer-to').value));
-    if (!to || !confirm(`Make ${to.username} the host of ${s.name}? You can't take this back yourself.`)) return;
-    try { done(await api(`/api/servers/${s.id}/transfer`, { method: 'POST', body: { userId: to.id } })); closeModal(); toast(`${to.username} is now the host.`); }
+    if (!to || !confirm(`Make ${nameOfPerson(to)} the host of ${s.name}? You can't take this back yourself.`)) return;
+    try { done(await api(`/api/servers/${s.id}/transfer`, { method: 'POST', body: { userId: to.id } })); closeModal(); toast(`${nameOfPerson(to)} is now the host.`); }
     catch (err) { alertError(err); }
   });
 }
@@ -8792,9 +9314,9 @@ function showEventReminder(ev) {
 
 /** What a conversation is called: the other person, or a group's name (or its people). */
 function dmTitle(s) {
-  if (!s.group) return partner(s).username;
+  if (!s.group) return nameOfPerson(partner(s));
   if (s.name) return s.name;
-  const names = s.members.filter((m) => m.id !== state.me.id).map((m) => m.username);
+  const names = s.members.filter((m) => m.id !== state.me.id).map(nameOfPerson);
   return names.length > 3 ? `${names.slice(0, 3).join(', ')} and ${names.length - 3} more` : names.join(', ') || 'Just you';
 }
 function groupAvatar(cls = 'xs') {
@@ -8804,12 +9326,13 @@ function groupAvatar(cls = 'xs') {
   return av;
 }
 
-/** People you can message: everyone who shares a burrow with you. */
+/** People you can message: your friends and everyone who shares a burrow with you. */
 function messageablePeople() {
   const people = new Map();
+  for (const f of state.friends?.friends ?? []) people.set(f.id, f);
   for (const id of state.serverOrder)
-    for (const m of state.servers.get(id).members) if (m.id !== state.me.id) people.set(m.id, m);
-  return [...people.values()].sort((a, b) => a.username.localeCompare(b.username));
+    for (const m of state.servers.get(id).members) if (m.id !== state.me.id && !people.has(m.id)) people.set(m.id, { ...m, nickname: null });
+  return [...people.values()].filter((m) => !m.deleted && !state.me.blockedIds?.includes(m.id)).sort((a, b) => nameOfPerson(a).localeCompare(nameOfPerson(b)));
 }
 
 /** A list of people to tick. `done(ids)` gets the ticked ones. */
@@ -8829,7 +9352,7 @@ function peoplePicker({ title, intro = '', list, button, onDone, extra = '', wir
   };
   const render = (q = '') => {
     $('#dm-people').replaceChildren(
-      ...list.filter((m) => m.username.toLowerCase().includes(q.toLowerCase())).map((m) => {
+      ...list.filter((m) => (m.username + ' ' + nameOfPerson(m)).toLowerCase().includes(q.toLowerCase())).map((m) => {
         const li = document.createElement('li');
         li.classList.toggle('picked', picked.has(m.id));
         li.setAttribute('role', 'checkbox');
@@ -8839,7 +9362,7 @@ function peoplePicker({ title, intro = '', list, button, onDone, extra = '', wir
         av.className = 'avatar';
         setAvatar(av, m.username, avatarOf(m.id, m.avatar));
         const name = document.createElement('span');
-        name.textContent = m.username;
+        name.textContent = nameOfPerson(m);
         const tick = document.createElement('span');
         tick.className = 'pick-tick';
         li.append(av, name, tick);
@@ -8866,12 +9389,12 @@ function openGroupSettings(s) {
   const others = s.members.filter((m) => m.id !== state.me.id);
   modal(`<h2>${escapeHtml(dmTitle(s))}</h2>
     <form id="group-form">
-      <label>Name<input id="group-name" maxlength="64" placeholder="${escapeHtml(others.map((m) => m.username).join(', '))}" value="${escapeHtml(s.name ?? '')}" /></label>
+      <label>Name<input id="group-name" maxlength="64" placeholder="${escapeHtml(others.map(nameOfPerson).join(', '))}" value="${escapeHtml(s.name ?? '')}" /></label>
       <div class="error" id="modal-error"></div>
       <div class="modal-row"><button type="submit" class="btn secondary">Rename</button></div>
     </form>
     <h3>People · ${s.members.length}</h3>
-    <ul class="group-people">${s.members.map((m) => `<li data-avatar="${m.id}"><span class="avatar xs"></span>${escapeHtml(m.username)}${m.id === state.me.id ? ' <span class="muted small">(you)</span>' : ''}</li>`).join('')}</ul>
+    <ul class="group-people">${s.members.map((m) => `<li data-avatar="${m.id}"><span class="avatar xs"></span>${escapeHtml(nameOfPerson(m))}${m.id === state.me.id ? ' <span class="muted small">(you)</span>' : ''}</li>`).join('')}</ul>
     <div class="modal-row">
       <button class="btn danger" id="group-leave">Leave conversation</button>
       <span class="spacer"></span>
@@ -9012,9 +9535,12 @@ function rememberAvatars(server) {
 // Someone (maybe us) changed their picture.
 function applyUser(u) {
   state.avatars.set(u.id, u.avatar);
-  for (const s of state.servers.values()) for (const m of s.members) if (m.id === u.id) m.avatar = u.avatar;
+  const fields = { avatar: u.avatar, ...(u.username ? { username: u.username, displayName: u.displayName ?? null } : {}), ...('accent' in u ? { accent: u.accent } : {}) };
+  for (const s of state.servers.values()) for (const m of s.members) if (m.id === u.id) Object.assign(m, fields);
+  for (const list of Object.values(state.friends ?? {})) for (const f of list) if (f.id === u.id) Object.assign(f, fields);
   if (u.id === state.me?.id) {
-    state.me.avatar = u.avatar;
+    Object.assign(state.me, fields);
+    $('#me-name').textContent = state.me.displayName || state.me.username;
     setAvatar($('#me-avatar'), state.me.username, u.avatar);
     setAvatar($('#tab-avatar'), state.me.username, u.avatar);
     const preview = $('#account-avatar');
@@ -9144,39 +9670,71 @@ function goToVoice() {
 $('#campfire-chip').onclick = goToVoice;
 $('#voice-pill').onclick = goToVoice;
 
-// Someone in a burrow: message them, change how loud they are for you, and manage them.
+// The top of someone's card: banner (or their colour), picture, names and about me.
+// `s` is the burrow you opened it from, for their nickname and role colour there.
+function profileHeader(p, s) {
+  const el = document.createElement('div');
+  el.className = 'profile-head';
+  if (p.accent) el.style.setProperty('--card-accent', p.accent);
+  const banner = document.createElement('div');
+  banner.className = 'profile-banner' + (p.banner ? ' has-picture' : '');
+  if (p.banner) banner.style.backgroundImage = `url("${state.serverUrl}${p.banner}")`;
+  const av = document.createElement('span');
+  av.className = 'avatar xl profile-avatar';
+  setAvatar(av, p.username, avatarOf(p.id, p.avatar));
+  const names = document.createElement('div');
+  names.className = 'profile-names';
+  const h = document.createElement('h2');
+  h.textContent = p.deleted ? 'Deleted user' : nameOfPerson(p);
+  const color = s && roleColor(s, p.id);
+  if (color) h.style.color = color;
+  names.append(h);
+  if (!p.deleted) {
+    const sub = document.createElement('span');
+    sub.className = 'profile-username';
+    sub.textContent = `@${p.username}${p.nickname && p.displayName && p.nickname !== p.displayName ? ` · ${p.displayName}` : ''}`;
+    names.append(sub);
+  }
+  el.append(banner, av, names);
+  if (p.bio) {
+    const bio = document.createElement('p');
+    bio.className = 'profile-bio';
+    bio.textContent = p.bio;
+    el.append(bio);
+  }
+  return el;
+}
+
+// Someone's card: who they are, their status, and what you can do: message them, add them as a
+// friend, change how loud they are for you, block them, or manage them in this burrow.
+// `s` is null when opened from your friends list.
 function openPerson(s, m) {
-  const inVoice = state.voice && s.channels.some((c) => c.id === state.voice.channelId && c.voiceUsers?.includes(m.id));
+  const me = m.id === state.me.id;
+  const inVoice = s && state.voice && s.channels.some((c) => c.id === state.voice.channelId && c.voiceUsers?.includes(m.id));
   const sharing = inVoice ? state.sharing.get(m.id) : null;
-  const top = rolesOf(s, m)[0];
+  const top = s ? rolesOf(s, m)[0] : null;
   const status = sharing?.screen ? 'Sharing their screen' : inVoice ? 'By the fire with you' : m.online ? STATUS_LABELS[statusOf(m)] : 'Out in the woods';
-  modal(`<div class="person">
-      <span class="avatar xl" id="person-avatar"></span>
-      <div class="person-meta">
-        <h2></h2>
-        <span class="person-status${sharing?.screen ? ' live' : ''}">${escapeHtml(status)}</span>
-        ${presenceLine(m) ? `<span class="person-custom">${presenceLine(m, true)}</span>` : ''}
-        ${isHost(s, m.id) ? '<span class="owner-badge">host</span>' : top ? `<span class="owner-badge role" style="--role:${escapeHtml(top.color)}">${escapeHtml(top.name)}</span>` : ''}
-      </div>
+  modal(`<div class="profile-card" id="profile-card"></div>
+    <div class="person-meta">
+      ${m.deleted ? '' : `<span class="person-status${sharing?.screen ? ' live' : ''}"><span class="status-dot ${statusOf(m)}"></span>${escapeHtml(status)}</span>`}
+      ${presenceLine(m) ? `<span class="person-custom">${presenceLine(m, true)}</span>` : ''}
+      ${isHost(s, m.id) ? '<span class="owner-badge">host</span>' : top ? `<span class="owner-badge role" style="--role:${escapeHtml(top.color)}">${escapeHtml(top.name)}</span>` : ''}
+      <span class="small muted" id="profile-extra"></span>
     </div>
     ${sharing?.screen || sharing?.camera ? `<button class="btn" id="person-watch">${sharing.screen ? 'Watch stream' : 'See camera'}</button>` : ''}
-    ${inVoice ? `<div class="person-sliders">
+    ${inVoice && !me ? `<div class="person-sliders">
       ${sharing?.screen ? `<label>Stream volume <span id="pv-stream-val"></span>
         <input type="range" id="pv-stream" min="0" max="200" step="5" value="${Math.round(streamVolumeFor(m.id) * 100)}" /></label>` : ''}
       <label>Voice volume <span id="pv-voice-val"></span>
         <input type="range" id="pv-voice" min="0" max="200" step="5" value="${Math.round(volumeFor(m.id) * 100)}" /></label>
       <span class="small muted">Only changes it for you.</span>
     </div>` : ''}
-    <div class="person-actions">
-      ${!isDm(s) ? '<button class="action" id="person-dm">Send a message</button>' : ''}
-      ${!isDm(s) ? '<button class="action" id="person-mention">Mention</button>' : ''}
-      ${canActOn(s, m) ? `<button class="action" id="person-manage">Manage ${escapeHtml(m.username)}</button>` : ''}
-    </div>
-    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`, 'sheet');
-  $('#modal-card .person h2').textContent = m.username;
-  const color = roleColor(s, m.id);
-  if (color) $('#modal-card .person h2').style.color = color;
-  setAvatar($('#person-avatar'), m.username, avatarOf(m.id, m.avatar));
+    <div class="person-actions" id="person-actions"></div>
+    <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`, 'sheet profile-modal');
+  const card = $('#profile-card');
+  let profile = { ...m };
+  const draw = () => card.replaceChildren(profileHeader(profile, s));
+  draw();
   const pct = (v) => (v === 0 ? 'Muted' : `${Math.round(v * 100)}%`);
   const sliders = [['#pv-stream', streamVolumeFor, setStreamVolume], ['#pv-voice', volumeFor, setVolume]];
   for (const [sel, get, set] of sliders) {
@@ -9188,19 +9746,206 @@ function openPerson(s, m) {
     show();
   }
   $('#person-watch')?.addEventListener('click', () => { closeModal(); goToVoice(); openVideo(`${m.id}:${sharing?.screen ? 'screen' : 'camera'}`); });
-  $('#person-dm')?.addEventListener('click', () => openDm(m.id));
-  $('#person-mention')?.addEventListener('click', () => {
-    closeModal();
-    memberPane.classList.remove('open');
-    input.value = `${input.value}${input.value && !input.value.endsWith(' ') ? ' ' : ''}@${m.username} `;
-    autosize();
-    showView('chat');
-    input.focus();
-  });
-  $('#person-manage')?.addEventListener('click', () => openMemberMenu(s, m));
+
+  const actions = (friend) => {
+    const box = $('#person-actions');
+    if (!box) return;
+    const list = [];
+    const add = (label, fn, cls = '') => list.push(Object.assign(document.createElement('button'), { className: `action ${cls}`, textContent: label, onclick: fn }));
+    if (me) {
+      add('Edit your profile', () => openAccount('profile'));
+      if (s && !isDm(s)) add(`Change nickname in ${s.name}`, () => openNickname(s));
+    } else if (!m.deleted) {
+      const blocked = isBlocked(m.id);
+      if (!blocked && !(s && isDm(s) && !s.group)) add('Send a message', () => openDm(m.id));
+      if (s && !isDm(s) && !blocked) add('Mention', () => {
+        closeModal();
+        memberPane.classList.remove('open');
+        input.value = `${input.value}${input.value && !input.value.endsWith(' ') ? ' ' : ''}@${m.username} `;
+        autosize();
+        showView('chat');
+        input.focus();
+      });
+      if (!blocked) {
+        if (friend === 'friends') add('Remove friend', () => confirm(`Remove ${nameOfPerson(m)} from your friends?`) && friendAction(m.id, 'remove', redraw));
+        else if (friend === 'incoming') add('Accept friend request', () => friendAction(m.id, 'accept', redraw));
+        else if (friend === 'outgoing') add('Cancel friend request', () => friendAction(m.id, 'remove', redraw));
+        else add('Add friend', () => friendAction(m.id, 'add', redraw));
+      }
+      if (s && canActOn(s, m)) add(`Manage ${nameOfPerson(m)}`, () => openMemberMenu(s, m));
+      add(blocked ? 'Unblock' : 'Block', () => toggleBlock(m, redraw), 'danger-item');
+    }
+    box.replaceChildren(...list);
+  };
+  const redraw = () => actions(profile.friend ?? friendStateOf(m.id));
+  actions(friendStateOf(m.id));
+  // The rest of the card (about me, banner, burrows you share) comes from the server.
+  api(`/api/users/${m.id}`).then((p) => {
+    if (!card.isConnected) return;
+    profile = { ...m, ...p, nickname: m.nickname };
+    draw();
+    const extra = [];
+    if (p.joinedAt && !p.deleted) extra.push(`On Burrow since ${formatDay(p.joinedAt)}`);
+    if (p.mutualBurrows?.length) extra.push(`Burrows you share: ${p.mutualBurrows.map((b) => b.name).join(', ')}`);
+    $('#profile-extra').textContent = extra.join(' · ');
+    redraw();
+  }).catch(() => {});
+}
+
+// The person card for someone you only know by id (a friend, a reply, a reaction).
+function openPersonById(userId) {
+  const here = state.servers.get(state.serverId);
+  const mem = here?.members.find((x) => x.id === userId);
+  if (mem) return openPerson(here, mem);
+  const f = Object.values(state.friends ?? {}).flat().find((x) => x.id === userId);
+  if (f) return openPerson(null, f);
+  for (const s of state.servers.values()) {
+    const x = s.members.find((y) => y.id === userId);
+    if (x) return openPerson(null, { ...x, nickname: null });
+  }
+}
+
+function openNickname(s) {
+  const mine = s.members.find((x) => x.id === state.me.id);
+  modal(`<h2>Your nickname in ${escapeHtml(s.name)}</h2>
+    <form id="nick-form">
+      <label>Nickname<input id="nick-input" maxlength="32" placeholder="${escapeHtml(state.me.displayName || state.me.username)}" value="${escapeHtml(mine?.nickname ?? '')}" /></label>
+      <span class="small muted">Only shown in this burrow. Leave it empty to use your display name.</span>
+      <div class="error" id="nick-error"></div>
+      <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">Save</button></div>
+    </form>`);
+  $('#nick-form').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const srv = await api(`/api/servers/${s.id}/nickname`, { method: 'PATCH', body: { nickname: $('#nick-input').value } });
+      state.servers.set(srv.id, srv);
+      closeModal();
+      renderMembers();
+      renderMessages();
+    } catch (err) { $('#nick-error').textContent = err.message; }
+  };
+}
+
+// ---------------------------------------------------------------- friends and blocking
+
+function setFriends(f) {
+  state.friends = { friends: f.friends ?? [], incoming: f.incoming ?? [], outgoing: f.outgoing ?? [], blocked: f.blocked ?? [] };
+  if (state.inDms) renderChannels();
+  updateFriendsBadge();
+  if ($('#friends-panel')) renderFriendsPanel();
+}
+async function loadFriends() {
+  try { setFriends(await api('/api/friends')); } catch {}
+}
+const friendStateOf = (id) => {
+  const f = state.friends;
+  if (!f) return null;
+  return f.friends.some((x) => x.id === id) ? 'friends' : f.incoming.some((x) => x.id === id) ? 'incoming' : f.outgoing.some((x) => x.id === id) ? 'outgoing' : null;
+};
+function updateFriendsBadge() {
+  const n = state.friends?.incoming.length ?? 0;
+  $('#friends-row .ping-count')?.replaceChildren(n > 99 ? '99+' : String(n));
+  $('#friends-row .ping-count')?.classList.toggle('hidden', !n);
+}
+
+async function friendAction(userId, what, after) {
+  try {
+    if (what === 'add') setFriends(await api('/api/friends', { method: 'POST', body: { userId } }));
+    else if (what === 'accept') setFriends(await api(`/api/friends/${userId}/accept`, { method: 'POST' }));
+    else setFriends(await api(`/api/friends/${userId}`, { method: 'DELETE' }));
+    toast(what === 'add' ? (friendStateOf(userId) === 'friends' ? "You're friends now." : 'Friend request sent.') : what === 'accept' ? "You're friends now." : 'Done.');
+    after?.();
+  } catch (err) { alertError(err); }
+}
+
+async function toggleBlock(m, after) {
+  const blocked = isBlocked(m.id);
+  if (!blocked && !confirm(`Block ${nameOfPerson(m)}? Their messages are folded away, they can't message you or send you friend requests, and you're no longer friends.`)) return;
+  try {
+    Object.assign(state.me, blocked
+      ? await api(`/api/blocks/${m.id}`, { method: 'DELETE' })
+      : await api('/api/blocks', { method: 'POST', body: { userId: m.id } }));
+    toast(blocked ? `${nameOfPerson(m)} is unblocked.` : `${nameOfPerson(m)} is blocked.`);
+    renderMessages();
+    loadFriends();
+    after?.();
+  } catch (err) { alertError(err); }
+}
+
+// Friends: who's online across all your burrows, requests both ways, and people you've blocked.
+let friendsTab = 'online';
+function openFriends(tab) {
+  if (tab) friendsTab = tab;
+  else if (state.friends?.incoming.length) friendsTab = 'requests';
+  modal(`<div id="friends-panel" class="friends-panel">
+    <h2>Friends</h2>
+    <form id="add-friend" class="inline-form">
+      <input id="add-friend-name" placeholder="Add a friend by their username" autocomplete="off" maxlength="40" />
+      <button type="submit" class="btn">Send request</button>
+    </form>
+    <div class="error" id="add-friend-error"></div>
+    <div class="tabs" role="tablist" id="friends-tabs"></div>
+    <ul class="friend-list" id="friend-list"></ul>
+  </div>
+  <div class="modal-row"><button type="button" class="btn secondary" data-close>Close</button></div>`, 'sheet');
+  $('#add-friend').onsubmit = async (e) => {
+    e.preventDefault();
+    $('#add-friend-error').textContent = '';
+    const username = $('#add-friend-name').value.trim();
+    if (!username) return;
+    try {
+      setFriends(await api('/api/friends', { method: 'POST', body: { username } }));
+      $('#add-friend-name').value = '';
+      toast(state.friends.friends.some((f) => f.username.toLowerCase() === username.replace(/^@/, '').toLowerCase()) ? "You're friends now." : 'Friend request sent.');
+    } catch (err) { $('#add-friend-error').textContent = err.message; }
+  };
+  renderFriendsPanel();
+  loadFriends();
+}
+
+function renderFriendsPanel() {
+  const f = state.friends ?? { friends: [], incoming: [], outgoing: [], blocked: [] };
+  const online = f.friends.filter((x) => x.online);
+  const tabs = [['online', `Online · ${online.length}`], ['all', `All · ${f.friends.length}`], ['requests', `Requests${f.incoming.length ? ` · ${f.incoming.length}` : ''}`], ['blocked', 'Blocked']];
+  $('#friends-tabs').innerHTML = tabs.map(([id, label]) => `<button type="button" role="tab" data-tab="${id}" aria-selected="${id === friendsTab}">${label}</button>`).join('');
+  for (const b of $('#friends-tabs').querySelectorAll('button')) b.onclick = () => { friendsTab = b.dataset.tab; renderFriendsPanel(); };
+  const sorted = (list) => [...list].sort((a, b) => !!b.online - !!a.online || nameOfPerson(a).localeCompare(nameOfPerson(b)));
+  const rows = [];
+  const row = (p, sub, buttons) => {
+    const li = document.createElement('li');
+    const av = document.createElement('span');
+    av.className = 'avatar-wrap';
+    av.innerHTML = `<span class="avatar"></span>${'online' in p ? `<span class="status-dot ${statusOf(p)}"></span>` : ''}`;
+    setAvatar(av.firstChild, p.username, avatarOf(p.id, p.avatar));
+    const text = document.createElement('button');
+    text.type = 'button';
+    text.className = 'friend-text';
+    text.innerHTML = `<b>${escapeHtml(nameOfPerson(p))}</b><span class="small muted">${sub}</span>`;
+    text.onclick = () => openPerson(null, p);
+    li.append(av, text, ...buttons);
+    rows.push(li);
+  };
+  const btn = (label, fn, cls = 'secondary') => Object.assign(document.createElement('button'), { type: 'button', className: `btn ${cls}`, textContent: label, onclick: fn });
+  const heading = (text) => rows.push(Object.assign(document.createElement('li'), { className: 'friend-heading', textContent: text }));
+  if (friendsTab === 'online' || friendsTab === 'all') {
+    const list = sorted(friendsTab === 'online' ? online : f.friends);
+    for (const p of list) row(p, presenceLine(p) || `@${escapeHtml(p.username)} · ${STATUS_LABELS[statusOf(p)]}`, [btn('Message', () => openDm(p.id))]);
+    if (!list.length) rows.push(Object.assign(document.createElement('li'), { className: 'hint', textContent: friendsTab === 'online' ? 'None of your friends are online right now.' : 'No friends yet. Add someone by their username above, or from their card in a burrow.' }));
+  } else if (friendsTab === 'requests') {
+    if (f.incoming.length) heading('Asking to be your friend');
+    for (const p of f.incoming) row(p, `@${escapeHtml(p.username)}`, [btn('Accept', () => friendAction(p.id, 'accept'), ''), btn('Decline', () => friendAction(p.id, 'remove'))]);
+    if (f.outgoing.length) heading('Waiting on them');
+    for (const p of f.outgoing) row(p, `@${escapeHtml(p.username)}`, [btn('Cancel', () => friendAction(p.id, 'remove'))]);
+    if (!f.incoming.length && !f.outgoing.length) rows.push(Object.assign(document.createElement('li'), { className: 'hint', textContent: 'No friend requests.' }));
+  } else {
+    for (const p of f.blocked) row(p, `@${escapeHtml(p.username)}`, [btn('Unblock', () => toggleBlock(p))]);
+    if (!f.blocked.length) rows.push(Object.assign(document.createElement('li'), { className: 'hint', textContent: "You haven't blocked anyone." }));
+  }
+  $('#friend-list').replaceChildren(...rows);
 }
 
 // ---------------------------------------------------------------- start
 
-if (state.token && state.serverUrl) resolveServerUrl().then(enterApp).catch(() => showAuth());
+if (resetLinkToken && !isDesktop) showAuth();
+else if (state.token && state.serverUrl) resolveServerUrl().then(enterApp).catch(() => showAuth());
 else showAuth();
