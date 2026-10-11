@@ -182,7 +182,7 @@ async function renderAuthMode() {
   $('#reg-code-row').classList.toggle('hidden', !needsCode && !linksOnly);
   $('#reg-code').placeholder = linksOnly ? 'Paste your signup link' : 'Ask whoever runs the server, or paste a signup link';
   if (registering && signupLink) $('#auth-subtitle').textContent = "You've been invited. Pick a username your friends will see.";
-  if (linksOnly) $('#auth-subtitle').textContent = 'Signing up here needs a signup link from whoever runs this Burrow.';
+  if (linksOnly) $('#auth-subtitle').textContent = 'Signing up here needs a signup link from whoever runs this Peiskos.';
   // "Forgot your password?" only where the server can send email.
   let canEmail = false;
   if (!registering && state.serverUrl) {
@@ -201,7 +201,7 @@ function showReset(on) {
   $('#reset-step2').classList.add('hidden');
   $('#reset-resend').classList.add('hidden');
   $('#reset-submit').textContent = 'Email me a code';
-  $('#reset-subtitle').textContent = 'Burrow emails a code to the address you confirmed in your account settings.';
+  $('#reset-subtitle').textContent = 'Peiskos emails a code to the address you confirmed in your account settings.';
   $('#reset-error').textContent = '';
   if (on) {
     $('#reset-username').value = $('#username').value.trim();
@@ -723,7 +723,7 @@ function handleEvent(ev) {
       const s = state.servers.get(ev.serverId);
       if (s) s.serverMuted = ev.muted;
       if (state.voice && fireServer()?.id === ev.serverId) applyServerMute(ev.muted);
-      toast(ev.muted ? `A moderator muted you in ${s?.name ?? 'a burrow'}.` : `You can speak again in ${s?.name ?? 'the burrow'}.`);
+      toast(ev.muted ? `A moderator muted you in ${s?.name ?? 'a hearth'}.` : `You can speak again in ${s?.name ?? 'the hearth'}.`);
       break;
     }
     case 'soundboard':
@@ -806,7 +806,7 @@ function notify(m) {
   if (!mentioned && !document.hidden) return;
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   const who = authorName(m);
-  const title = isDm(server) ? (server.group ? `${who} in ${dmTitle(server)}` : `${who} (direct message)`) : `${who} in ${channel?.name ?? 'Burrow'}`;
+  const title = isDm(server) ? (server.group ? `${who} in ${dmTitle(server)}` : `${who} (direct message)`) : `${who} in ${channel?.name ?? 'Peiskos'}`;
   const body = plainText(m.content).slice(0, 200) || (m.poll ? `Poll: ${m.poll.question}` : m.live ? 'Is live, sharing their screen' : m.sticker ? 'Sent a sticker' : 'Sent a file');
   const n = new Notification(title, { body, silent: !mentioned });
   n.onclick = () => { window.focus(); jumpTo(m.channelId, m.id); };

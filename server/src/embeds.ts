@@ -28,7 +28,7 @@ const MAX_PAGE_BYTES = 768 * 1024;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const TIMEOUT_MS = 6000;
 const MAX_REDIRECTS = 4;
-const USER_AGENT = 'Mozilla/5.0 (compatible; BurrowLinkPreview/1.0; +https://github.com/HaxMarris/Burrow)';
+const USER_AGENT = 'Mozilla/5.0 (compatible; PeiskosLinkPreview/1.0; +https://github.com/HaxMarris/Burrow)';
 
 const blocked = new BlockList();
 for (const [net, bits] of [

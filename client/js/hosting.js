@@ -66,18 +66,18 @@ function adminOverview(pane) {
   const online = people.filter((x) => x.online).length;
   const update = !u?.running
     ? `<p class="small muted">Updates are installed over SSH. To install them from here instead, turn on the updater: see "Updating from the admin page" in the README.</p>`
-    : u.updating ? '<p><b>Updating…</b> Burrow restarts by itself when it\'s done; this page reloads.</p>'
+    : u.updating ? '<p><b>Updating…</b> Peiskos restarts by itself when it\'s done; this page reloads.</p>'
     : u.behind ? `<p><b>A new version is out</b> (${u.behind} change${u.behind === 1 ? '' : 's'}).</p>
         <ul class="small update-changes">${u.changes.slice(0, 8).map((c) => `<li>${escapeHtml(c)}</li>`).join('')}</ul>
         <div><button type="button" class="btn" id="admin-update">Update now</button></div>
-        <p class="small muted">Burrow is away for a minute or two while it rebuilds; voice calls reconnect after.</p>`
+        <p class="small muted">Peiskos is away for a minute or two while it rebuilds; voice calls reconnect after.</p>`
     : `<p class="small muted">Up to date (${escapeHtml(u.commit)}, ${dateText(u.commitDate * 1000)}). Last checked ${ago(u.checkedAt * 1000)}.</p>`;
   const result = u?.result === 'failed' ? `<p class="error">The last update didn't finish (${ago(u.resultAt * 1000)}). Its log is in the data folder: updater/log.txt.</p>` : '';
   pane.innerHTML = `
     <div class="admin-stats">
       <div><b>${people.length}</b><span>people</span></div>
       <div><b>${online}</b><span>online now</span></div>
-      <div><b>${d.counts.burrows}</b><span>burrows</span></div>
+      <div><b>${d.counts.burrows}</b><span>hearths</span></div>
       <div><b>${d.counts.messages.toLocaleString()}</b><span>messages</span></div>
     </div>
     <h3>Checks</h3>
@@ -90,10 +90,10 @@ function adminOverview(pane) {
       ${st.backups != null ? `<dt>Backups on this server</dt><dd>${formatSize(st.backups)}</dd>` : ''}
       ${st.free != null ? `<dt>Free disk space</dt><dd>${formatSize(st.free)} of ${formatSize(st.total)}${st.free < st.total * 0.1 ? ' <b class="error">(running low)</b>' : ''}</dd>` : ''}
     </dl>
-    <div class="admin-row"><button type="button" class="btn secondary" id="admin-cleanup">Clean up unused files</button><span class="small muted" id="admin-cleanup-note">Files from deleted messages, burrows and pictures. This also runs by itself every day.</span></div>
+    <div class="admin-row"><button type="button" class="btn secondary" id="admin-cleanup">Clean up unused files</button><span class="small muted" id="admin-cleanup-note">Files from deleted messages, hearths and pictures. This also runs by itself every day.</span></div>
     <h3>In voice now</h3>
     ${d.voice.length ? `<ul class="admin-voice">${d.voice.map((v) => `<li><b>${escapeHtml(v.burrow)}</b> · ${escapeHtml(v.room)}: ${v.people.map(escapeHtml).join(', ')}</li>`).join('')}</ul>` : '<p class="small muted">Nobody.</p>'}
-    <p class="small muted">Burrow started ${ago(d.startedAt)}.</p>`;
+    <p class="small muted">Peiskos started ${ago(d.startedAt)}.</p>`;
   $('#admin-cleanup').onclick = async (e) => {
     e.target.disabled = true;
     try {
@@ -104,7 +104,7 @@ function adminOverview(pane) {
   };
   const go = $('#admin-update');
   if (go) go.onclick = async () => {
-    if (!confirm('Update Burrow now? It goes away for a minute or two while it rebuilds.')) return;
+    if (!confirm('Update Peiskos now? It goes away for a minute or two while it rebuilds.')) return;
     try {
       adminData.updater = (await api('/api/admin/update', { method: 'POST' })).updater;
       adminData.updater.updating = true;
@@ -207,8 +207,8 @@ function adminBackups(pane) {
   const b = adminData.backups;
   if (!b) return (pane.innerHTML = '<p class="muted">Backups aren\'t available on this server.</p>');
   const off = b.offsite;
-  pane.innerHTML = `<p class="small muted">${b.keep > 0 ? `Burrow copies its database every day and keeps the last ${b.keep}.` : 'Daily backups are off (BACKUP_KEEP is 0).'} Restoring one puts every message, burrow and account back the way it was that day; anything newer is lost (the current database is kept on the server, just in case). Burrow restarts to do it.</p>
-    <ul class="backup-list">${b.local.map((x) => `<li data-name="${escapeHtml(x.name)}"><span><b>${escapeHtml(x.name.slice(7, 17))}</b> <span class="small muted">${formatSize(x.size)}</span></span><button type="button" class="btn secondary tiny-btn">Restore</button></li>`).join('') || '<li class="small muted">No backups yet. The first is made a minute after Burrow starts.</li>'}</ul>
+  pane.innerHTML = `<p class="small muted">${b.keep > 0 ? `Peiskos copies its database every day and keeps the last ${b.keep}.` : 'Daily backups are off (BACKUP_KEEP is 0).'} Restoring one puts every message, hearth and account back the way it was that day; anything newer is lost (the current database is kept on the server, just in case). Peiskos restarts to do it.</p>
+    <ul class="backup-list">${b.local.map((x) => `<li data-name="${escapeHtml(x.name)}"><span><b>${escapeHtml(x.name.slice(7, 17))}</b> <span class="small muted">${formatSize(x.size)}</span></span><button type="button" class="btn secondary tiny-btn">Restore</button></li>`).join('') || '<li class="small muted">No backups yet. The first is made a minute after Peiskos starts.</li>'}</ul>
     <div class="admin-row"><button type="button" class="btn secondary" id="backup-now">Back up now</button></div>
     <h3>Off-site copies</h3>
     ${off ? `<p class="small">Copied to <b>${escapeHtml(off.bucket)}</b>. ${off.lastOk ? `Last copy ${ago(off.lastOk)}, ${off.files ?? 0} uploaded files so far.` : 'Not copied yet.'}</p>
@@ -222,10 +222,10 @@ function adminBackups(pane) {
   for (const li of pane.querySelectorAll('.backup-list li[data-name]')) {
     li.querySelector('button').onclick = async () => {
       const day = li.dataset.name.slice(7, 17);
-      if (!confirm(`Put Burrow back to ${day}? Everything since then (messages, accounts, burrows) is undone for everyone. Burrow restarts, and is back in under a minute.`)) return;
+      if (!confirm(`Put Peiskos back to ${day}? Everything since then (messages, accounts, hearths) is undone for everyone. Peiskos restarts, and is back in under a minute.`)) return;
       try {
         await api('/api/admin/backups/restore', { method: 'POST', body: { name: li.dataset.name } });
-        pane.innerHTML = '<p><b>Restoring…</b> Burrow is restarting. This page reloads when it\'s back.</p>';
+        pane.innerHTML = '<p><b>Restoring…</b> Peiskos is restarting. This page reloads when it\'s back.</p>';
         const wait = setInterval(async () => {
           if (await fetch(state.serverUrl + '/api/health').then((r) => r.ok, () => false)) { clearInterval(wait); setTimeout(() => location.reload(), 1500); }
         }, 2000);
@@ -255,7 +255,7 @@ async function openBots(serverId) {
   const s = state.servers.get(serverId);
   modal(`<h2>Bots and webhooks</h2>
     <p class="small muted"><b>Webhooks</b> let other services post in a room: GitHub, a home server, a script. They send a message to a web address.
-      <b>Bots</b> are programs with their own account in this burrow; they use Burrow's API with a token. See "Bots and webhooks" in the README.</p>
+      <b>Bots</b> are programs with their own account in this hearth; they use Peiskos's API with a token. See "Bots and webhooks" in the README.</p>
     <h3>Webhooks</h3>
     <ul class="bot-list" id="webhook-list"></ul>
     <form id="webhook-new" class="bot-new">

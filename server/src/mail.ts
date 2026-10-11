@@ -85,7 +85,7 @@ export async function sendMail(config: MailConfig, mail: Mail) {
       r = replies(sock);
       hello = await say('EHLO burrow', [250]);
     } else if (!secure && user && !local) {
-      throw new Error("The mail server doesn't offer encryption, so Burrow won't send it your password");
+      throw new Error("The mail server doesn't offer encryption, so Peiskos won't send it your password");
     }
     if (user) await say(`AUTH PLAIN ${Buffer.from(`\0${user}\0${pass}`).toString('base64')}`, [235]);
     const from = /<([^>]+)>/.exec(config.from)?.[1] ?? config.from;

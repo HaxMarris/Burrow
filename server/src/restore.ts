@@ -32,7 +32,7 @@ if (!day) {
     console.log(remote.length ? '\nOff-site backups:' : '\nNo off-site backups yet.');
     for (const b of remote) console.log(`  ${b.name.slice(10, 20)}  ${mb(b.size)}`);
   }
-  console.log('\nRestore one with:  node --no-warnings server/src/restore.ts YYYY-MM-DD   (then restart Burrow)');
+  console.log('\nRestore one with:  node --no-warnings server/src/restore.ts YYYY-MM-DD   (then restart Peiskos)');
   process.exit(0);
 }
 
@@ -66,4 +66,4 @@ if (args.includes('--uploads')) {
 }
 
 queueRestore(dbFile, source);
-console.log(`Ready: Burrow goes back to ${day} the next time it starts. Restart it now with:\n\n  docker compose restart burrow\n`);
+console.log(`Ready: Peiskos goes back to ${day} the next time it starts. Restart it now with:\n\n  docker compose restart burrow\n`);

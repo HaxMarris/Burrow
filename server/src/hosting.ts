@@ -64,7 +64,7 @@ export function hosting(ctx: HostingContext) {
     return names.length ? names.some((n) => n.toLowerCase() === u.username.toLowerCase()) : userId === firstUserId();
   };
   const admin = (handler: Handler): Handler => (c) => {
-    if (!isAdmin(c.user.id)) throw fail(403, 'Only whoever runs this Burrow can do that');
+    if (!isAdmin(c.user.id)) throw fail(403, 'Only whoever runs this Peiskos can do that');
     return handler(c);
   };
 
@@ -104,7 +104,7 @@ export function hosting(ctx: HostingContext) {
       return l!.code;
     }
     const mode = signupMode();
-    if (mode === 'links') throw fail(403, 'Signing up here needs a signup link from whoever runs this Burrow.');
+    if (mode === 'links') throw fail(403, 'Signing up here needs a signup link from whoever runs this Peiskos.');
     return mode === 'code' ? 'code' : null;
   };
   const useSignupLink = (code: string) => db.prepare('UPDATE signup_links SET uses = uses + 1 WHERE code = ?').run(code);

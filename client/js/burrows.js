@@ -53,8 +53,8 @@ function renderServers() {
 
   const add = document.createElement('button');
   add.className = 'add-burrow';
-  add.title = 'Create or join a burrow';
-  add.setAttribute('aria-label', 'Create or join a burrow');
+  add.title = 'Create or join a hearth';
+  add.setAttribute('aria-label', 'Create or join a hearth');
   add.textContent = '+';
   add.onclick = openAddServer;
 
@@ -70,7 +70,7 @@ function renderServers() {
   } else {
     tile.replaceWith(burrowTile(s, 'switch-tile'));
   }
-  $('#switch-name').textContent = state.inDms ? 'Messages' : s?.name ?? 'Burrows';
+  $('#switch-name').textContent = state.inDms ? 'Messages' : s?.name ?? 'Hearths';
   const elsewhere = state.serverOrder.some((id) => id !== state.serverId && hasUnread(state.servers.get(id)));
   $('#burrow-switch').classList.toggle('unread', elsewhere || (!state.inDms && dmUnread));
 
@@ -244,7 +244,7 @@ function renderSwitcher() {
   else {
     const hint = document.createElement('p');
     hint.className = 'switch-hint';
-    hint.textContent = `Star up to ${MAX_FAVORITES} burrows to keep them in your top bar.`;
+    hint.textContent = `Star up to ${MAX_FAVORITES} hearths to keep them in your top bar.`;
     rows.push(hint);
   }
   for (const f of state.folders) {
@@ -252,10 +252,10 @@ function renderSwitcher() {
     rows.push(el);
     if (!folded) rows.push(...f.serverIds.filter((id) => state.servers.has(id)).map(row));
   }
-  if (others.length) rows.push(heading(favs.length || state.folders.length ? 'Other burrows' : 'Your burrows'), ...others.map(row));
+  if (others.length) rows.push(heading(favs.length || state.folders.length ? 'Other hearths' : 'Your hearths'), ...others.map(row));
   const foot = document.createElement('div');
   foot.className = 'switch-foot';
-  foot.innerHTML = '<button class="btn" data-act="new">New burrow</button><button class="btn secondary" data-act="join">Use an invite</button>';
+  foot.innerHTML = '<button class="btn" data-act="new">New hearth</button><button class="btn secondary" data-act="join">Use an invite</button>';
   foot.querySelectorAll('button').forEach((b) => (b.onclick = () => { closeSwitcher(); openAddServer(b.dataset.act); }));
   // Phones have no room for the burrow's heading, so its settings live here.
   if (sw.dataset.open === 'all' && !state.inDms && state.servers.has(state.serverId)) {
@@ -306,7 +306,7 @@ async function selectServer(id, initial = false, open = null) {
 function renderChannels() {
   // The card's heading and buttons follow the burrow and your role in it, which can change at any time.
   const s = state.servers.get(state.serverId);
-  $('#server-name').textContent = state.inDms ? 'Direct messages' : s?.name ?? 'No burrow yet';
+  $('#server-name').textContent = state.inDms ? 'Direct messages' : s?.name ?? 'No hearth yet';
   $('#rooms-title').textContent = state.inDms ? 'Conversations' : 'Rooms';
   $('#server-menu-btn').classList.toggle('hidden', !s || state.inDms);
   $('#add-channel').classList.toggle('hidden', !state.inDms && !can(s, 'rooms'));
@@ -550,7 +550,7 @@ function renderMembers() {
           const badge = document.createElement('span');
           badge.className = 'owner-badge';
           if (isHost(s, m.id)) {
-            badge.title = 'Created this burrow';
+            badge.title = 'Created this hearth';
             badge.textContent = 'host';
           } else {
             badge.classList.add('role');

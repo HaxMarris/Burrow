@@ -402,10 +402,10 @@ function openEditBurrow(serverId) {
   modal(`<h2>Edit ${escapeHtml(s.name)}</h2>
     <form id="burrow-form">
       <label>Name<input id="burrow-name" maxlength="64" required value="${escapeHtml(s.name)}" /></label>
-      <label>Description<textarea id="burrow-desc" maxlength="300" rows="2" placeholder="What's this burrow for?">${escapeHtml(s.description ?? '')}</textarea></label>
+      <label>Description<textarea id="burrow-desc" maxlength="300" rows="2" placeholder="What's this hearth for?">${escapeHtml(s.description ?? '')}</textarea></label>
       <label>Welcome room
         <select id="burrow-welcome"><option value="">The first room</option>${rooms.map((c) => `<option value="${c.id}" ${c.id === s.welcomeChannelId ? 'selected' : ''}>#${escapeHtml(c.name)}</option>`).join('')}</select>
-        <span class="small muted">Where new people land when they first open the burrow.</span>
+        <span class="small muted">Where new people land when they first open the hearth.</span>
       </label>
       <label>Rules<textarea id="burrow-rules" maxlength="2000" rows="4" placeholder="Leave empty for no rules">${escapeHtml(s.rules ?? '')}</textarea>
         <span class="small muted">New people accept these before they can chat. Changing them asks everyone again.</span>
@@ -450,8 +450,8 @@ function openEditBurrow(serverId) {
       <input type="file" id="banner-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
       <div class="error" id="banner-error"></div>
     </div>` : ''}
-    ${host && others.length ? `<h3>Hand the burrow over</h3>
-    <p class="small muted">Someone else becomes the host and can do everything. You stay in the burrow with your roles.</p>
+    ${host && others.length ? `<h3>Hand the hearth over</h3>
+    <p class="small muted">Someone else becomes the host and can do everything. You stay in the hearth with your roles.</p>
     <div class="transfer-row"><select id="transfer-to">${others.map((m) => `<option value="${m.id}">${escapeHtml(nameOfPerson(m))}</option>`).join('')}</select>
       <button type="button" class="btn danger" id="transfer-go">Hand over</button></div>` : ''}`);
   const done = (updated) => { handleEvent({ type: 'server_updated', server: updated }); };
@@ -805,7 +805,7 @@ function messageablePeople() {
 function peoplePicker({ title, intro = '', list, button, onDone, extra = '', wire }) {
   modal(`<h2>${escapeHtml(title)}</h2>
     ${intro ? `<p class="muted small">${escapeHtml(intro)}</p>` : ''}
-    ${list.length ? '<input id="dm-filter" placeholder="Find someone" />' : '<p class="muted">Join a burrow first. You can message anyone who shares one with you.</p>'}
+    ${list.length ? '<input id="dm-filter" placeholder="Find someone" />' : '<p class="muted">Join a hearth first. You can message anyone who shares one with you.</p>'}
     <ul class="people-picker" id="dm-people"></ul>
     ${extra}
     <div class="error" id="modal-error"></div>

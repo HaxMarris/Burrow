@@ -152,7 +152,7 @@ function updateBadge() {
   $('#inbox-badge').classList.toggle('hidden', !pings);
   if (count === lastBadge) return;
   lastBadge = count;
-  document.title = count ? `(${count}) Burrow` : 'Burrow';
+  document.title = count ? `(${count}) Peiskos` : 'Peiskos';
   if (navigator.setAppBadge) (count ? navigator.setAppBadge(count) : navigator.clearAppBadge()).catch(() => {});
   window.burrowDesktop?.setBadge?.(count, count ? badgeImage(count) : null);
 }
@@ -231,12 +231,12 @@ async function pushSubscription() {
 
 async function turnOnPush(ask = true) {
   if (!pushSupported()) throw new Error(isIos() && !isStandalone()
-    ? 'On an iPhone or iPad, add Burrow to your Home Screen first (Share › Add to Home Screen), then turn this on there.'
-    : "This browser can't show alerts while Burrow is closed.");
+    ? 'On an iPhone or iPad, add Peiskos to your Home Screen first (Share › Add to Home Screen), then turn this on there.'
+    : "This browser can't show alerts while Peiskos is closed.");
   if (ask && Notification.permission !== 'granted' && (await Notification.requestPermission()) !== 'granted')
-    throw new Error('Alerts are blocked for Burrow. Allow notifications for this site in your browser settings.');
+    throw new Error('Alerts are blocked for Peiskos. Allow notifications for this site in your browser settings.');
   const reg = await swReady;
-  if (!reg) throw new Error("Burrow couldn't set up alerts in this browser.");
+  if (!reg) throw new Error("Peiskos couldn't set up alerts in this browser.");
   const { key } = await api('/api/push/key');
   let sub = await reg.pushManager.getSubscription();
   // A subscription made for another server key won't work; start over.
@@ -273,8 +273,8 @@ function notificationSettings() {
   const q = state.me.quietHours;
   const pushOn = store.get('push') === '1' && pushSupported() && Notification.permission === 'granted';
   return `<h3>Notifications</h3>
-    ${window.burrowDesktop ? '' : `<label class="check"><input type="checkbox" id="push-on" ${pushOn ? 'checked' : ''} /> Alert me when Burrow is closed</label>
-    <span class="small muted" id="push-note">${pushSupported() ? 'Direct messages, @mentions and replies, on this device, while Burrow isn\'t open.' : isIos() && !isStandalone() ? 'On an iPhone or iPad, add Burrow to your Home Screen (Share › Add to Home Screen) and turn this on there.' : "This browser can't show alerts while Burrow is closed."}</span>`}
+    ${window.burrowDesktop ? '' : `<label class="check"><input type="checkbox" id="push-on" ${pushOn ? 'checked' : ''} /> Alert me when Peiskos is closed</label>
+    <span class="small muted" id="push-note">${pushSupported() ? 'Direct messages, @mentions and replies, on this device, while Peiskos isn\'t open.' : isIos() && !isStandalone() ? 'On an iPhone or iPad, add Peiskos to your Home Screen (Share › Add to Home Screen) and turn this on there.' : "This browser can't show alerts while Peiskos is closed."}</span>`}
     <label class="check"><input type="checkbox" id="quiet-on" ${q ? 'checked' : ''} /> Quiet hours</label>
     <div class="quiet-times ${q ? '' : 'hidden'}" id="quiet-times">
       <label>From<input type="time" id="quiet-start" value="${minutesToTime(q?.start ?? 22 * 60)}" /></label>
@@ -470,12 +470,12 @@ function captureKey(name, button) {
 function renderHotkeyNote() {
   const note = $('#vs-hotkey-note');
   if (!note) return;
-  if (!desktopHotkeys) note.textContent = 'These work while Burrow is in front. In the desktop app they work everywhere, even in games.';
+  if (!desktopHotkeys) note.textContent = 'These work while Peiskos is in front. In the desktop app they work everywhere, even in games.';
   else if (hotkeyStatus.needsPermission) {
-    note.innerHTML = 'To hear your keys in other apps, allow Burrow in System Settings › Privacy &amp; Security › Accessibility. <button type="button" class="link-btn" id="vs-allow-keys">Open it</button>';
+    note.innerHTML = 'To hear your keys in other apps, allow Peiskos in System Settings › Privacy &amp; Security › Accessibility. <button type="button" class="link-btn" id="vs-allow-keys">Open it</button>';
     $('#vs-allow-keys').onclick = () => desktopHotkeys.askPermission?.();
   } else note.textContent = hotkeyStatus.global ? 'These work everywhere while you\'re in voice, even in games.'
-    : state.voice ? 'These work while Burrow is in front.' : 'These work everywhere while you\'re in voice, even in games.';
+    : state.voice ? 'These work while Peiskos is in front.' : 'These work everywhere while you\'re in voice, even in games.';
 }
 
 // Talking or touching the app counts as being here, for the AFK fire.
@@ -557,7 +557,7 @@ function afkSettings(s) {
   if (fires.length < 2) return '';
   return `<label>AFK fire
       <select id="burrow-afk"><option value="">None</option>${fires.map((c) => `<option value="${c.id}" ${c.id === s.afkChannelId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}</select>
-      <span class="small muted">People who haven't talked or touched Burrow for a while are moved here, muted.</span></label>
+      <span class="small muted">People who haven't talked or touched Peiskos for a while are moved here, muted.</span></label>
     <label>Move them after<select id="burrow-afk-minutes">${AFK_CHOICES.map(([v, l]) => `<option value="${v}" ${v === (s.afkMinutes ?? 15) ? 'selected' : ''}>${l}</option>`).join('')}</select></label>`;
 }
 
@@ -703,7 +703,7 @@ function openSounds(serverId) {
       if (!f) throw new Error('Pick a sound');
       if (f.size > 1024 * 1024) throw new Error('Sounds can be at most 1 MB');
       // Checked here, since the server can't play it to see how long it is.
-      const decoded = await audioOut().decodeAudioData(await f.arrayBuffer()).catch(() => { throw new Error("That file isn't audio Burrow can play"); });
+      const decoded = await audioOut().decodeAudioData(await f.arrayBuffer()).catch(() => { throw new Error("That file isn't audio Peiskos can play"); });
       if (decoded.duration > MAX_SOUND_SECONDS + 0.5) throw new Error(`Sounds can be up to ${MAX_SOUND_SECONDS} seconds (that one is ${Math.round(decoded.duration)})`);
       const query = new URLSearchParams({ name: $('#sound-new-name').value, emoji: $('#sound-new-emoji').value });
       done(await uploadPicture(`/api/servers/${serverId}/sounds?${query}`, f));
@@ -921,7 +921,7 @@ function onRing(ev) {
   ringing.tone = setInterval(ring, 2000);
   ringing.timer = setTimeout(() => stopRinging(), 30_000);
   if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
-    const n = new Notification(`${who} is calling`, { body: 'Open Burrow to answer', requireInteraction: true, tag: `ring-${ev.serverId}` });
+    const n = new Notification(`${who} is calling`, { body: 'Open Peiskos to answer', requireInteraction: true, tag: `ring-${ev.serverId}` });
     n.onclick = () => { window.focus(); n.close(); };
     ringing.notification = n;
   }

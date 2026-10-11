@@ -23,7 +23,7 @@ function displaySettings() {
     <label>Text size
       <select id="display-size">${TEXT_SIZES.map((n) => `<option value="${n}" ${n === size ? 'selected' : ''}>${n}%${n === 100 ? ' (normal)' : ''}</option>`).join('')}</select>
     </label>
-    <span class="small muted">Makes everything in Burrow bigger or smaller${isDesktop ? '. Ctrl+plus and Ctrl+minus work too.' : ', on this device.'}</span>
+    <span class="small muted">Makes everything in Peiskos bigger or smaller${isDesktop ? '. Ctrl+plus and Ctrl+minus work too.' : ', on this device.'}</span>
     <label>Motion
       <select id="display-motion">
         <option value="system" ${!d.motion ? 'selected' : ''}>Follow my system setting</option>
@@ -60,9 +60,9 @@ function appSettings() {
   return `<h3>App</h3>
     ${desktop ? `<label class="check"><input type="checkbox" id="app-tray" ${d.closeToTray ? 'checked' : ''} /> Keep running in the ${mac ? 'menu bar' : 'tray'} when the window is closed</label>
     <span class="small muted">Messages and voice keep going, and a dot on the icon shows when something's unread. Quit from the icon's menu.</span>
-    <label class="check"><input type="checkbox" id="app-login" ${d.openAtLogin ? 'checked' : ''} /> Start Burrow when the computer starts</label>
+    <label class="check"><input type="checkbox" id="app-login" ${d.openAtLogin ? 'checked' : ''} /> Start Peiskos when the computer starts</label>
     <span class="small muted">It opens quietly in the ${mac ? 'menu bar' : 'tray'}.</span>` : ''}
-    ${installPrompt ? '<div><button type="button" class="btn secondary" id="app-install">Install Burrow on this device</button></div>' : ''}
+    ${installPrompt ? '<div><button type="button" class="btn secondary" id="app-install">Install Peiskos on this device</button></div>' : ''}
     <div><button type="button" class="btn secondary" id="app-shortcuts">Keyboard shortcuts</button></div>`;
 }
 function wireAppSettings() {
@@ -86,7 +86,7 @@ window.addEventListener('beforeinstallprompt', (e) => {
 window.addEventListener('appinstalled', () => {
   installPrompt = null;
   $('#install-btn').classList.add('hidden');
-  toast('Burrow is installed. Open it from your home screen or app list.');
+  toast('Peiskos is installed. Open it from your home screen or app list.');
 });
 async function installApp() {
   if (!installPrompt) return;
@@ -145,7 +145,7 @@ function hostName(url) { try { return new URL(url).host; } catch { return url; }
 function openServers() {
   const list = readAccounts();
   modal(`<h2>Your servers</h2>
-    <p class="muted small">Each server is a different host's Burrow. Switching keeps you logged in to all of them.</p>
+    <p class="muted small">Each server is a different host's Peiskos. Switching keeps you logged in to all of them.</p>
     <ul class="server-accounts" id="server-accounts"></ul>
     <div class="modal-row">
       <button type="button" class="btn secondary" data-close>Close</button>
@@ -194,7 +194,7 @@ function switcherPlaces() {
   for (const id of state.serverOrder) {
     const s = state.servers.get(id);
     if (!s) continue;
-    places.push({ kind: 'burrow', label: s.name, sub: 'Burrow', s, go: () => selectServer(s.id) });
+    places.push({ kind: 'burrow', label: s.name, sub: 'Hearth', s, go: () => selectServer(s.id) });
     for (const c of s.channels) {
       if (c.kind === 'voice' || c.archived) continue;
       places.push({ kind: 'room', label: c.name, sub: s.name, s, c, go: () => openPlace(s, c) });
@@ -267,12 +267,12 @@ function openPlacePicker({ title, hint, pick = (p) => p.go(), only = () => true 
   render();
   box.focus();
 }
-const openQuickSwitcher = () => openPlacePicker({ title: 'Go to', hint: 'Type part of a room, conversation or burrow. Unread ones come first.' });
+const openQuickSwitcher = () => openPlacePicker({ title: 'Go to', hint: 'Type part of a room, conversation or hearth. Unread ones come first.' });
 
 // ---------------------------------------------------------------- keyboard shortcuts
 
 const SHORTCUTS = [
-  ['Ctrl+K', 'Go to a room, conversation or burrow'],
+  ['Ctrl+K', 'Go to a room, conversation or hearth'],
   ['Ctrl+F', 'Search messages'],
   ['Alt+↑ / Alt+↓', 'Previous or next room'],
   ['Alt+Shift+↑ / ↓', 'Previous or next unread room'],

@@ -111,7 +111,7 @@ function addFiles(fileList) {
   if (!state.maxUploadBytes || !state.channelId) return;
   const channelId = state.channelId;
   const limit = uploadLimit(channelId);
-  if (!limit) return alert("Your roles can't share files in this burrow.");
+  if (!limit) return alert("Your roles can't share files in this hearth.");
   for (const file of fileList) {
     if (state.pending.length >= 10) { alert('You can attach up to 10 files at a time.'); break; }
     const shrinkable = SHRINKABLE_TYPES.test(file.type);
@@ -380,7 +380,7 @@ function renderPending() {
       + `<span class="pending-name">${escapeHtml(p.file.name || 'image')}</span>`
       + `<span class="pending-meta">${p.shrinking != null ? `Shrinking ${Math.round(p.shrinking * 100)}%` : p.error ? (p.error.startsWith('Too big') ? 'Too big' : 'Failed') : p.progress < 1 ? Math.round(p.progress * 100) + '%' : formatSize(p.file.size)}</span>`
       + `<span class="bar" style="width:${p.error ? 0 : Math.round((p.shrinking ?? p.progress) * 100)}%"></span>`;
-    if (p.shrinking != null) chip.title = 'Shrinking plays the video through once, so keep Burrow open until it finishes';
+    if (p.shrinking != null) chip.title = 'Shrinking plays the video through once, so keep Peiskos open until it finishes';
     // A big video can be shrunk to 720p before it goes up.
     if (p.run && !p.shrunk && p.shrinking == null && (p.file.size > SHRINK_OFFER_BYTES || p.file.size > p.limit) && canShrinkVideo()) {
       const sh = document.createElement('button');

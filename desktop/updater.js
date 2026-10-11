@@ -34,8 +34,8 @@ function selfInstallingCheck(getWindow, fallBack) {
       defaultId: 0,
       cancelId: 1,
       title: 'Update ready',
-      message: `Burrow ${info.version} is ready`,
-      detail: 'Restart to finish updating. If you pick Later, it installs the next time you quit Burrow.',
+      message: `Peiskos ${info.version} is ready`,
+      detail: 'Restart to finish updating. If you pick Later, it installs the next time you quit Peiskos.',
     });
     if (response === 0) autoUpdater.quitAndInstall();
   });
@@ -69,7 +69,7 @@ function notifyOnlyCheck(getWindow) {
         defaultId: 0,
         cancelId: 1,
         title: 'Update available',
-        message: `Burrow ${latest} is out`,
+        message: `Peiskos ${latest} is out`,
         detail: `You have ${app.getVersion()}. Download the new version and install it over this one.`,
       });
       if (response === 0) shell.openExternal(RELEASES_PAGE);

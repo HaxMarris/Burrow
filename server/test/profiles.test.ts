@@ -175,7 +175,7 @@ test('two-step login is optional, and asks for a code once on', async () => {
   assert.ok((await call('/api/login', { body: { username: 'hal', password: 'password1' } })).data.token);
   assert.equal((await call('/api/me', { token: hal.token })).data.twoStep, false);
   const setup = (await call('/api/me/two-step/setup', { body: { password: 'password1' }, token: hal.token })).data;
-  assert.match(setup.uri, /^otpauth:\/\/totp\/Burrow%3Ahal\?secret=/);
+  assert.match(setup.uri, /^otpauth:\/\/totp\/Peiskos%3Ahal\?secret=/);
   assert.equal((await call('/api/me/two-step/enable', { body: { code: '000000' }, token: hal.token })).status, 400);
   const on = (await call('/api/me/two-step/enable', { body: { code: totpCode(setup.secret, totpStep()) }, token: hal.token })).data;
   assert.equal(on.recoveryCodes.length, 10);

@@ -14,12 +14,12 @@ const PERMS = [
   ['messages', 'Delete messages', "Delete other people's messages, many at once too, and deal with reports"],
   ['pin', 'Pin messages', 'Pin and unpin messages in rooms'],
   ['timeout', 'Time people out', "Stop someone writing and talking for a while, without removing them"],
-  ['remove', 'Remove people', 'Take people out of the burrow (they can come back with the invite)'],
+  ['remove', 'Remove people', 'Take people out of the hearth (they can come back with the invite)'],
   ['ban', 'Ban people', "Remove people for good, and see and lift bans"],
   ['roles', 'Manage roles', 'Make, change and hand out the roles below their own'],
-  ['burrow', 'Edit the burrow', "Change its name, pictures, description, welcome room, rules, AFK fire, upload limit and word filter, and manage events"],
+  ['burrow', 'Edit the hearth', "Change its name, pictures, description, welcome room, rules, AFK fire, upload limit and word filter, and manage events"],
   ['invites', 'Manage invites', "See and cancel everyone's invite links, and make a new permanent link"],
-  ['emoji', 'Manage emoji and sounds', "Add, rename and remove the burrow's own emoji, stickers and soundboard sounds"],
+  ['emoji', 'Manage emoji and sounds', "Add, rename and remove the hearth's own emoji, stickers and soundboard sounds"],
   ['voice', 'Manage voice', 'Move people between fires, mute them for everyone, disconnect them, and sit at a full fire'],
   ['everyone', 'Mention @everyone and roles', 'Ping everyone in a room with @everyone or @here, or everyone with a role with @role'],
   ['audit', 'See the audit log', 'See who removed, banned, deleted or changed what, and when'],
@@ -95,7 +95,7 @@ function privacyFields(s, isPrivate, memberIds, roleIds = []) {
       ${roles.length ? `<h4>Roles</h4><ul class="access-list" id="access-roles">${roles.map((r) => `<li><label class="check"><input type="checkbox" value="${r.id}" ${roleIds.includes(r.id) ? 'checked' : ''} /> ${roleDot(r.color)}${escapeHtml(r.name)}</label></li>`).join('')}</ul>` : ''}
       <h4>People</h4>
       ${people.length ? `<ul class="access-list" id="access-people">${people.map((m) => `<li><label class="check"><input type="checkbox" value="${m.id}" ${memberIds.includes(m.id) ? 'checked' : ''} /> ${escapeHtml(m.username)}</label></li>`).join('')}</ul>`
-        : '<p class="small muted">Nobody else is in this burrow yet.</p>'}
+        : '<p class="small muted">Nobody else is in this hearth yet.</p>'}
     </div>`;
 }
 function wirePrivacyFields() {
@@ -120,7 +120,7 @@ function openRoomSettings(c) {
       <label class="check"><input type="checkbox" id="room-announce" ${c.announce ? 'checked' : ''} /> Announcement room: only some roles can post</label>
       <div id="room-posters" class="${c.announce ? '' : 'hidden'}">
         <p class="small muted">The host and people who manage rooms can always post. Which roles can too?</p>
-        ${s.roles?.length ? `<ul class="access-list" id="post-roles">${s.roles.map((r) => `<li><label class="check"><input type="checkbox" value="${r.id}" ${postRoles.includes(r.id) ? 'checked' : ''} /> ${roleDot(r.color)}${escapeHtml(r.name)}</label></li>`).join('')}</ul>` : '<p class="small muted">This burrow has no roles yet.</p>'}
+        ${s.roles?.length ? `<ul class="access-list" id="post-roles">${s.roles.map((r) => `<li><label class="check"><input type="checkbox" value="${r.id}" ${postRoles.includes(r.id) ? 'checked' : ''} /> ${roleDot(r.color)}${escapeHtml(r.name)}</label></li>`).join('')}</ul>` : '<p class="small muted">This hearth has no roles yet.</p>'}
       </div>
       ${s.roles?.length ? `<h4>Read only</h4><p class="small muted">People with these roles can read this room but not write in it, unless they manage rooms.</p>
         <ul class="access-list" id="read-only-roles">${s.roles.map((r) => `<li><label class="check"><input type="checkbox" value="${r.id}" ${(c.readOnlyRoleIds ?? []).includes(r.id) ? 'checked' : ''} /> ${roleDot(r.color)}${escapeHtml(r.name)}</label></li>`).join('')}</ul>` : ''}` : c.kind === 'voice' ? voiceRoomSettings(c) : ''}
@@ -187,9 +187,9 @@ function openMemberMenu(s, m) {
       : `<div class="inline-form"><select id="member-timeout-for">${TIMEOUTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select><button class="btn secondary" id="member-timeout">Time out</button></div>
         <p class="small muted">They can read, but not write, react with files or talk at a fire until it runs out.</p>`) : ''}
     ${removable && can(s, 'voice') ? `<button class="btn secondary" id="member-voice-mute">${m.voiceMuted ? 'Let them speak in voice' : 'Mute in voice for everyone'}</button>` : ''}
-    ${removable && can(s, 'remove') ? '<button class="btn secondary" id="member-remove">Remove from burrow</button>' : ''}
-    ${removable && can(s, 'ban') ? '<button class="btn danger" id="member-ban">Ban from burrow</button>' : ''}
-    ${removable && (can(s, 'remove') || can(s, 'ban')) ? `<p class="small muted">Removed people can come back with the invite code. Banned people can't, until they're unbanned in the burrow's settings.</p>` : ''}
+    ${removable && can(s, 'remove') ? '<button class="btn secondary" id="member-remove">Remove from hearth</button>' : ''}
+    ${removable && can(s, 'ban') ? '<button class="btn danger" id="member-ban">Ban from hearth</button>' : ''}
+    ${removable && (can(s, 'remove') || can(s, 'ban')) ? `<p class="small muted">Removed people can come back with the invite code. Banned people can't, until they're unbanned in the hearth's settings.</p>` : ''}
     <div class="error" id="modal-error"></div>
     <div class="modal-row"><button class="btn secondary" data-close>Close</button></div>`);
   const act = async (path, body) => {
@@ -269,7 +269,7 @@ function openRoleEditor(serverId, roleId) {
       <p class="small muted">A role with nothing ticked is just a colored label, like "Friends".</p>
       ${state.maxUploadBytes ? `<label>Largest file this role can share
         <span class="inline-form"><input type="number" id="role-upload" min="0" max="${Math.floor(state.maxUploadBytes / 1048576)}" placeholder="Same as everyone" value="${role.uploadMb ?? ''}" /><span class="muted">MB</span></span>
-        <span class="small muted">Empty: the burrow's limit. 0: no files. People get the biggest limit of their roles, up to the server's ${formatSize(state.maxUploadBytes)}.</span></label>` : ''}
+        <span class="small muted">Empty: the hearth's limit. 0: no files. People get the biggest limit of their roles, up to the server's ${formatSize(state.maxUploadBytes)}.</span></label>` : ''}
       <div class="error" id="modal-error"></div>
       <div class="modal-row">
         ${roleId ? '<button type="button" class="btn danger" id="role-delete">Delete role</button>' : ''}
@@ -389,7 +389,7 @@ function renderDmList() {
   if (!items.length) {
     const hint = document.createElement('li');
     hint.className = 'hint';
-    hint.textContent = 'No conversations yet. Press + or click someone in a burrow\'s member list.';
+    hint.textContent = 'No conversations yet. Press + or click someone in a hearth\'s member list.';
     items.push(hint);
   }
   // Friends first: who's online, and requests waiting on you.
@@ -470,7 +470,7 @@ function openAccount(tab = store.get('accountTab') || 'profile') {
         <div class="error" id="profile-error"></div>
         <div class="modal-row"><button type="submit" class="btn">Save profile</button></div>
       </form>
-      <span class="small muted">A different name in one burrow? Click yourself in its member list and pick "Change nickname".</span>
+      <span class="small muted">A different name in one hearth? Click yourself in its member list and pick "Change nickname".</span>
     </section>
     <section data-pane="settings" class="account-pane">
       ${themeSettings()}
@@ -511,7 +511,7 @@ function openAccount(tab = store.get('accountTab') || 'profile') {
       <div class="error" id="export-error"></div>
       <h3>Delete my account</h3>
       <form id="delete-form" class="danger-zone">
-        <p class="small muted">You'll leave every burrow and group. Burrows you host with other people in them need a new host first.</p>
+        <p class="small muted">You'll leave every hearth and group. Hearths you host with other people in them need a new host first.</p>
         <label class="check"><input type="radio" name="delete-messages" value="keep" checked /> Keep my messages, shown as from "Deleted user"</label>
         <label class="check"><input type="radio" name="delete-messages" value="delete" /> Delete my messages and files too</label>
         <input type="text" autocomplete="username" value="${escapeHtml(me.username)}" hidden />
@@ -671,7 +671,7 @@ function renderTwoStepBox(step = null) {
     box.innerHTML = `<p class="small">Two-step login is on. Save these recovery codes somewhere safe. Each one works once, if you ever lose your phone.</p>
       <pre class="recovery-codes">${step.codes.map(escapeHtml).join('\n')}</pre>
       <div class="settings-buttons"><button type="button" class="btn secondary" id="codes-copy">Copy</button><button type="button" class="btn secondary" id="codes-save">Download</button><button type="button" class="btn" id="codes-done">I saved them</button></div>`;
-    const text = `Burrow recovery codes for ${me.username}\n\n${step.codes.join('\n')}\n`;
+    const text = `Peiskos recovery codes for ${me.username}\n\n${step.codes.join('\n')}\n`;
     $('#codes-copy').onclick = () => navigator.clipboard.writeText(text).then(() => toast('Copied.'), () => toast("Couldn't copy. Select them instead."));
     $('#codes-save').onclick = () => downloadBlob(new Blob([text], { type: 'text/plain' }), 'burrow-recovery-codes.txt');
     $('#codes-done').onclick = () => renderTwoStepBox();
@@ -772,7 +772,7 @@ async function renderPasskeyBox(adding = false) {
   if (!box) return;
   if (!passkeysWork()) {
     box.innerHTML = `<span class="small muted">${isDesktop
-      ? 'Add passkeys from Burrow in your web browser. You can then use them to log in there.'
+      ? 'Add passkeys from Peiskos in your web browser. You can then use them to log in there.'
       : "This browser can't use passkeys here."}</span>`;
     return;
   }
@@ -845,7 +845,7 @@ async function loadDevices() {
     try { await api(`/api/me/sessions/${b.dataset.signout}`, { method: 'DELETE' }); loadDevices(); } catch (err) { alertError(err); }
   };
   $('#signout-others')?.addEventListener('click', async () => {
-    if (!confirm('Sign out of Burrow on every other device?')) return;
+    if (!confirm('Sign out of Peiskos on every other device?')) return;
     try { await api('/api/me/sessions', { method: 'DELETE' }); toast('Signed out everywhere else.'); loadDevices(); } catch (err) { alertError(err); }
   });
 }
@@ -867,7 +867,7 @@ async function deleteMyAccount(e) {
   e.preventDefault();
   const deleteMessages = document.querySelector('input[name="delete-messages"]:checked').value === 'delete';
   $('#delete-error').textContent = '';
-  if (!confirm(`Delete your Burrow account${deleteMessages ? ' and everything you sent' : ''}? This can't be undone.`)) return;
+  if (!confirm(`Delete your Peiskos account${deleteMessages ? ' and everything you sent' : ''}? This can't be undone.`)) return;
   try {
     await api('/api/me', { method: 'DELETE', body: { password: $('#delete-password').value, code: $('#delete-code')?.value.trim() ?? '', deleteMessages } });
     closeModal();
@@ -982,7 +982,7 @@ function openEmojiPicker(anchor, m) {
   }
   const all = document.createElement('button');
   all.className = 'more-emoji';
-  all.title = 'All emoji, and this burrow\'s own';
+  all.title = 'All emoji, and this hearth\'s own';
   all.textContent = '+';
   all.onclick = () => { closeEmojiPicker(); openEmojiPanel(anchor, (text) => toggleReaction(m, text)); };
   picker.append(all);

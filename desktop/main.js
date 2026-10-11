@@ -9,6 +9,10 @@ const activity = require('./activity');
 const drawOverlay = require('./draw-overlay');
 const tray = require('./tray');
 
+// Peiskos used to be called Burrow. Keep the old settings folder (logins, servers, settings),
+// which is named after the app, so renaming it doesn't log anyone out.
+app.setPath('userData', path.join(app.getPath('appData'), 'Burrow'));
+
 // The page asks how long the computer has been left alone, to show you as away.
 ipcMain.on('idle-seconds', (e) => { e.returnValue = powerMonitor.getSystemIdleTime(); });
 
@@ -42,7 +46,7 @@ function createWindow({ hidden = false } = {}) {
     minWidth: 480,
     minHeight: 400,
     backgroundColor: '#f3f1ea',
-    title: 'Burrow',
+    title: 'Peiskos',
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,

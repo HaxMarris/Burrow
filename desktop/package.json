@@ -1,10 +1,10 @@
 {
   "name": "burrow-chat",
-  "productName": "Burrow",
+  "productName": "Peiskos",
   "version": "0.1.0",
   "private": true,
-  "description": "Desktop client for a self-hosted Burrow chat server",
-  "author": "Burrow",
+  "description": "Desktop app for Peiskos, a self-hosted place to chat, talk and hang out with friends",
+  "author": "Peiskos",
   "homepage": "https://github.com/HaxMarris/Burrow",
   "main": "main.js",
   "scripts": {
@@ -28,7 +28,7 @@
   },
   "build": {
     "appId": "chat.burrow.desktop",
-    "productName": "Burrow",
+    "productName": "Peiskos",
     "npmRebuild": false,
     "files": [
       "main.js",
@@ -64,14 +64,14 @@
           ]
         }
       ],
-      "artifactName": "Burrow-${version}-${arch}.${ext}",
+      "artifactName": "Peiskos-${version}-${arch}.${ext}",
       "category": "public.app-category.social-networking",
       "hardenedRuntime": true,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "Burrow uses your microphone when you join a voice room.",
-        "NSCameraUsageDescription": "Burrow uses your camera when you turn it on in a voice room."
+        "NSMicrophoneUsageDescription": "Peiskos uses your microphone when you join a voice room.",
+        "NSCameraUsageDescription": "Peiskos uses your camera when you turn it on in a voice room."
       }
     },
     "linux": {
@@ -80,7 +80,7 @@
     },
     "nsis": {
       "oneClick": true,
-      "artifactName": "Burrow-Setup-${version}.${ext}"
+      "artifactName": "Peiskos-Setup-${version}.${ext}"
     },
     "publish": [
       {

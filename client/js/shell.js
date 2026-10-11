@@ -301,8 +301,8 @@ function openPerson(s, m) {
     profile = { ...m, ...p, nickname: m.nickname };
     draw();
     const extra = [];
-    if (p.joinedAt && !p.deleted) extra.push(`On Burrow since ${formatDay(p.joinedAt)}`);
-    if (p.mutualBurrows?.length) extra.push(`Burrows you share: ${p.mutualBurrows.map((b) => b.name).join(', ')}`);
+    if (p.joinedAt && !p.deleted) extra.push(`On Peiskos since ${formatDay(p.joinedAt)}`);
+    if (p.mutualBurrows?.length) extra.push(`Hearths you share: ${p.mutualBurrows.map((b) => b.name).join(', ')}`);
     $('#profile-extra').textContent = extra.join(' · ');
     redraw();
   }).catch(() => {});
@@ -326,7 +326,7 @@ function openNickname(s) {
   modal(`<h2>Your nickname in ${escapeHtml(s.name)}</h2>
     <form id="nick-form">
       <label>Nickname<input id="nick-input" maxlength="32" placeholder="${escapeHtml(state.me.displayName || state.me.username)}" value="${escapeHtml(mine?.nickname ?? '')}" /></label>
-      <span class="small muted">Only shown in this burrow. Leave it empty to use your display name.</span>
+      <span class="small muted">Only shown in this hearth. Leave it empty to use your display name.</span>
       <div class="error" id="nick-error"></div>
       <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">Save</button></div>
     </form>`);
@@ -446,7 +446,7 @@ function renderFriendsPanel() {
   if (friendsTab === 'online' || friendsTab === 'all') {
     const list = sorted(friendsTab === 'online' ? online : f.friends);
     for (const p of list) row(p, presenceLine(p) || `@${escapeHtml(p.username)} · ${STATUS_LABELS[statusOf(p)]}`, [btn('Message', () => openDm(p.id))]);
-    if (!list.length) rows.push(Object.assign(document.createElement('li'), { className: 'hint', textContent: friendsTab === 'online' ? 'None of your friends are online right now.' : 'No friends yet. Add someone by their username above, or from their card in a burrow.' }));
+    if (!list.length) rows.push(Object.assign(document.createElement('li'), { className: 'hint', textContent: friendsTab === 'online' ? 'None of your friends are online right now.' : 'No friends yet. Add someone by their username above, or from their card in a hearth.' }));
   } else if (friendsTab === 'requests') {
     if (f.incoming.length) heading('Asking to be your friend');
     for (const p of f.incoming) row(p, `@${escapeHtml(p.username)}`, [btn('Accept', () => friendAction(p.id, 'accept'), ''), btn('Decline', () => friendAction(p.id, 'remove'))]);
