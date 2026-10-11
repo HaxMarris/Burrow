@@ -1002,6 +1002,7 @@ export function createApp(opts: AppOptions): Server {
       (count.last ?? 0) + 1,
       now(),
     );
+    if (body.uploadMb !== undefined) db.prepare('UPDATE roles SET upload_mb = ? WHERE id = (SELECT MAX(id) FROM roles WHERE server_id = ?)').run(cleanUploadMb(body.uploadMb), serverId);
     sendServerUpdate(serverId);
     return serverSummary(serverId, user.id);
   });
