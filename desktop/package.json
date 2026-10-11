@@ -19,7 +19,8 @@
     "electron-updater": "^6.6.0"
   },
   "optionalDependencies": {
-    "loopback-capture": "3.0.2"
+    "loopback-capture": "3.0.2",
+    "uiohook-napi": "1.5.5"
   },
   "devDependencies": {
     "electron": "^38.0.0",
@@ -28,11 +29,13 @@
   "build": {
     "appId": "chat.burrow.desktop",
     "productName": "Burrow",
+    "npmRebuild": false,
     "files": [
       "main.js",
       "preload.js",
       "updater.js",
       "app-audio.js",
+      "hotkeys.js",
       "app/**/*"
     ],
     "win": {

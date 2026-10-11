@@ -79,6 +79,8 @@ const APP_CSP = [
   // Voice may live on another address (LIVEKIT_URL).
   "connect-src 'self' https: wss: ws:",
   "worker-src 'self' blob:",
+  // Listen together plays YouTube in its privacy-enhanced player.
+  "frame-src https://www.youtube-nocookie.com",
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'self'",
@@ -372,10 +374,10 @@ export function createApp(opts: AppOptions): Server {
       .all(serverId) as { user_id: number; role_id: number }[];
     const members = db
       .prepare(
-        `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar FROM members m JOIN users u ON u.id = m.user_id
+        `SELECT u.id, u.username, ${avatarUrl('u.avatar')} AS avatar, m.voice_muted AS voiceMuted FROM members m JOIN users u ON u.id = m.user_id
          WHERE m.server_id = ? ORDER BY u.username`,
       )
-      .all(serverId) as User[];
+      .all(serverId) as (User & { voiceMuted: number })[];
     const accepted = (db.prepare('SELECT rules_accepted_at FROM members WHERE server_id = ? AND user_id = ?').get(serverId, viewerId) as
       | { rules_accepted_at: number | null }
       | undefined)?.rules_accepted_at;
@@ -397,7 +399,7 @@ export function createApp(opts: AppOptions): Server {
         const roleIds = memberRoles.filter((r) => r.user_id === m.id).map((r) => r.role_id);
         const host = server.kind === 'burrow' && m.id === server.ownerId;
         const powers = roleIds.some((id) => (roles.find((r) => r.id === id)?.perms.length ?? 0) > 0);
-        return { ...m, roleIds, role: host ? 'host' : powers ? 'mod' : 'member', online: online.has(m.id) };
+        return { ...m, voiceMuted: !!m.voiceMuted, roleIds, role: host ? 'host' : powers ? 'mod' : 'member', online: online.has(m.id) };
       }),
     };
   };
@@ -1217,6 +1219,7 @@ export function createApp(opts: AppOptions): Server {
     const muted = body.muted === true;
     db.prepare('UPDATE members SET voice_muted = ? WHERE server_id = ? AND user_id = ?').run(muted ? 1 : 0, serverId, targetId);
     sendTo([targetId], { type: 'server_muted', serverId, muted });
+    sendServerUpdate(serverId);
     const channel = channelById(inVoice.get(targetId) ?? -1);
     if (channel?.serverId === serverId) {
       tellLiveKit(`change whether user ${targetId} can speak`, (v) => setCanSpeak(v, `room-${channel.id}`, String(targetId), !muted));
