@@ -72,7 +72,7 @@ jobs:
             )
           fi
           npm run dist -- --publish never "${extra[@]}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: burrow-${{ matrix.os }}
           path: |
