@@ -474,12 +474,14 @@ function openAccount(tab = store.get('accountTab') || 'profile') {
     </section>
     <section data-pane="settings" class="account-pane">
       ${themeSettings()}
+      ${displaySettings()}
       <h3>Direct messages</h3>
       <label class="check"><input type="checkbox" id="read-receipts" ${me.readReceipts !== false ? 'checked' : ''} /> Show when I've read a message</label>
       <span class="small muted">Shows "Seen" under messages in direct messages. You only see it for others while yours is on too.</span>
       ${notificationSettings()}
       ${voiceSettings()}
       ${soundSettings()}
+      ${appSettings()}
     </section>
     <section data-pane="security" class="account-pane">
       <h3>Username</h3>
@@ -538,6 +540,8 @@ function openAccount(tab = store.get('accountTab') || 'profile') {
   wireNotificationSettings();
   wireVoiceSettings();
   wireSoundSettings();
+  wireDisplaySettings();
+  wireAppSettings();
   renderUsernameBox();
   $('#password-form').onsubmit = async (e) => {
     e.preventDefault();

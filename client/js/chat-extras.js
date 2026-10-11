@@ -738,13 +738,7 @@ function markWords(el, words) {
   }
 }
 
-$('#search-btn').onclick = openSearch;
-document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && state.me && !$('#app').classList.contains('hidden')) {
-    e.preventDefault();
-    openSearch();
-  }
-});
+$('#search-btn').onclick = openSearch; // Ctrl+F too (see apps.js)
 
 // ---------------------------------------------------------------- the + menu in the message box
 

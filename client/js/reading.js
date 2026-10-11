@@ -269,8 +269,13 @@ window.addEventListener('beforeunload', saveDraft);
 
 /** Sends a message over the live connection, or the slower way if it's down. */
 async function sendMessage(channelId, body) {
-  if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: 'send', channelId, ...body }));
-  else await api(`/api/channels/${channelId}/messages`, { method: 'POST', body });
+  if (state.ws?.readyState === WebSocket.OPEN) return state.ws.send(JSON.stringify({ type: 'send', channelId, ...body }));
+  try {
+    await api(`/api/channels/${channelId}/messages`, { method: 'POST', body });
+  } catch (err) {
+    // No connection: text waits on this device and goes out once it's back.
+    if (!(err instanceof TypeError) || !queueMessage(channelId, body)) throw err;
+  }
 }
 
 // ---- small pop-up menus and notes

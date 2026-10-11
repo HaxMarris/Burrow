@@ -33,8 +33,45 @@ jobs:
         run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
         shell: bash
         working-directory: desktop
-      - run: npm run dist -- --publish never
+      # Signing is optional: with no secrets set, the apps are built unsigned as before.
+      # Mac: an Apple Developer ID certificate (CSC_LINK as base64 .p12 + CSC_KEY_PASSWORD) signs
+      # it, and APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID notarize it, so it opens with
+      # no warning and updates itself. Windows: Azure Artifact Signing (AZURE_* secrets), or a
+      # certificate file (WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD). See "Signing the desktop app" in the README.
+      - name: Build
+        shell: bash
         working-directory: desktop
+        env:
+          CSC_LINK: ${{ secrets.MAC_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CERTIFICATE }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CERTIFICATE_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          AZURE_PUBLISHER_NAME: ${{ secrets.AZURE_PUBLISHER_NAME }}
+        run: |
+          # Empty secrets would read as "sign with nothing", so leave them out entirely.
+          for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID WIN_CSC_LINK WIN_CSC_KEY_PASSWORD; do
+            if [ -z "${!v}" ]; then unset "$v"; fi
+          done
+          if [ -z "$CSC_LINK" ]; then export CSC_IDENTITY_AUTO_DISCOVERY=false; fi
+          extra=()
+          if [ "$RUNNER_OS" = Windows ] && [ -n "$AZURE_CLIENT_SECRET" ]; then
+            extra=(
+              -c.win.azureSignOptions.endpoint="$AZURE_SIGNING_ENDPOINT"
+              -c.win.azureSignOptions.codeSigningAccountName="$AZURE_SIGNING_ACCOUNT"
+              -c.win.azureSignOptions.certificateProfileName="$AZURE_SIGNING_PROFILE"
+              -c.win.azureSignOptions.publisherName="$AZURE_PUBLISHER_NAME"
+            )
+          fi
+          npm run dist -- --publish never "${extra[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: burrow-${{ matrix.os }}
@@ -50,6 +87,7 @@ jobs:
           files: |
             desktop/dist/*.exe
             desktop/dist/*.dmg
+            desktop/dist/*.zip
             desktop/dist/*.AppImage
             desktop/dist/latest*.yml
             desktop/dist/*.blockmap

@@ -1,5 +1,5 @@
-// The one bridge between the app window and Electron: picking what to share on screen, its sound, voice hotkeys, the game you're playing and the icon badge.
-const { contextBridge, ipcRenderer } = require('electron');
+// The one bridge between the app window and Electron: picking what to share on screen, its sound, voice hotkeys, the game you're playing, the icon badge, zoom and the tray settings.
+const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
 const appAudioSupported = ipcRenderer.sendSync('app-audio-supported');
 
@@ -33,6 +33,14 @@ contextBridge.exposeInMainWorld('burrowDesktop', {
   setBadge: (count, image) => ipcRenderer.send('set-badge', count, image),
   /** Seconds since the keyboard or mouse was last used anywhere on the computer. */
   idleSeconds: () => ipcRenderer.sendSync('idle-seconds'),
+  /** Text size: the whole window zooms, as Ctrl+plus does in a browser. */
+  setZoom: (factor) => webFrame.setZoomFactor(Math.min(2, Math.max(0.5, Number(factor) || 1))),
+  /** Desktop-only settings: { closeToTray, openAtLogin }. set() resolves to the new settings. */
+  settings: {
+    get: () => ipcRenderer.sendSync('desktop-settings'),
+    set: (change) => ipcRenderer.invoke('desktop-settings-set', change),
+  },
+  platform: process.platform,
   hotkeys: {
     set: (binds) => ipcRenderer.invoke('hotkeys-set', binds),
     onKey: (fn) => ipcRenderer.on('hotkey', (_e, name, down) => fn(name, down)),

@@ -1,24 +1,25 @@
 // Keeps the desktop app up to date from the project's GitHub releases.
 //
-// Windows and Linux (AppImage) download the new version in the background and
-// install it on restart. macOS can only install updates for code-signed apps, so
-// there we just tell the user a new version is out and open the download page.
+// Windows, Linux (AppImage) and signed Mac builds download the new version in the
+// background and install it on restart. macOS can only install updates for code-signed
+// apps, so an unsigned Mac build just says a new version is out and opens the download page.
 const { app, dialog, shell } = require('electron');
 
 const REPO = 'HaxMarris/Burrow';
 const RELEASES_PAGE = `https://github.com/${REPO}/releases/latest`;
 const CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
 
-const canSelfInstall = process.platform === 'win32' || (process.platform === 'linux' && !!process.env.APPIMAGE);
+const canSelfInstall = process.platform === 'win32' || process.platform === 'darwin' || (process.platform === 'linux' && !!process.env.APPIMAGE);
 
 function startUpdateChecks(getWindow) {
   if (!app.isPackaged) return;
-  const check = canSelfInstall ? selfInstallingCheck(getWindow) : notifyOnlyCheck(getWindow);
-  setTimeout(check, 10 * 1000);
-  setInterval(check, CHECK_EVERY_MS);
+  let check = canSelfInstall ? selfInstallingCheck(getWindow, () => { check = notifyOnlyCheck(getWindow); check(); }) : notifyOnlyCheck(getWindow);
+  setTimeout(() => check(), 10 * 1000);
+  setInterval(() => check(), CHECK_EVERY_MS);
 }
 
-function selfInstallingCheck(getWindow) {
+/** fallBack() is called if this copy can't update itself after all (an unsigned Mac build). */
+function selfInstallingCheck(getWindow, fallBack) {
   const { autoUpdater } = require('electron-updater');
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
@@ -38,9 +39,17 @@ function selfInstallingCheck(getWindow) {
     });
     if (response === 0) autoUpdater.quitAndInstall();
   });
-  autoUpdater.on('error', (err) => console.error('Update check failed:', err?.message || err));
+  let gaveUp = false;
+  autoUpdater.on('error', (err) => {
+    const message = String(err?.message || err);
+    console.error('Update check failed:', message);
+    if (process.platform === 'darwin' && !gaveUp && /code ?sign|signature/i.test(message)) {
+      gaveUp = true;
+      fallBack();
+    }
+  });
 
-  return () => autoUpdater.checkForUpdates().catch(() => {});
+  return () => { if (!gaveUp) autoUpdater.checkForUpdates().catch(() => {}); };
 }
 
 function notifyOnlyCheck(getWindow) {

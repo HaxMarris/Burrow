@@ -46,7 +46,25 @@
   }
   window.applyThemeColor = applyThemeColor;
 
+  /**
+   * How Burrow looks for you on this device: compact messages, text size (the whole app is
+   * scaled, as zooming does) and less motion. Applied here too, so the first paint is right.
+   */
+  function applyDisplay() {
+    const root = document.documentElement;
+    let d = {};
+    try { d = JSON.parse(localStorage.getItem('display')) || {}; } catch {}
+    root.dataset.density = d.compact ? 'compact' : 'cozy';
+    root.dataset.motion = d.motion === 'reduce' ? 'reduce' : d.motion === 'full' ? 'full' : 'system';
+    const size = Number(d.textSize) || 100;
+    // The desktop app zooms the whole window itself, which is sharper; browsers use CSS zoom.
+    if (window.burrowDesktop?.setZoom) window.burrowDesktop.setZoom(size / 100);
+    else root.style.zoom = size === 100 ? '' : String(size / 100);
+  }
+  window.applyDisplay = applyDisplay;
+
   try {
+    applyDisplay();
     const t = localStorage.getItem('theme');
     if (t) document.documentElement.dataset.theme = t;
     const c = JSON.parse(localStorage.getItem('themeColor'));
