@@ -20,7 +20,10 @@ server on your own machine or a cheap VPS; your friends install the desktop app
 - Emoji reactions and replies (a reply to you counts as a mention)
 - Direct messages with anyone you share a burrow with, one to one or in groups of up to 10
 - Profile pictures and password changes (changing your password logs out your other devices)
-- Real-time messaging over WebSockets, with typing indicators and online/offline presence
+- Real-time messaging over WebSockets, with typing indicators and online, away, Do not disturb and offline presence
+- Custom statuses (with an emoji, cleared after a while if you like), and "Playing …" from the desktop app when you run a game
+- A mentions inbox, `@everyone`, `@here` and `@role` mentions (for roles allowed to), quiet hours, and the unread count on the app icon
+- Alerts while Burrow is closed (phones included, once it's on the Home Screen) and optional email about mentions you missed
 - Full message history with infinite scroll back, edit and delete your own messages (↑ edits your last one)
 - Formatting: `**bold**`, `*italic*`, `__underline__`, `~~strikethrough~~`, `||spoilers||`, `` `code` ``, coloured code blocks, `# headings`, `> quotes`, lists, clickable links with previews, and `@mentions` (highlighted, and they trigger a desktop notification)
 - Unread counts that remember where you stopped reading on every device, a "New" line, and a jump to the first unread message; mark a message unread to come back to it
@@ -91,6 +94,10 @@ Data goes to `server/data/chat.db`.
 | `LIVEKIT_API_URL`   | `http://localhost:7880` | Where Burrow reaches LiveKit to disconnect removed people (Docker Compose points it at the host). |
 | `KLIPY_API_KEY`     | unset (GIFs off)       | Turns on the GIF picker. See *GIFs* below.                          |
 | `GIF_RATING`        | `pg-13`                | Which GIFs search shows: `g`, `pg`, `pg-13` or `r`.                 |
+| `SMTP_URL`          | unset (email off)      | Mail server for emails about missed mentions. See *Email* below.    |
+| `MAIL_FROM`         | the SMTP username      | Who those emails come from, like `Burrow <you@example.com>`.        |
+| `PUBLIC_URL`        | unset                  | The address friends open Burrow at, for links in emails.            |
+| `PUSH_CONTACT`      | Burrow's GitHub page | A `mailto:` or `https:` address the phone push services can reach you at if something goes wrong. |
 
 ### Letting friends reach it
 
@@ -165,6 +172,20 @@ The **GIF** button in the message box searches [KLIPY](https://klipy.com), a fre
 
 Searches and previews go through your Burrow server, so the key never reaches anyone's app and KLIPY doesn't see your friends' addresses (it gets an anonymous id per person instead). A GIF that's sent is saved on your server like any shared picture, so old messages keep working. If KLIPY ever limits your key, ask for production access in its Partner Panel.
 
+### Phone alerts and email
+
+Alerts while Burrow is closed (on phones, and in Chrome, Edge and Firefox) work with no setup: each person ticks *Alert me when Burrow is closed* in their account. They need Burrow on `https://` (see *Letting friends reach it*). On an iPhone or iPad, they first add Burrow to the Home Screen (Share › Add to Home Screen) and turn it on from there; that also gives Burrow an app icon with the unread count.
+
+Email about @mentions and direct messages someone hasn't read after 15 minutes is optional, and needs a mail server you can send through (your email provider, a Gmail app password, Amazon SES, Mailgun...). Put it in `.env`:
+
+```sh
+SMTP_URL=smtps://you%40example.com:app-password@smtp.example.com:465
+MAIL_FROM=Burrow <you@example.com>
+PUBLIC_URL=https://chat.example.com
+```
+
+Write `@` in the username as `%40`. Port 465 starts encrypted (`smtps://`); for port 587 use `smtp://`, and Burrow switches to encryption before sending the password (it refuses to send it unencrypted). Then each person adds and confirms their address in their account. Burrow sends at most one email an hour per person, and none while they're on Do not disturb.
+
 ### Security
 
 - Everything travels encrypted: Caddy serves HTTPS (and Burrow then tells browsers to always use it), and voice uses WebRTC's built-in encryption. Passwords are stored hashed with scrypt.
@@ -228,7 +249,7 @@ Burrow has its own names for things: a **burrow** is a shared space for one grou
 
 - Click **+** under *Your burrows* to dig a new burrow, or join one with an invite link or code.
 - The gear next to the burrow's name opens its settings. **Invite people** has a link that never runs out, and makes links that expire after a while or a number of uses; anyone in the burrow can make one. Opening a link in a browser shows the burrow's picture, banner and description before joining. **Notifications** mutes the burrow or sets it to all messages, only @mentions or nothing. The host, and roles allowed to *edit the burrow*, find **Edit burrow** there: its name, description, picture, banner, welcome room (where new people land) and rules (new people accept them before they can chat). The host can also hand the burrow to someone else there, and delete it; everyone else can leave. People whose role lets them ban also see who's banned there, and can unban them. People who can manage roles open **Roles** there.
-- **Roles:** every burrow starts with a *Moderator* role. Under **Roles** you can make your own (like *Admins* or *Friends*), pick a color, choose what each one can do (manage rooms, delete messages, remove people, ban people, manage roles, edit the burrow, manage emoji and sounds, manage voice), and move them up or down. Names show in the color of their highest role. People can only change roles, and remove people, below their own highest role, and can't hand out permissions they don't have. A role with no permissions is just a colored label.
+- **Roles:** every burrow starts with a *Moderator* role. Under **Roles** you can make your own (like *Admins* or *Friends*), pick a color, choose what each one can do (manage rooms, delete messages, remove people, ban people, manage roles, edit the burrow, manage emoji and sounds, manage voice, mention @everyone and roles), and move them up or down. Names show in the color of their highest role. People can only change roles, and remove people, below their own highest role, and can't hand out permissions they don't have. A role with no permissions is just a colored label.
 - People who can manage rooms add rooms and headings with the **+** next to *Rooms*, where *Arrange rooms* also puts them in order (on a computer you can drag them too). Anyone can fold a heading away. The gear that appears when you hover over a room changes its name, topic, slow mode and who can see it, makes it an announcement room that only some roles can post in, archives it or deletes it. A private room is only seen by people who manage rooms, plus the roles and people you tick.
 - The bell at the top of a room mutes it for a while, or sets it to all messages, only @mentions or nothing. Right-clicking a room in the list does the same.
 - **Events** above the rooms plans a game night: pick a time and a room, and people answer *Going*, *Maybe* or *Can't go*. Everyone going or maybe going gets a reminder 15 minutes before.
@@ -241,6 +262,9 @@ Burrow has its own names for things: a **burrow** is a shared space for one grou
 - The speech-bubble tile above your burrows holds your direct messages. Start one with its **+** (tick several people for a group conversation), or click someone in a burrow's member list. A group's gear renames it, adds people or leaves it.
 - In the burrow list (*more* on a computer, or the burrow button on a phone), the folder button next to each burrow puts it in one of your own folders.
 - Click your name in the bottom corner to set a profile picture or change your password.
+- Your picture (top right, or *You* on a phone) sets you to *Online*, *Away* or *Do not disturb* (no sounds or alerts), and sets a custom status. Burrow marks you away by itself after 10 minutes without touching it. The **@** next to it is your inbox of mentions and replies, with the number you haven't read.
+- Your account has the notification settings: alerts while Burrow is closed, quiet hours (no sounds or pop-ups, and silent phone alerts, between two times), email about mentions you missed (if the server has email), and, in the desktop app, whether to show the game you're playing.
+- Type `@everyone` (everyone who can see the room), `@here` (only people online) or `@` and a role's name to ping them all. Only roles allowed to *mention @everyone and roles* can; for everyone else it's just text.
 - The **GIF** button next to the message box opens trending GIFs; type to search, and tap one to send it.
 - The **+** in the message box uploads files, makes a poll, sends a sticker, or sends what you've typed later. The smiley opens every emoji (and your burrows' own), and the microphone records a voice message.
 - Each message's **⋯** menu pins it, starts a thread, forwards it, saves it (or reminds you about it later), marks it unread, or shows its edit history. Your saved and scheduled messages are in your menu, top right.
@@ -263,7 +287,7 @@ with a bearer token, and live events come over `/ws?token=…`; see `server/src/
 
 ## Roadmap
 
-Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more), the rooms, burrows and organization update (headings and room order, topics, slow mode, announcement and archived rooms, invite links that run out, banners, rules and a welcome room, muting, events, group conversations and folders), and the voice and Campfire update (push to talk and hotkeys, voice sensitivity, soundboard, moving and muting people, AFK fire, seat limits, calls, listen together, kept fireside chat, music mode and a voice changer).
+Done: auto-update for the desktop app (fully automatic on macOS needs code signing), voice rooms, image and file sharing, reactions and replies, profile pictures and password changes, direct messages, custom roles with private rooms, per-person voice volume, notification sounds, camera and screen sharing, a GIF picker, burrow pictures, the chat and messages update (search, pins, threads, polls, link previews, voice messages, custom emoji and stickers, reminders, scheduled messages and more), the rooms, burrows and organization update (headings and room order, topics, slow mode, announcement and archived rooms, invite links that run out, banners, rules and a welcome room, muting, events, group conversations and folders), and the voice and Campfire update (push to talk and hotkeys, voice sensitivity, soundboard, moving and muting people, AFK fire, seat limits, calls, listen together, kept fireside chat, music mode and a voice changer), and the notifications and presence update (away and Do not disturb, custom statuses, playing now, a mentions inbox, @everyone and @role mentions, quiet hours, the app icon count, alerts while Burrow is closed and email for missed mentions).
 
 Ideas for later: text message encryption, sharing one program's sound on macOS.
 

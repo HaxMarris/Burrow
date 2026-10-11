@@ -1,4 +1,4 @@
-// The one bridge between the app window and Electron: picking what to share on screen, its sound, and voice hotkeys.
+// The one bridge between the app window and Electron: picking what to share on screen, its sound, voice hotkeys, the game you're playing and the icon badge.
 const { contextBridge, ipcRenderer } = require('electron');
 
 const appAudioSupported = ipcRenderer.sendSync('app-audio-supported');
@@ -22,6 +22,15 @@ contextBridge.exposeInMainWorld('burrowDesktop', {
    * Push to talk, mute and deafen keys heard even while another program is in front.
    * set(binds) resolves to { global, needsPermission }; set(null) stops listening.
    */
+  /** The game the app sees running (a name, or null), whenever it changes. */
+  activity: {
+    onChange: (fn) => ipcRenderer.on('activity', (_e, name) => fn(name)),
+    refresh: () => ipcRenderer.send('activity-refresh'),
+  },
+  /** Unread count on the app's icon; Windows also wants a picture of it. */
+  setBadge: (count, image) => ipcRenderer.send('set-badge', count, image),
+  /** Seconds since the keyboard or mouse was last used anywhere on the computer. */
+  idleSeconds: () => ipcRenderer.sendSync('idle-seconds'),
   hotkeys: {
     set: (binds) => ipcRenderer.invoke('hotkeys-set', binds),
     onKey: (fn) => ipcRenderer.on('hotkey', (_e, name, down) => fn(name, down)),

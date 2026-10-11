@@ -216,11 +216,15 @@ async function enterApp() {
   state.maxUploadBytes = config.maxUploadBytes || 0;
   $('#mic-btn').classList.toggle('hidden', !state.maxUploadBytes || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined');
   state.gifsEnabled = !!config.gifs;
+  state.emailEnabled = !!config.email;
   $('#gif-btn').classList.toggle('hidden', !state.gifsEnabled);
+  renderMyStatus();
   await loadServers();
   connect();
   loadSavedAndScheduled();
   openPendingInvite();
+  startPush();
+  openLinkedMessage();
 }
 
 async function loadServers() {
@@ -252,6 +256,9 @@ function connect() {
     setConnected(true, 'Connected');
     // The server forgets who's in voice when we drop off, so tell it again.
     if (state.voice) ws.send(JSON.stringify({ type: 'voice_join', channelId: state.voice.channelId, ...voiceFlags() }));
+    // So is whether you're away from this device, and what you're playing.
+    if (idleSent) ws.send(JSON.stringify({ type: 'idle', idle: true }));
+    if (sharedActivity) ws.send(JSON.stringify({ type: 'activity', name: sharedActivity }));
     // Catch up on anything missed while disconnected.
     if (wasRetry) loadServers().catch(() => {});
   };
@@ -305,7 +312,7 @@ function handleEvent(ev) {
         renderChannels();
       }
       if (mine) startSlowWait(m.channelId);
-      if (!mine && (document.hidden || m.channelId !== state.channelId) && !quietFor(m)) {
+      if (!mine && (document.hidden || m.channelId !== state.channelId) && !quietFor(m) && !hushed()) {
         notify(m);
         playSound('message');
       }
@@ -369,8 +376,13 @@ function handleEvent(ev) {
       break;
     case 'presence':
       for (const s of state.servers.values())
-        for (const mem of s.members) if (mem.id === ev.userId) mem.online = ev.online;
+        for (const mem of s.members) if (mem.id === ev.userId) Object.assign(mem, { online: ev.online, status: ev.status, custom: ev.custom, activity: ev.activity });
+      if (ev.userId === state.me.id) Object.assign(state.me, { customStatus: ev.custom });
       renderMembers();
+      break;
+    case 'me_updated':
+      Object.assign(state.me, ev.me);
+      renderMyStatus();
       break;
     case 'typing':
       showTyping(ev.channelId, ev.username);
@@ -513,6 +525,7 @@ function notify(m) {
 // The top bar: a named pill per burrow, with the ones that don't fit in a "more" list.
 // Phones get one button with the current burrow's name instead, which opens the full list.
 function renderServers() {
+  updateBadge();
   const s = state.servers.get(state.serverId);
   const hasUnread = serverUnread;
   const dmUnread = state.dmOrder.some((id) => hasUnread(state.servers.get(id)));
@@ -1016,15 +1029,27 @@ function renderMembers() {
     ul.append(
       ...list.map((m) => {
         const li = document.createElement('li');
-        li.className = m.online ? 'online' : 'offline';
+        li.className = `${m.online ? 'online' : 'offline'} status-${statusOf(m)}`;
         const av = document.createElement('span');
-        av.className = 'avatar';
-        setAvatar(av, m.username, avatarOf(m.id, m.avatar));
+        av.className = 'avatar-wrap';
+        av.innerHTML = `<span class="avatar"></span><span class="status-dot ${statusOf(m)}" title="${STATUS_LABELS[statusOf(m)]}"></span>`;
+        setAvatar(av.firstChild, m.username, avatarOf(m.id, m.avatar));
+        const text = document.createElement('span');
+        text.className = 'member-text';
         const name = document.createElement('span');
+        name.className = 'member-name';
         name.textContent = m.username;
         const color = roleColor(s, m.id);
         if (color) name.style.color = color;
-        li.append(av, name);
+        text.append(name);
+        const sub = presenceLine(m);
+        if (sub) {
+          const line = document.createElement('span');
+          line.className = 'member-sub';
+          line.innerHTML = sub;
+          text.append(line);
+        }
+        li.append(av, text);
         if (m.id !== state.me.id) {
           li.classList.add('can-dm');
           li.title = `${m.username}: message, volume and more`;
@@ -1354,11 +1379,17 @@ function updateMentions() {
   const hit = input.selectionStart === input.selectionEnd && /(^|\s)@([\w.-]*)$/.exec(before);
   if (!s || !hit) return closeMentions();
   const q = hit[2].toLowerCase();
-  const matches = s.members
+  const people = s.members
     .filter((m) => m.id !== state.me.id && m.username.toLowerCase().includes(q))
     .sort((a, b) => b.username.toLowerCase().startsWith(q) - a.username.toLowerCase().startsWith(q)
-      || !!b.online - !!a.online || a.username.localeCompare(b.username))
-    .slice(0, 8);
+      || !!b.online - !!a.online || a.username.localeCompare(b.username));
+  // People allowed to can ping everyone, everyone online, or a role.
+  const groups = !isDm(s) && can(s, 'everyone') ? [
+    { username: 'everyone', ping: 'Everyone who can see this room' },
+    { username: 'here', ping: "Everyone who's online now" },
+    ...(s.roles ?? []).map((r) => ({ username: r.name, ping: 'Everyone with this role', color: r.color })),
+  ].filter((g) => g.username.toLowerCase().startsWith(q)) : [];
+  const matches = [...people.slice(0, 8 - Math.min(groups.length, 3)), ...groups.slice(0, 3)];
   if (!matches.length) return closeMentions();
   mention = { start: before.length - hit[2].length - 1, matches, index: 0 };
   renderMentions();
@@ -1371,10 +1402,15 @@ function renderMentions() {
     b.className = 'mention-option' + (i === mention.index ? ' active' : '');
     const av = document.createElement('span');
     av.className = 'avatar xs';
-    setAvatar(av, m.username, avatarOf(m.id, m.avatar));
+    if (m.ping) {
+      av.classList.add('ping-avatar');
+      av.textContent = '@';
+      if (m.color) av.style.background = m.color;
+    } else setAvatar(av, m.username, avatarOf(m.id, m.avatar));
     const name = document.createElement('span');
     name.textContent = m.username;
     b.append(av, name);
+    if (m.ping) b.insertAdjacentHTML('beforeend', `<span class="small muted">${escapeHtml(m.ping)}</span>`);
     b.onpointerdown = (e) => e.preventDefault(); // keep the keyboard up
     b.onclick = () => { mention.index = i; completeMention(); };
     return b;
@@ -1385,6 +1421,7 @@ function renderMentions() {
 function completeMention() {
   const m = mention.matches[mention.index];
   const after = input.value.slice(input.selectionStart).replace(/^[\w.-]*\s?/, '');
+  if (m.ping && m.username !== 'everyone' && m.username !== 'here') toast(`Everyone with the ${m.username} role will be notified.`);
   const text = `${input.value.slice(0, mention.start)}@${m.username} `;
   input.value = text + after;
   input.setSelectionRange(text.length, text.length);
@@ -1673,6 +1710,7 @@ const PERMS = [
   ['burrow', 'Edit the burrow', "Change its name, pictures, description, welcome room, rules and AFK fire, and manage invites and events"],
   ['emoji', 'Manage emoji and sounds', "Add, rename and remove the burrow's own emoji, stickers and soundboard sounds"],
   ['voice', 'Manage voice', 'Move people between fires, mute them for everyone, disconnect them, and sit at a full fire'],
+  ['everyone', 'Mention @everyone and roles', 'Ping everyone in a room with @everyone or @here, or everyone with a role with @role'],
 ];
 const ROLE_COLORS = ['#4f8a5b', '#2f7d74', '#3f6fa8', '#7a5aa6', '#b0527a', '#c2553d', '#c98a2b', '#8a8f87'];
 
@@ -2039,6 +2077,7 @@ function openAccount() {
     <h3>Direct messages</h3>
     <label class="check"><input type="checkbox" id="read-receipts" ${state.me.readReceipts !== false ? 'checked' : ''} /> Show when I've read a message</label>
     <span class="small muted">Shows "Seen" under messages in direct messages. You only see it for others while yours is on too.</span>
+    ${notificationSettings()}
     ${voiceSettings()}
     ${soundSettings()}
     <h3>Change password</h3>
@@ -2056,6 +2095,7 @@ function openAccount() {
     try { state.me.readReceipts = (await api('/api/me', { method: 'PATCH', body: { readReceipts: e.target.checked } })).readReceipts; }
     catch (err) { e.target.checked = !e.target.checked; alertError(err); }
   };
+  wireNotificationSettings();
   wireVoiceSettings();
   wireSoundSettings();
   if (state.maxUploadBytes) {
@@ -4380,6 +4420,357 @@ function wireSoundSettings() {
   $('#sound-test').onclick = () => playSound('message', true);
 }
 
+// ---------------------------------------------------------------- presence, status and notifications
+//
+// Your status (online, away or do not disturb), a custom status, what the desktop app sees you
+// playing, the mentions inbox, the number on the app icon, quiet hours, and alerts while Burrow
+// is closed (push) or by email.
+
+const STATUS_LABELS = { online: 'Online', away: 'Away', dnd: 'Do not disturb', offline: 'Offline' };
+const statusOf = (m) => (!m.online ? 'offline' : m.status && m.status !== 'offline' ? m.status : 'online');
+const customLive = (c) => !!c && (c.text || c.emoji) && (!c.until || c.until > Date.now());
+
+/** The line under someone's name: their custom status, else what they're playing. */
+function presenceLine(m, both = false) {
+  const parts = [];
+  if (customLive(m.custom)) parts.push(`${m.custom.emoji ? `<span class="status-emoji">${emojiHtml(m.custom.emoji)}</span>` : ''}${escapeHtml(m.custom.text)}`);
+  if (m.online && m.activity && (both || !parts.length)) parts.push(`<span class="playing">${GAME_ICON}Playing <b>${escapeHtml(m.activity.name)}</b></span>`);
+  return parts.join(both ? '<br>' : '');
+}
+const GAME_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10a5 5 0 0 1 4.9 6l-.7 3.4a2.6 2.6 0 0 1-4.5 1.2L14.5 15h-5l-2.2 2.6a2.6 2.6 0 0 1-4.5-1.2L2.1 13A5 5 0 0 1 7 7Zm0 3v1.5H5.5v1.5H7v1.5h1.5V13H10v-1.5H8.5V10H7Zm9 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm2 2a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"/></svg>';
+
+function renderMyStatus() {
+  if (!state.me) return;
+  const mine = state.me.status ?? 'online';
+  for (const id of ['#me-dot', '#tab-dot']) $(id).className = `status-dot ${mine}`;
+  for (const b of document.querySelectorAll('#me-menu [data-status]')) b.setAttribute('aria-checked', String(b.dataset.status === mine));
+  const c = state.me.customStatus;
+  $('#custom-status-btn').innerHTML = customLive(c)
+    ? `<span class="custom-now">${c.emoji ? emojiHtml(c.emoji) : ''} ${escapeHtml(c.text)}</span><span class="small muted">Change or clear your status</span>`
+    : 'Set a custom status';
+  $('#me-btn').title = `You · ${STATUS_LABELS[mine]}`;
+}
+
+async function setMyStatus(status) {
+  try { Object.assign(state.me, await api('/api/me', { method: 'PATCH', body: { status } })); renderMyStatus(); }
+  catch (err) { alertError(err); }
+}
+
+const CLEAR_AFTER = [['', "Don't clear"], ['30', '30 minutes'], ['60', '1 hour'], ['240', '4 hours'], ['today', 'Today'], ['week', 'This week']];
+function clearTime(choice) {
+  if (!choice) return null;
+  if (choice === 'today') { const d = new Date(); d.setHours(23, 59, 59, 0); return d.getTime(); }
+  if (choice === 'week') { const d = new Date(); d.setDate(d.getDate() + ((7 - d.getDay()) % 7)); d.setHours(23, 59, 59, 0); return d.getTime(); }
+  return Date.now() + Number(choice) * 60_000;
+}
+
+function openCustomStatus() {
+  const c = customLive(state.me.customStatus) ? state.me.customStatus : null;
+  let emoji = c?.emoji ?? '';
+  modal(`<h2>Custom status</h2>
+    <form id="status-form">
+      <div class="status-row">
+        <button type="button" class="btn secondary status-emoji-btn" id="status-emoji" title="Pick an emoji" aria-label="Pick an emoji"></button>
+        <input id="status-text" maxlength="80" placeholder="What's happening?" autocomplete="off" value="${escapeHtml(c?.text ?? '')}" />
+      </div>
+      <div class="status-ideas">${['🎮 Playing games', '📚 Studying', '🍕 Eating', '😴 Sleeping', '🏃 Out and about'].map((t) => `<button type="button" class="chip">${t}</button>`).join('')}</div>
+      <label>Clear after<select id="status-clear">${CLEAR_AFTER.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>
+      <div class="error" id="modal-error"></div>
+      <div class="modal-row">
+        ${c ? '<button type="button" class="btn danger" id="status-remove">Clear status</button>' : ''}
+        <span class="spacer"></span>
+        <button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">Save</button>
+      </div>
+    </form>`);
+  const showEmoji = () => ($('#status-emoji').innerHTML = emoji ? emojiHtml(emoji) : '🙂');
+  showEmoji();
+  $('#status-emoji').onclick = () => openEmojiPanel($('#status-emoji'), (e) => { emoji = e; showEmoji(); });
+  for (const chip of document.querySelectorAll('#status-form .chip')) chip.onclick = () => {
+    const [e, ...words] = chip.textContent.split(' ');
+    emoji = e;
+    $('#status-text').value = words.join(' ');
+    showEmoji();
+  };
+  $('#status-text').focus();
+  const save = async (customStatus) => {
+    try {
+      Object.assign(state.me, await api('/api/me', { method: 'PATCH', body: { customStatus } }));
+      renderMyStatus();
+      closeModal();
+    } catch (err) { $('#modal-error').textContent = err.message; }
+  };
+  $('#status-remove')?.addEventListener('click', () => save(null));
+  $('#status-form').onsubmit = (e) => {
+    e.preventDefault();
+    const text = $('#status-text').value.trim();
+    if (!text && !emoji) return save(null);
+    save({ text, emoji, until: clearTime($('#status-clear').value) });
+  };
+}
+
+// ---- away: nobody's touched Burrow on this device for a while
+
+const IDLE_AFTER = 10 * 60_000;
+let lastTouch = Date.now();
+let idleSent = false;
+const touched = () => {
+  lastTouch = Date.now();
+  if (idleSent) checkIdle();
+};
+for (const type of ['pointerdown', 'keydown', 'wheel', 'touchstart']) document.addEventListener(type, touched, { capture: true, passive: true });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) touched(); });
+function checkIdle() {
+  // The desktop app knows how long the whole computer has been left alone.
+  const systemIdle = window.burrowDesktop?.idleSeconds?.();
+  const idle = typeof systemIdle === 'number' ? systemIdle * 1000 >= IDLE_AFTER : Date.now() - lastTouch >= IDLE_AFTER;
+  if (idle === idleSent || state.ws?.readyState !== WebSocket.OPEN) return;
+  idleSent = idle;
+  state.ws.send(JSON.stringify({ type: 'idle', idle }));
+}
+setInterval(checkIdle, 30_000);
+
+// ---- playing now: the desktop app says which game is running
+
+let sharedActivity = null;
+const activityOn = () => store.get('shareActivity') !== '0';
+window.burrowDesktop?.activity?.onChange((name) => {
+  const next = activityOn() ? name || null : null;
+  if (next === sharedActivity) return;
+  sharedActivity = next;
+  if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: 'activity', name: next ?? '' }));
+});
+
+// ---- quiet hours and do not disturb
+
+function inQuietHours(q = state.me?.quietHours) {
+  if (!q) return false;
+  const now = new Date();
+  const minutes = now.getHours() * 60 + now.getMinutes();
+  return q.start < q.end ? minutes >= q.start && minutes < q.end : minutes >= q.start || minutes < q.end;
+}
+/** No sounds or pop-ups for messages: do not disturb, or quiet hours. */
+const hushed = () => state.me?.status === 'dnd' || inQuietHours();
+
+// ---- the number on the app icon (and in the tab title)
+
+let lastBadge = -1;
+function updateBadge() {
+  // The @ button counts mentions and replies in burrows; the app icon adds unread direct messages.
+  let count = 0;
+  let pings = 0;
+  for (const s of state.servers.values()) {
+    for (const c of [...s.channels, ...(s.threads ?? [])]) {
+      if (c.kind === 'voice' || notifyState(s, c).muted) continue;
+      count += c.mentions ?? 0;
+      if (!isDm(s)) pings += c.mentions ?? 0;
+    }
+  }
+  count = Math.min(count, 99);
+  $('#inbox-badge').textContent = pings > 9 ? '9+' : String(pings);
+  $('#inbox-badge').classList.toggle('hidden', !pings);
+  if (count === lastBadge) return;
+  lastBadge = count;
+  document.title = count ? `(${count}) Burrow` : 'Burrow';
+  if (navigator.setAppBadge) (count ? navigator.setAppBadge(count) : navigator.clearAppBadge()).catch(() => {});
+  window.burrowDesktop?.setBadge?.(count, count ? badgeImage(count) : null);
+}
+/** A red circle with the count, for the Windows taskbar. */
+function badgeImage(count) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 32;
+  const x = c.getContext('2d');
+  x.fillStyle = '#c4473a';
+  x.beginPath();
+  x.arc(16, 16, 16, 0, Math.PI * 2);
+  x.fill();
+  x.fillStyle = '#fff';
+  x.font = `bold ${count > 9 ? 16 : 20}px sans-serif`;
+  x.textAlign = 'center';
+  x.textBaseline = 'middle';
+  x.fillText(count > 9 ? '9+' : String(count), 16, 17);
+  return c.toDataURL('image/png');
+}
+
+// ---- the mentions inbox
+
+async function openInbox() {
+  modal(`<h2>Mentions and replies</h2>
+    <p class="muted small">Everything that @mentioned you, replied to you, or pinged @everyone or one of your roles.</p>
+    <div id="inbox-list" class="card-list"><p class="muted">Loading…</p></div>
+    <div class="modal-row"><button class="btn secondary" id="inbox-more" hidden>Show older</button><span class="spacer"></span><button class="btn secondary" data-close>Close</button></div>`);
+  let before = 0;
+  const load = async () => {
+    const list = $('#inbox-list');
+    const page = await api(`/api/mentions${before ? `?before=${before}` : ''}`);
+    if (!$('#inbox-list')) return;
+    if (!before) list.replaceChildren();
+    if (!page.messages.length && !before) list.innerHTML = '<p class="muted">Nothing yet. When someone mentions you, it shows up here.</p>';
+    for (const m of page.messages) {
+      const card = messageCard(m, m.place, {
+        note: m.unread ? 'Unread' : '',
+        onOpen: () => { closeModal(); jumpTo(m.channelId, m.id); },
+        buttons: [['Clear', (b) => {
+          b.disabled = true;
+          api(`/api/mentions/${m.id}`, { method: 'DELETE' }).then(() => card.remove()).catch(alertError);
+        }]],
+      });
+      if (m.unread) card.classList.add('unread');
+      list.append(card);
+    }
+    before = page.messages.at(-1)?.id ?? before;
+    $('#inbox-more').hidden = !page.more;
+  };
+  $('#inbox-more').onclick = () => load().catch(alertError);
+  try { await load(); } catch (err) { $('#inbox-list') && ($('#inbox-list').textContent = err.message); }
+}
+
+// ---- alerts while Burrow is closed: a service worker and the browser's push service
+
+const pushSupported = () => !window.burrowDesktop && window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+// iPhones and iPads only allow it once Burrow is on the Home Screen.
+const isIos = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+let swReady = null;
+
+async function startPush() {
+  if (window.burrowDesktop || !window.isSecureContext || !('serviceWorker' in navigator)) return;
+  swReady = navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).catch(() => null);
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data?.type === 'open' && e.data.channelId) jumpTo(e.data.channelId, e.data.messageId);
+  });
+  // Keep the server's copy current: browsers sometimes replace a subscription.
+  if (store.get('push') === '1' && Notification.permission === 'granted') turnOnPush(false).catch(() => {});
+}
+
+async function pushSubscription() {
+  const reg = await swReady;
+  return reg ? reg.pushManager.getSubscription() : null;
+}
+
+async function turnOnPush(ask = true) {
+  if (!pushSupported()) throw new Error(isIos() && !isStandalone()
+    ? 'On an iPhone or iPad, add Burrow to your Home Screen first (Share › Add to Home Screen), then turn this on there.'
+    : "This browser can't show alerts while Burrow is closed.");
+  if (ask && Notification.permission !== 'granted' && (await Notification.requestPermission()) !== 'granted')
+    throw new Error('Alerts are blocked for Burrow. Allow notifications for this site in your browser settings.');
+  const reg = await swReady;
+  if (!reg) throw new Error("Burrow couldn't set up alerts in this browser.");
+  const { key } = await api('/api/push/key');
+  let sub = await reg.pushManager.getSubscription();
+  // A subscription made for another server key won't work; start over.
+  const current = sub && btoa(String.fromCharCode(...new Uint8Array(sub.options.applicationServerKey ?? []))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  if (sub && current && current !== key) { await sub.unsubscribe(); sub = null; }
+  sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Uint8Array.from(atob(key.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)) });
+  await api('/api/push', { method: 'POST', body: sub.toJSON() });
+  store.set('push', '1');
+}
+
+async function turnOffPush() {
+  store.set('push', '0');
+  const sub = await pushSubscription();
+  if (!sub) return;
+  await api('/api/push', { method: 'DELETE', body: { endpoint: sub.endpoint } }).catch(() => {});
+  await sub.unsubscribe().catch(() => {});
+}
+
+// A tapped alert opens Burrow at ?channel=…&message=…
+function openLinkedMessage() {
+  const params = new URLSearchParams(location.search);
+  const channelId = Number(params.get('channel'));
+  if (!channelId) return;
+  history.replaceState(null, '', location.pathname);
+  jumpTo(channelId, Number(params.get('message')) || undefined);
+}
+
+// ---- the Notifications part of your account settings
+
+const minutesToTime = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+const timeToMinutes = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+
+function notificationSettings() {
+  const q = state.me.quietHours;
+  const pushOn = store.get('push') === '1' && pushSupported() && Notification.permission === 'granted';
+  return `<h3>Notifications</h3>
+    ${window.burrowDesktop ? '' : `<label class="check"><input type="checkbox" id="push-on" ${pushOn ? 'checked' : ''} /> Alert me when Burrow is closed</label>
+    <span class="small muted" id="push-note">${pushSupported() ? 'Direct messages, @mentions and replies, on this device, while Burrow isn\'t open.' : isIos() && !isStandalone() ? 'On an iPhone or iPad, add Burrow to your Home Screen (Share › Add to Home Screen) and turn this on there.' : "This browser can't show alerts while Burrow is closed."}</span>`}
+    <label class="check"><input type="checkbox" id="quiet-on" ${q ? 'checked' : ''} /> Quiet hours</label>
+    <div class="quiet-times ${q ? '' : 'hidden'}" id="quiet-times">
+      <label>From<input type="time" id="quiet-start" value="${minutesToTime(q?.start ?? 22 * 60)}" /></label>
+      <label>To<input type="time" id="quiet-end" value="${minutesToTime(q?.end ?? 7 * 60)}" /></label>
+    </div>
+    <span class="small muted">No sounds or pop-ups then, and alerts on your phone arrive silently. Do not disturb (click your picture) silences everything until you switch it off.</span>
+    ${state.emailEnabled ? emailSettings() : ''}
+    ${window.burrowDesktop?.activity ? `<label class="check"><input type="checkbox" id="share-activity" ${activityOn() ? 'checked' : ''} /> Show the game I'm playing</label>
+    <span class="small muted">The desktop app spots games you run and shows "Playing …" under your name.</span>` : ''}`;
+}
+
+function emailSettings() {
+  const me = state.me;
+  return `<div class="email-settings" id="email-settings">
+    <label>Email for mentions you miss
+      <div class="inline-form"><input type="email" id="email-address" placeholder="you@example.com" autocomplete="email" value="${escapeHtml(me.email ?? '')}" />
+      <button type="button" class="btn secondary" id="email-send">${me.email ? (me.emailVerified ? 'Change' : 'Send code again') : 'Send code'}</button></div>
+    </label>
+    ${me.email && !me.emailVerified ? `<label>Code from the email<div class="inline-form"><input id="email-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="123456" /><button type="button" class="btn" id="email-verify">Confirm</button></div></label>` : ''}
+    ${me.email && me.emailVerified ? `<label class="check"><input type="checkbox" id="email-mentions" ${me.emailMentions ? 'checked' : ''} /> Email me @mentions and direct messages I haven't read after 15 minutes</label>
+      <button type="button" class="link-btn danger-link" id="email-remove">Remove my email</button>` : ''}
+    <div class="error" id="email-error"></div>
+  </div>`;
+}
+
+function wireEmailSettings() {
+  const box = $('#email-settings');
+  if (!box) return;
+  const redraw = (me) => { Object.assign(state.me, me); box.outerHTML = emailSettings(); wireEmailSettings(); };
+  const fail = (err) => ($('#email-error').textContent = err.message);
+  $('#email-send').onclick = async () => {
+    $('#email-send').disabled = true;
+    try { redraw(await api('/api/me/email', { method: 'POST', body: { email: $('#email-address').value } })); toast('Code sent. Check your email.'); }
+    catch (err) { fail(err); $('#email-send').disabled = false; }
+  };
+  $('#email-verify')?.addEventListener('click', async () => {
+    try { redraw(await api('/api/me/email/verify', { method: 'POST', body: { code: $('#email-code').value } })); toast('Email confirmed.'); }
+    catch (err) { fail(err); }
+  });
+  $('#email-code')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#email-verify').click(); } });
+  $('#email-mentions')?.addEventListener('change', async (e) => {
+    try { Object.assign(state.me, await api('/api/me', { method: 'PATCH', body: { emailMentions: e.target.checked } })); }
+    catch (err) { e.target.checked = !e.target.checked; fail(err); }
+  });
+  $('#email-remove')?.addEventListener('click', async () => {
+    try { redraw(await api('/api/me/email', { method: 'DELETE' })); } catch (err) { fail(err); }
+  });
+}
+
+function wireNotificationSettings() {
+  $('#push-on')?.addEventListener('change', async (e) => {
+    const box = e.target;
+    box.disabled = true;
+    try { box.checked ? await turnOnPush() : await turnOffPush(); }
+    catch (err) { box.checked = false; $('#push-note').textContent = err.message; }
+    finally { box.disabled = false; }
+  });
+  const saveQuiet = async () => {
+    const on = $('#quiet-on').checked;
+    $('#quiet-times').classList.toggle('hidden', !on);
+    const quietHours = on ? { start: timeToMinutes($('#quiet-start').value || '22:00'), end: timeToMinutes($('#quiet-end').value || '07:00'), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone } : null;
+    try { Object.assign(state.me, await api('/api/me', { method: 'PATCH', body: { quietHours } })); }
+    catch (err) { alertError(err); }
+  };
+  $('#quiet-on').onchange = saveQuiet;
+  $('#quiet-start').onchange = saveQuiet;
+  $('#quiet-end').onchange = saveQuiet;
+  wireEmailSettings();
+  $('#share-activity')?.addEventListener('change', (e) => {
+    store.set('shareActivity', e.target.checked ? '1' : '0');
+    window.burrowDesktop?.activity?.refresh?.();
+    if (!e.target.checked && sharedActivity) {
+      sharedActivity = null;
+      state.ws?.send(JSON.stringify({ type: 'activity', name: '' }));
+    }
+  });
+}
+
 // ---------------------------------------------------------------- push to talk and hotkeys
 //
 // A key is kept as where it sits on the keyboard (KeyboardEvent.code, so it works with any
@@ -4687,13 +5078,6 @@ function placePop(pop, anchor) {
   pop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 8))}px`;
   const below = r.bottom + 6 + pop.offsetHeight < window.innerHeight - 8;
   pop.style.top = `${below ? r.bottom + 6 : Math.max(8, r.top - pop.offsetHeight - 6)}px`;
-}
-
-/** An emoji as text, or a burrow's own emoji written <:name:id> as its picture. */
-function emojiHtml(text, s) {
-  const m = /^<:(\w+):(\d+)>$/.exec(text);
-  const custom = m && s?.emoji?.find((e) => e.id === Number(m[2]));
-  return custom ? `<img class="custom-emoji" src="${escapeHtml(state.serverUrl + custom.url)}" alt="${escapeHtml(custom.name)}" />` : escapeHtml(text);
 }
 
 function openSounds(serverId) {
@@ -5044,7 +5428,15 @@ function pingCount(n) {
   b.textContent = n > 99 ? '99+' : n;
   return b;
 }
-const mentionsMe = (m) => new RegExp('@' + escapeRegex(state.me.username) + '\\b', 'i').test(m.content) || m.replyTo?.authorId === state.me.id;
+const mentionsMe = (m) => new RegExp('@' + escapeRegex(state.me.username) + '\\b', 'i').test(m.content) || m.replyTo?.authorId === state.me.id || pingsMe(m);
+/** @everyone, @here or one of your roles, from someone allowed to ping those. */
+function pingsMe(m) {
+  const p = m.pings;
+  if (!p || m.authorId === state.me.id) return false;
+  if (p.everyone || p.here) return true;
+  const mine = roomById(m.channelId)?.s.members.find((x) => x.id === state.me.id)?.roleIds ?? [];
+  return !!p.roles?.some((id) => mine.includes(id));
+}
 
 /** Message text without markup, for notifications and previews. */
 function plainText(text) {
@@ -7580,6 +7972,10 @@ $('#me-btn').onclick = (e) => { e.stopPropagation(); toggleMeMenu($('#me-btn'));
 $('#tab-you').onclick = (e) => { e.stopPropagation(); toggleMeMenu($('#tab-you')); };
 $('#me-menu').onclick = (e) => { if (e.target.closest('button')) closeMeMenu(); else e.stopPropagation(); };
 $('#account-btn').onclick = () => openAccount();
+for (const b of document.querySelectorAll('#me-menu [data-status]')) b.onclick = () => setMyStatus(b.dataset.status);
+$('#custom-status-btn').onclick = () => openCustomStatus();
+$('#inbox-menu-btn').onclick = () => openInbox();
+$('#inbox-btn').onclick = () => openInbox();
 $('#saved-btn').onclick = () => openSaved();
 $('#scheduled-btn').onclick = () => openScheduledList();
 document.addEventListener('click', closeMeMenu);
@@ -7621,12 +8017,13 @@ function openPerson(s, m) {
   const inVoice = state.voice && s.channels.some((c) => c.id === state.voice.channelId && c.voiceUsers?.includes(m.id));
   const sharing = inVoice ? state.sharing.get(m.id) : null;
   const top = rolesOf(s, m)[0];
-  const status = sharing?.screen ? 'Sharing their screen' : inVoice ? 'By the fire with you' : m.online ? 'Around' : 'Out in the woods';
+  const status = sharing?.screen ? 'Sharing their screen' : inVoice ? 'By the fire with you' : m.online ? STATUS_LABELS[statusOf(m)] : 'Out in the woods';
   modal(`<div class="person">
       <span class="avatar xl" id="person-avatar"></span>
       <div class="person-meta">
         <h2></h2>
         <span class="person-status${sharing?.screen ? ' live' : ''}">${escapeHtml(status)}</span>
+        ${presenceLine(m) ? `<span class="person-custom">${presenceLine(m, true)}</span>` : ''}
         ${isHost(s, m.id) ? '<span class="owner-badge">host</span>' : top ? `<span class="owner-badge role" style="--role:${escapeHtml(top.color)}">${escapeHtml(top.name)}</span>` : ''}
       </div>
     </div>

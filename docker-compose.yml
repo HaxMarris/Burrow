@@ -26,6 +26,10 @@ services:
       # GIF picker (see README).
       KLIPY_API_KEY: ${KLIPY_API_KEY:-}
       GIF_RATING: ${GIF_RATING:-}
+      SMTP_URL: ${SMTP_URL:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      PUSH_CONTACT: ${PUSH_CONTACT:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

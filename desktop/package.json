@@ -36,6 +36,7 @@
       "updater.js",
       "app-audio.js",
       "hotkeys.js",
+      "activity.js",
       "app/**/*"
     ],
     "win": {
