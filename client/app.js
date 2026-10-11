@@ -141,7 +141,70 @@ async function renderAuthMode() {
     try { needsCode = (await api('/api/config')).registrationCodeRequired; } catch {}
   }
   $('#reg-code-row').classList.toggle('hidden', !needsCode);
+  // "Forgot your password?" only where the server can send email.
+  let canEmail = false;
+  if (!registering && state.serverUrl) {
+    try { canEmail = (await api('/api/config')).email; } catch {}
+  }
+  $('#forgot-row').classList.toggle('hidden', registering || !canEmail);
 }
+
+// ---- forgot your password: a code to your confirmed email, then a new password
+
+let resetSent = false;
+function showReset(on) {
+  $('#auth-form').classList.toggle('hidden', on);
+  $('#reset-form').classList.toggle('hidden', !on);
+  resetSent = false;
+  $('#reset-step2').classList.add('hidden');
+  $('#reset-resend').classList.add('hidden');
+  $('#reset-submit').textContent = 'Email me a code';
+  $('#reset-subtitle').textContent = 'Burrow emails a code to the address you confirmed in your account settings.';
+  $('#reset-error').textContent = '';
+  if (on) {
+    $('#reset-username').value = $('#username').value.trim();
+    ($('#reset-username').value ? $('#reset-submit') : $('#reset-username')).focus();
+  }
+}
+$('#forgot-link').addEventListener('click', (e) => { e.preventDefault(); showReset(true); });
+$('#reset-back').addEventListener('click', (e) => { e.preventDefault(); showReset(false); });
+async function sendResetCode() {
+  const { minutes } = await api('/api/password/forgot', { method: 'POST', body: { username: $('#reset-username').value.trim() } });
+  resetSent = true;
+  $('#reset-step2').classList.remove('hidden');
+  $('#reset-resend').classList.remove('hidden');
+  $('#reset-submit').textContent = 'Set new password';
+  $('#reset-subtitle').textContent = `If that account has a confirmed email, a code is on its way. It works for ${minutes} minutes. Check your spam folder too.`;
+  $('#reset-code').focus();
+}
+$('#reset-resend').addEventListener('click', async (e) => {
+  e.preventDefault();
+  try { await sendResetCode(); $('#reset-error').textContent = ''; } catch (err) { $('#reset-error').textContent = err.message; }
+});
+$('#reset-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('#reset-error').textContent = '';
+  $('#reset-submit').disabled = true;
+  try {
+    if (!resetSent) return await sendResetCode();
+    const { token, user } = await api('/api/password/reset', {
+      method: 'POST',
+      body: { username: $('#reset-username').value.trim(), code: $('#reset-code').value.trim(), newPassword: $('#reset-password').value },
+    });
+    state.token = token;
+    state.me = user;
+    store.set('token', token);
+    store.set('serverUrl', state.serverUrl);
+    $('#reset-code').value = $('#reset-password').value = '';
+    showReset(false);
+    await enterApp();
+    toast('Password changed. Your other devices were logged out.');
+  } catch (err) {
+    $('#reset-error').textContent = err.message === 'Failed to fetch' ? "Couldn't reach that server." : err.message;
+  } finally {
+    $('#reset-submit').disabled = false;
+  }
+});
 
 $('#auth-toggle').addEventListener('click', (e) => {
   e.preventDefault();
@@ -2080,6 +2143,7 @@ function openAccount() {
     ${notificationSettings()}
     ${voiceSettings()}
     ${soundSettings()}
+    ${state.emailEnabled ? `<h3>Email</h3>${emailSettings()}` : ''}
     <h3>Change password</h3>
     <form id="password-form">
       <input type="text" autocomplete="username" value="${escapeHtml(state.me.username)}" hidden />
@@ -4423,8 +4487,8 @@ function wireSoundSettings() {
 // ---------------------------------------------------------------- presence, status and notifications
 //
 // Your status (online, away or do not disturb), a custom status, what the desktop app sees you
-// playing, the mentions inbox, the number on the app icon, quiet hours, and alerts while Burrow
-// is closed (push) or by email.
+// playing, the mentions inbox, the number on the app icon, quiet hours, alerts while Burrow is
+// closed (push), and the email address that resets a forgotten password.
 
 const STATUS_LABELS = { online: 'Online', away: 'Away', dnd: 'Do not disturb', offline: 'Offline' };
 const statusOf = (m) => (!m.online ? 'offline' : m.status && m.status !== 'offline' ? m.status : 'online');
@@ -4699,7 +4763,6 @@ function notificationSettings() {
       <label>To<input type="time" id="quiet-end" value="${minutesToTime(q?.end ?? 7 * 60)}" /></label>
     </div>
     <span class="small muted">No sounds or pop-ups then, and alerts on your phone arrive silently. Do not disturb (click your picture) silences everything until you switch it off.</span>
-    ${state.emailEnabled ? emailSettings() : ''}
     ${window.burrowDesktop?.activity ? `<label class="check"><input type="checkbox" id="share-activity" ${activityOn() ? 'checked' : ''} /> Show the game I'm playing</label>
     <span class="small muted">The desktop app spots games you run and shows "Playing …" under your name.</span>` : ''}`;
 }
@@ -4707,12 +4770,12 @@ function notificationSettings() {
 function emailSettings() {
   const me = state.me;
   return `<div class="email-settings" id="email-settings">
-    <label>Email for mentions you miss
+    <label>Your email, for resetting a forgotten password
       <div class="inline-form"><input type="email" id="email-address" placeholder="you@example.com" autocomplete="email" value="${escapeHtml(me.email ?? '')}" />
       <button type="button" class="btn secondary" id="email-send">${me.email ? (me.emailVerified ? 'Change' : 'Send code again') : 'Send code'}</button></div>
     </label>
     ${me.email && !me.emailVerified ? `<label>Code from the email<div class="inline-form"><input id="email-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="123456" /><button type="button" class="btn" id="email-verify">Confirm</button></div></label>` : ''}
-    ${me.email && me.emailVerified ? `<label class="check"><input type="checkbox" id="email-mentions" ${me.emailMentions ? 'checked' : ''} /> Email me @mentions and direct messages I haven't read after 15 minutes</label>
+    ${me.email && me.emailVerified ? `<span class="small muted">Confirmed. If you forget your password, "Forgot your password?" on the login screen emails a code here.</span>
       <button type="button" class="link-btn danger-link" id="email-remove">Remove my email</button>` : ''}
     <div class="error" id="email-error"></div>
   </div>`;
@@ -4733,10 +4796,6 @@ function wireEmailSettings() {
     catch (err) { fail(err); }
   });
   $('#email-code')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#email-verify').click(); } });
-  $('#email-mentions')?.addEventListener('change', async (e) => {
-    try { Object.assign(state.me, await api('/api/me', { method: 'PATCH', body: { emailMentions: e.target.checked } })); }
-    catch (err) { e.target.checked = !e.target.checked; fail(err); }
-  });
   $('#email-remove')?.addEventListener('click', async () => {
     try { redraw(await api('/api/me/email', { method: 'DELETE' })); } catch (err) { fail(err); }
   });

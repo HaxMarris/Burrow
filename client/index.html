@@ -36,6 +36,18 @@
       <p class="auth-tagline">A cozy corner of the internet for you and your friends.</p>
     </div>
     <div class="auth-side">
+      <form id="reset-form" class="auth-card hidden">
+        <h1>New password</h1>
+        <p class="muted" id="reset-subtitle">Burrow emails a code to the address you confirmed in your account settings.</p>
+        <label>Username <input id="reset-username" autocomplete="username" required /></label>
+        <div id="reset-step2" class="reset-step2 hidden">
+          <label>Code from the email <input id="reset-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="123456" /></label>
+          <label>New password <input id="reset-password" type="password" autocomplete="new-password" placeholder="At least 8 characters" /></label>
+        </div>
+        <div id="reset-error" class="error"></div>
+        <button type="submit" class="btn" id="reset-submit">Email me a code</button>
+        <p class="muted small center"><a href="#" id="reset-resend" class="hidden">Send another code</a> <a href="#" id="reset-back">Back to log in</a></p>
+      </form>
       <form id="auth-form" class="auth-card">
         <div id="invite-card" class="invite-card hidden" aria-live="polite"></div>
         <h1 id="auth-title">Welcome back</h1>
@@ -45,6 +57,7 @@
         </label>
         <label>Username <input id="username" autocomplete="username" required /></label>
         <label>Password <input id="password" type="password" autocomplete="current-password" required /></label>
+        <p class="forgot-row small hidden" id="forgot-row"><a href="#" id="forgot-link">Forgot your password?</a></p>
         <label id="reg-code-row" class="hidden">Registration code
           <input id="reg-code" placeholder="Ask whoever runs the server" />
         </label>
