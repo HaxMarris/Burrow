@@ -15,6 +15,7 @@ import { fetchEmbed, fetchImage, linksIn, type Embed, type EmbedOptions } from '
 import { newVapidKeys, sendPush, vapidKeysWork, type VapidKeys } from './push.ts';
 import { looksLikeEmail, sendMail, type MailConfig } from './mail.ts';
 import { hosting, type HostingOptions } from './hosting.ts';
+import { extras, voiceTimeTracker } from './extras.ts';
 import { checkTotp, hashRecovery, newRecoveryCodes, newTotpSecret, verifyAssertion, verifyRegistration, ZipWriter } from './account.ts';
 
 export interface AppOptions {
@@ -290,6 +291,7 @@ export function createApp(opts: AppOptions): Server {
       .prepare(
         `SELECT id, name, kind, owner_id AS ownerId, invite_code AS inviteCode, dm_key AS dmKey, description, rules,
                 welcome_channel_id AS welcomeChannelId, afk_channel_id AS afkChannelId, afk_minutes AS afkMinutes, live_channel_id AS liveChannelId,
+                COALESCE(fire_look, 'classic') AS fireLook,
                 CASE WHEN icon IS NULL THEN NULL ELSE '/api/burrow-pictures/' || icon END AS icon,
                 CASE WHEN banner IS NULL THEN NULL ELSE '/api/burrow-pictures/' || banner END AS banner
          FROM servers WHERE id = ?`,
@@ -338,7 +340,8 @@ export function createApp(opts: AppOptions): Server {
     const members = db
       .prepare(
         `SELECT u.id, u.username, u.display_name AS displayName, m.nickname, u.accent, ${avatarUrl('u.avatar')} AS avatar,
-                u.deleted_at IS NOT NULL AS deleted, m.voice_muted AS voiceMuted, m.timeout_until AS timeoutUntil, u.bot
+                u.deleted_at IS NOT NULL AS deleted, m.voice_muted AS voiceMuted, m.timeout_until AS timeoutUntil, u.bot,
+                u.birthday, u.fire_item AS fireItem
          FROM members m JOIN users u ON u.id = m.user_id
          WHERE m.server_id = ? ORDER BY u.username`,
       )
@@ -358,6 +361,7 @@ export function createApp(opts: AppOptions): Server {
       sounds: soundsOf(serverId),
       serverMuted: serverMuted(serverId, viewerId),
       ...(server.kind === 'burrow' ? moderationSummary(serverId, viewerId) : {}),
+      ...(server.kind === 'burrow' ? { motd: fun.motdOf(serverId) } : {}),
       ...(server.kind === 'dm' ? { seen: dmSeen(serverId, viewerId) } : {}),
       roles,
       members: members.map((m) => {
@@ -455,6 +459,7 @@ export function createApp(opts: AppOptions): Server {
   };
 
   // Who is in which voice room. The app reports joining and leaving; LiveKit carries the audio.
+  const voiceTime = voiceTimeTracker(db);
   const setVoice = (userId: number, channelId: number | null, flags?: { muted: boolean; deafened: boolean }) => {
     const prev = inVoice.get(userId);
     if (channelId === null) voiceFlags.delete(userId);
@@ -469,6 +474,7 @@ export function createApp(opts: AppOptions): Server {
     if (prev !== undefined) {
       endLive(userId);
       inVoice.delete(userId);
+      voiceTime.stop(userId);
       // The last one out puts the fire out: its chat (unless it's kept) and whatever was playing.
       if (!usersInVoice(prev).length) {
         fireside.delete(prev);
@@ -481,6 +487,7 @@ export function createApp(opts: AppOptions): Server {
     else {
       const channel = channelById(channelId)!;
       inVoice.set(userId, channelId);
+      voiceTime.start(userId, channel.serverId, channelId);
       lastActive.set(userId, Date.now());
       sendTo([userId], { type: 'fireside_history', channelId, messages: firesideHistory(channel) });
       if (listening.has(channelId)) sendTo([userId], listenEvent(channelId));
@@ -707,6 +714,12 @@ export function createApp(opts: AppOptions): Server {
       db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
       for (const ws of sockets.get(userId) ?? []) ws.close(4001, 'Signed out');
     },
+  });
+  const fun = extras({
+    db, route, fail: (status, message) => new HttpError(status, message),
+    isMember, can, canSee, channelById, inVoice, sendServerUpdate, broadcastToChannel,
+    allowed: (serverId, user, perm) => allowed(serverId, user as User, perm),
+    userChanged: (userId) => userChanged(userId),
   });
 
   route(
@@ -2051,6 +2064,18 @@ export function createApp(opts: AppOptions): Server {
     }
     setBurrowPicture(serverId, file, column);
     send(res, 200, serverSummary(serverId, user.id));
+  };
+  // A message of the day with a photo: the picture is the request body, its words are ?text=.
+  const handleMotdPicture = async (req: IncomingMessage, res: ServerResponse, serverId: number, url: URL) => {
+    const user = pictureUploader(req);
+    fun.canAddMotd(serverId, user);
+    const file = await savePicture(req, 'burrow-pictures', 'Photos');
+    try {
+      send(res, 200, fun.addMotd(serverId, user, url.searchParams.get('text') ?? '', file));
+    } catch (err) {
+      unlink(picturePath('burrow-pictures', file)).catch(() => {});
+      throw err;
+    }
   };
   route('DELETE', '/api/servers/:id/picture', ({ user, params }) => {
     const serverId = Number(params[0]);
@@ -3945,8 +3970,8 @@ export function createApp(opts: AppOptions): Server {
 
   const MAX_BIO = 190;
   const profileOf = (userId: number) => {
-    const r = db.prepare('SELECT display_name, bio, banner, accent, created_at FROM users WHERE id = ?').get(userId) as
-      | { display_name: string | null; bio: string; banner: string | null; accent: string | null; created_at: number }
+    const r = db.prepare('SELECT display_name, bio, banner, accent, created_at, birthday, fire_item FROM users WHERE id = ?').get(userId) as
+      | { display_name: string | null; bio: string; banner: string | null; accent: string | null; created_at: number; birthday: string | null; fire_item: string | null }
       | undefined;
     return {
       displayName: r?.display_name ?? null,
@@ -3954,6 +3979,8 @@ export function createApp(opts: AppOptions): Server {
       banner: r?.banner ? `/api/avatars/${r.banner}` : null,
       accent: r?.accent ?? null,
       joinedAt: r?.created_at ?? null,
+      birthday: r?.birthday ?? null,
+      fireItem: r?.fire_item ?? null,
     };
   };
 
@@ -3961,13 +3988,21 @@ export function createApp(opts: AppOptions): Server {
   const userChanged = (userId: number) => {
     const u = userById(userId)!;
     const p = profileOf(userId);
-    const updated = { ...u, accent: p.accent };
+    const updated = { ...u, accent: p.accent, birthday: p.birthday, fireItem: p.fireItem };
     sendTo(new Set([userId, ...usersSharingServerWith(userId), ...friendIds(userId), ...pendingIds(userId)]), { type: 'user_updated', user: updated });
     sendTo([userId], { type: 'me_updated', me: meJson(u) });
     return updated;
   };
 
-  /** Display name, bio and accent colour, from PATCH /api/me. */
+  /** A birthday is a month and day ('03-12'); the year stays private by never being asked. */
+  const cleanBirthday = (value: unknown) => {
+    const m = typeof value === 'string' ? /^(\d{2})-(\d{2})$/.exec(value) : null;
+    const month = Number(m?.[1]), day = Number(m?.[2]);
+    // 2024 is a leap year, so 29 February is allowed.
+    if (!m || month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(2024, month, 0)).getUTCDate()) throw new HttpError(400, 'Pick a month and day');
+    return value as string;
+  };
+  /** Display name, bio, birthday and accent colour, from PATCH /api/me. */
   const updateProfile = (user: User, body: Json) => {
     let changed = false;
     if (body.displayName !== undefined) {
@@ -3980,6 +4015,10 @@ export function createApp(opts: AppOptions): Server {
       const bio = typeof body.bio === 'string' ? body.bio.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim() : '';
       if (bio.length > MAX_BIO) throw new HttpError(400, `Keep your about me to ${MAX_BIO} characters`);
       db.prepare('UPDATE users SET bio = ? WHERE id = ?').run(bio, user.id);
+      changed = true;
+    }
+    if (body.birthday !== undefined) {
+      db.prepare('UPDATE users SET birthday = ? WHERE id = ?').run(body.birthday === null || body.birthday === '' ? null : cleanBirthday(body.birthday), user.id);
       changed = true;
     }
     if (body.accent !== undefined) {
@@ -4479,7 +4518,7 @@ export function createApp(opts: AppOptions): Server {
       try { db.prepare(`DELETE FROM ${t} WHERE ${col} = ?`).run(user.id); } catch { /* a table this server doesn't have */ }
     }
     db.prepare(
-      `UPDATE users SET username = ?, display_name = 'Deleted user', password_hash = '!', avatar = NULL, banner = NULL, bio = '', accent = NULL,
+      `UPDATE users SET username = ?, display_name = 'Deleted user', password_hash = '!', avatar = NULL, banner = NULL, bio = '', accent = NULL, birthday = NULL, fire_item = NULL,
          email = NULL, email_verified = 0, email_code = NULL, reset_code = NULL, reset_link = NULL, totp_secret = NULL, totp_pending = NULL,
          recovery_codes = '[]', status_text = NULL, status_emoji = NULL, deleted_at = ? WHERE id = ?`,
     ).run(`deleted-${user.id}-${randomBytes(4).toString('hex')}`, now(), user.id);
@@ -4601,6 +4640,8 @@ export function createApp(opts: AppOptions): Server {
       if (req.method === 'GET' && url.pathname === '/api/me/export') return await handleExport(req, res);
       const burrowUpload = req.method === 'POST' && url.pathname.match(/^\/api\/servers\/(\d+)\/(picture|banner)$/);
       if (burrowUpload) return await handleBurrowPictureUpload(req, res, Number(burrowUpload[1]), burrowUpload[2] === 'banner' ? 'banner' : 'icon');
+      const motdUpload = req.method === 'POST' && url.pathname.match(/^\/api\/servers\/(\d+)\/motd\/picture$/);
+      if (motdUpload) return await handleMotdPicture(req, res, Number(motdUpload[1]), url);
       const emojiUpload = req.method === 'POST' && url.pathname.match(/^\/api\/servers\/(\d+)\/emoji$/);
       if (emojiUpload) return await handleEmojiUpload(req, res, Number(emojiUpload[1]), url);
       const soundUpload = req.method === 'POST' && url.pathname.match(/^\/api\/servers\/(\d+)\/sounds$/);

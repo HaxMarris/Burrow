@@ -463,6 +463,7 @@ function openAccount(tab = store.get('accountTab') || 'profile') {
         <label>Display name<input id="profile-name" maxlength="32" placeholder="${escapeHtml(me.username)}" value="${escapeHtml(me.displayName ?? '')}" /></label>
         <span class="small muted">What people see. You still log in as ${escapeHtml(me.username)}, and people @mention you as @${escapeHtml(me.username)}.</span>
         <label>About me<textarea id="profile-bio" maxlength="190" rows="3" placeholder="A line or two about you">${escapeHtml(me.bio ?? '')}</textarea></label>
+        ${birthdayField(me.birthday)}
         <div class="accent-row">
           <label class="accent-pick">Card colour<input type="color" id="profile-accent" value="${escapeHtml(me.accent || '#4f8a5b')}" /></label>
           <label class="check"><input type="checkbox" id="profile-accent-off" ${me.accent ? '' : 'checked'} /> No colour</label>
@@ -566,9 +567,10 @@ function wireProfileSettings() {
     const box = $('#profile-preview');
     if (!box) return;
     const accent = $('#profile-accent-off').checked ? null : $('#profile-accent').value;
-    box.replaceChildren(profileHeader({ ...me, displayName: $('#profile-name').value.trim() || null, bio: $('#profile-bio').value, accent }, null));
+    box.replaceChildren(profileHeader({ ...me, displayName: $('#profile-name').value.trim() || null, bio: $('#profile-bio').value, accent, birthday: readBirthday() }, null));
   };
   preview();
+  for (const id of ['#profile-bday-month', '#profile-bday-day']) $(id).addEventListener('change', preview);
   for (const id of ['#profile-name', '#profile-bio', '#profile-accent']) $(id).addEventListener('input', () => {
     if (id === '#profile-accent') $('#profile-accent-off').checked = false;
     preview();
@@ -580,7 +582,7 @@ function wireProfileSettings() {
     try {
       Object.assign(state.me, await api('/api/me', {
         method: 'PATCH',
-        body: { displayName: $('#profile-name').value, bio: $('#profile-bio').value, accent: $('#profile-accent-off').checked ? null : $('#profile-accent').value },
+        body: { displayName: $('#profile-name').value, bio: $('#profile-bio').value, birthday: readBirthday(), accent: $('#profile-accent-off').checked ? null : $('#profile-accent').value },
       }));
       $('#me-name').textContent = state.me.displayName || state.me.username;
       toast('Profile saved.');

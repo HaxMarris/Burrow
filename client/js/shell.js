@@ -51,7 +51,8 @@ function rememberAvatars(server) {
 // Someone (maybe us) changed their picture.
 function applyUser(u) {
   state.avatars.set(u.id, u.avatar);
-  const fields = { avatar: u.avatar, ...(u.username ? { username: u.username, displayName: u.displayName ?? null } : {}), ...('accent' in u ? { accent: u.accent } : {}) };
+  const fields = { avatar: u.avatar, ...(u.username ? { username: u.username, displayName: u.displayName ?? null } : {}), ...('accent' in u ? { accent: u.accent } : {}),
+    ...('birthday' in u ? { birthday: u.birthday } : {}), ...('fireItem' in u ? { fireItem: u.fireItem } : {}) };
   for (const s of state.servers.values()) for (const m of s.members) if (m.id === u.id) Object.assign(m, fields);
   for (const list of Object.values(state.friends ?? {})) for (const f of list) if (f.id === u.id) Object.assign(f, fields);
   if (u.id === state.me?.id) {
@@ -212,6 +213,12 @@ function profileHeader(p, s) {
     names.append(sub);
   }
   el.append(banner, av, names);
+  if (p.birthday && !p.deleted) {
+    const b = document.createElement('p');
+    b.className = 'profile-birthday';
+    b.textContent = `🎂 ${birthdayText(p.birthday)}${isBirthdayToday(p.birthday) ? ', today!' : ''}`;
+    el.append(b);
+  }
   if (p.bio) {
     const bio = document.createElement('p');
     bio.className = 'profile-bio';

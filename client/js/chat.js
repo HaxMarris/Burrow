@@ -509,6 +509,8 @@ $('#server-menu-btn').onclick = () => {
       ${can(s, 'messages') ? `<button class="btn secondary" id="open-reports">Reports${s.openReports ? ` · ${s.openReports}` : ''}</button>` : ''}
       ${can(s, 'audit') ? '<button class="btn secondary" id="open-audit">Audit log</button>' : ''}
       ${can(s, 'burrow') ? '<button class="btn secondary" id="open-bots">Bots and webhooks</button>' : ''}
+      ${can(s, 'burrow') ? `<button class="btn secondary" id="open-motd">Message of the day${s.motd?.length ? ` · ${s.motd.length}` : ''}</button>` : ''}
+      <button class="btn secondary" id="open-review">Year in review</button>
       ${can(s, 'roles') ? `<button class="btn secondary" id="open-roles">Roles${s.roles.length ? ` · ${s.roles.length}` : ''}</button>` : ''}
       ${can(s, 'emoji') && state.maxUploadBytes ? `<button class="btn secondary" id="open-emoji">Emoji and stickers${s.emoji?.length ? ` · ${s.emoji.length}` : ''}</button>
         <button class="btn secondary" id="open-sounds">Soundboard${s.sounds?.length ? ` · ${s.sounds.length}` : ''}</button>` : ''}
@@ -527,6 +529,8 @@ $('#server-menu-btn').onclick = () => {
   $('#open-reports')?.addEventListener('click', () => openReports(s.id));
   $('#open-audit')?.addEventListener('click', () => openAudit(s.id));
   $('#open-bots')?.addEventListener('click', () => openBots(s.id));
+  $('#open-motd')?.addEventListener('click', () => openMotd(s.id));
+  $('#open-review').onclick = () => openYearReview(s.id);
   $('#open-emoji')?.addEventListener('click', () => openEmojiManager(s.id));
   $('#open-sounds')?.addEventListener('click', () => openSounds(s.id));
   $('#leave-server').onclick = async () => {

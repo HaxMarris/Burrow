@@ -56,6 +56,14 @@
     try { d = JSON.parse(localStorage.getItem('display')) || {}; } catch {}
     root.dataset.density = d.compact ? 'compact' : 'cozy';
     root.dataset.motion = d.motion === 'reduce' ? 'reduce' : d.motion === 'full' ? 'full' : 'system';
+    // The time of year (northern hemisphere), and a few holidays, for the seasonal touches.
+    const now = new Date(), month = now.getMonth() + 1, md = month * 100 + now.getDate();
+    const off = d.seasons === 'off';
+    root.dataset.season = off ? 'none' : month === 12 || month <= 2 ? 'winter' : month <= 5 ? 'spring' : month <= 8 ? 'summer' : 'autumn';
+    const holiday = off ? '' : md >= 1024 && md <= 1031 ? 'halloween' : md >= 1218 && md <= 1226 ? 'yule'
+      : md >= 1231 || md <= 101 ? 'newyear' : md >= 620 && md <= 624 ? 'midsummer' : '';
+    if (holiday) root.dataset.holiday = holiday;
+    else delete root.dataset.holiday;
     const size = Number(d.textSize) || 100;
     // The desktop app zooms the whole window itself, which is sharper; browsers use CSS zoom.
     if (window.burrowDesktop?.setZoom) window.burrowDesktop.setZoom(size / 100);

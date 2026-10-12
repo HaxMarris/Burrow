@@ -115,7 +115,7 @@
     <a class="skip-link" href="#composer-input">Skip to the message box</a>
     <div id="offline-bar" class="offline-bar hidden" role="status">You're offline. Showing what was saved on this device; messages you write go out when you're back.</div>
     <header class="topbar">
-      <div class="brand"><span class="logo-mark"></span><span class="brand-name">Peiskos</span></div>
+      <div class="brand"><span class="logo-mark"></span><span class="brand-name">Peiskos</span><span class="season-mark" aria-hidden="true"></span></div>
       <nav class="burrow-nav" id="burrow-nav" aria-label="Your hearths"></nav>
       <button class="burrow-switch" id="burrow-switch" aria-haspopup="dialog" aria-expanded="false">
         <span class="tile" id="switch-tile"></span>
@@ -152,6 +152,7 @@
       </div>
       <div class="side-scroll">
         <ul id="fire-main"></ul>
+        <div id="hearth-today" class="hearth-today hidden"></div>
         <div id="events-section" class="hidden">
           <div class="section-title">
             <span>Events</span>
@@ -294,6 +295,9 @@
                 <h1 id="stage-title"></h1>
                 <span class="fire-sub"><span class="fire-lock hidden" id="fire-lock"><svg viewBox="0 0 24 24"><path d="M7 10V7a5 5 0 0 1 10 0v3h1a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h1Zm2 0h6V7a3 3 0 0 0-6 0v3Z"/></svg>Encrypted</span><span id="fire-count"></span></span>
               </div>
+              <button class="icon-btn" id="fire-decor" title="Decorations and marshmallows" aria-label="Decorations and marshmallows">
+                <svg viewBox="0 0 24 24"><path d="M12 2c1 3 4 4.5 4 8a4 4 0 0 1-8 0c0-1.5.6-2.6 1.4-3.4.2 1.2.8 2 1.6 2.4C10.6 6.6 11 4 12 2ZM3 17.5l17-3 .6 3.2-17 3-.6-3.2Zm.6-1.7 1.2-1.5 15.8 4.2-.5 1.9-16.5-4.6Z"/></svg>
+              </button>
               <button class="btn secondary hidden" id="stage-video">All video</button>
               <button class="icon-btn fire-chat-open" id="fire-chat-open" title="Show the fireside chat" aria-label="Show the fireside chat">
                 <svg viewBox="0 0 24 24"><path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9l-5 4V5a1 1 0 0 1 1-1Z"/></svg>
@@ -303,6 +307,7 @@
             </header>
             <div class="fire-ring-wrap">
               <div class="fire-ring" id="fire-ring">
+                <div class="season-layer" id="season-layer" aria-hidden="true"></div>
                 <div class="fire-glow outer"></div>
                 <div class="fire-glow inner"></div>
                 <svg class="fire-core" viewBox="0 0 200 220" aria-hidden="true">
@@ -316,10 +321,22 @@
                     <rect x="12" y="180" width="176" height="20" rx="10" fill="url(#fire-log)" transform="rotate(-9 100 190)"/>
                     <rect x="12" y="180" width="176" height="20" rx="10" fill="url(#fire-log)" transform="rotate(9 100 190)"/>
                   </g>
+                  <g class="birch-marks" fill="#3b3430">
+                    <rect x="30" y="185" width="12" height="3" rx="1.5" transform="rotate(-9 100 190)"/><rect x="62" y="193" width="8" height="3" rx="1.5" transform="rotate(-9 100 190)"/>
+                    <rect x="150" y="186" width="14" height="3" rx="1.5" transform="rotate(-9 100 190)"/><rect x="40" y="194" width="9" height="3" rx="1.5" transform="rotate(9 100 190)"/>
+                    <rect x="128" y="185" width="12" height="3" rx="1.5" transform="rotate(9 100 190)"/><rect x="165" y="192" width="8" height="3" rx="1.5" transform="rotate(9 100 190)"/>
+                  </g>
+                  <g class="fire-snow" fill="#fbfdff">
+                    <rect x="14" y="176" width="44" height="8" rx="4" transform="rotate(-9 100 190)"/><rect x="150" y="176" width="36" height="8" rx="4" transform="rotate(9 100 190)"/>
+                    <rect x="20" y="177" width="30" height="7" rx="3.5" transform="rotate(9 100 190)"/><rect x="146" y="177" width="40" height="7" rx="3.5" transform="rotate(-9 100 190)"/>
+                  </g>
                   <path class="fire-flame outer" fill="url(#fire-outer)" d="M100 14c4 30 14 48 22 64 3-10 3-20 0-30 20 18 32 46 32 84 0 38-24 66-54 66s-54-28-54-64c0-30 16-50 30-66 2 14 7 24 14 30-4-34 0-62 10-84Z"/>
                   <path class="fire-flame inner" fill="url(#fire-inner)" d="M104 102c10 16 26 30 26 58 0 22-13 36-30 36s-30-14-30-34c0-16 8-26 16-34 1 8 4 13 8 16-2-16 2-30 10-42Z"/>
                   <ellipse cx="100" cy="186" rx="34" ry="14" fill="url(#fire-base)"/>
                 </svg>
+                <div class="fire-sparks" id="fire-sparks" aria-hidden="true"></div>
+                <div class="fire-holiday" aria-hidden="true"></div>
+                <div class="marshmallow" id="marshmallow" aria-hidden="true"></div>
                 <div class="fire-notes" id="fire-notes" aria-live="polite"></div>
               </div>
             </div>
@@ -462,6 +479,7 @@
   <script src="js/organization.js"></script>
   <script src="js/apps.js"></script>
   <script src="js/hosting.js"></script>
+  <script src="js/extras.js"></script>
   <script src="js/shell.js"></script>
 </body>
 </html>

@@ -1470,3 +1470,144 @@ kbd { display: inline-block; padding: 2px 7px; border: 1px solid var(--line); bo
 @media (max-width: 600px) {
   .admin-stats { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ---- fun extras: seasons, fire decorations, marshmallows, birthdays, message of the day, year in review ---- */
+
+/* A little mark by the name for the time of year. */
+.season-mark { margin-left: 6px; font-size: 15px; }
+[data-season="winter"] .season-mark::after { content: '❄️'; }
+[data-season="spring"] .season-mark::after { content: '🌸'; }
+[data-season="summer"] .season-mark::after { content: '☀️'; }
+[data-season="autumn"] .season-mark::after { content: '🍂'; }
+[data-holiday="halloween"] .season-mark::after { content: '🎃'; }
+[data-holiday="yule"] .season-mark::after { content: '🎄'; }
+[data-holiday="newyear"] .season-mark::after { content: '🎆'; }
+[data-holiday="midsummer"] .season-mark::after { content: '🌼'; }
+
+/* Whatever is falling or floating around the fire. */
+.season-layer { position: absolute; inset: -4% -2%; overflow: hidden; pointer-events: none; border-radius: 40%; }
+.season-layer span { position: absolute; left: var(--x); top: -6%; width: calc(7px * var(--s)); height: calc(7px * var(--s)); animation: season-fall var(--d) linear var(--delay) infinite; }
+@keyframes season-fall { from { top: -6%; translate: 0 0; rotate: 0deg; } 50% { translate: 18px 0; } to { top: 104%; translate: -6px 0; rotate: 300deg; } }
+[data-season="winter"] .season-layer span, [data-holiday="yule"] .season-layer span { border-radius: 50%; background: #fff; box-shadow: 0 0 6px rgba(255, 255, 255, .8); opacity: .85; }
+[data-season="autumn"] .season-layer span, [data-holiday="halloween"] .season-layer span { width: calc(11px * var(--s)); height: calc(11px * var(--s)); border-radius: 0 80% 0 80%; background: #c8642a; opacity: .9; }
+[data-season="autumn"] .season-layer span:nth-child(3n), [data-holiday="halloween"] .season-layer span:nth-child(3n) { background: #e0a43a; }
+[data-season="autumn"] .season-layer span:nth-child(4n) { background: #9e3b2a; }
+[data-holiday="halloween"] .season-layer span:nth-child(4n) { background: #7a4bb0; }
+[data-season="spring"] .season-layer span { width: calc(9px * var(--s)); height: calc(7px * var(--s)); border-radius: 60% 0 60% 0; background: #f5b8cc; opacity: .9; }
+/* Summer (and midsummer night): fireflies drifting about instead of falling. */
+[data-season="summer"] .season-layer span, [data-holiday="midsummer"] .season-layer span { top: var(--y); width: 5px; height: 5px; border-radius: 50%; background: #f9f871; box-shadow: 0 0 10px 3px rgba(249, 248, 113, .55); animation: firefly var(--d) ease-in-out var(--delay) infinite; }
+@keyframes firefly { 0%, 100% { translate: 0 0; opacity: 0; } 20% { opacity: 1; } 50% { translate: 26px -30px; opacity: .3; } 70% { opacity: 1; } }
+[data-holiday="newyear"] .season-layer span { top: var(--y); border-radius: 50%; background: #f6d36b; box-shadow: 0 0 8px 2px rgba(246, 211, 107, .7); animation: sparkle var(--d) ease-in-out var(--delay) infinite; }
+@keyframes sparkle { 0%, 100% { scale: 0; opacity: 0; } 50% { scale: 1.3; opacity: 1; } }
+[data-motion="reduce"] .season-layer, [data-motion="reduce"] .fire-sparks { display: none; }
+@media (prefers-reduced-motion: reduce) { [data-motion="system"] .season-layer, [data-motion="system"] .fire-sparks { display: none; } }
+
+/* Snow on the logs in winter, and a holiday guest or two by the fire. */
+.fire-snow, .birch-marks { display: none; }
+[data-season="winter"] .fire-snow { display: inline; }
+.fire-holiday { position: absolute; left: 50%; top: 66%; translate: -50% 0; display: flex; gap: 70px; font-size: 26px; pointer-events: none; }
+[data-holiday="halloween"] .fire-holiday::before { content: '🎃'; } [data-holiday="halloween"] .fire-holiday::after { content: '🦇'; }
+[data-holiday="yule"] .fire-holiday::before { content: '🎁'; } [data-holiday="yule"] .fire-holiday::after { content: '🎄'; }
+[data-holiday="newyear"] .fire-holiday::before { content: '🥂'; } [data-holiday="newyear"] .fire-holiday::after { content: '🎉'; }
+[data-holiday="midsummer"] .fire-holiday::before { content: '🌼'; } [data-holiday="midsummer"] .fire-holiday::after { content: '🌿'; }
+
+/* How a hearth's fire burns, unlocked by time around it. */
+.fire-ring[data-look="birch"] .birch-marks { display: inline; }
+.fire-ring[data-look="birch"] #fire-log stop:first-child { stop-color: #f4f1ea; }
+.fire-ring[data-look="birch"] #fire-log stop:last-child { stop-color: #cfc6b6; }
+.fire-ring[data-look="aurora"] { --glow: #5fe0b0; --ember: #2f9e8f; }
+.fire-ring[data-look="aurora"] #fire-outer stop:nth-child(1) { stop-color: #3fb6a8; }
+.fire-ring[data-look="aurora"] #fire-outer stop:nth-child(2) { stop-color: #6be29b; }
+.fire-ring[data-look="aurora"] #fire-outer stop:nth-child(3) { stop-color: #b9f5c9; }
+.fire-ring[data-look="aurora"] #fire-inner stop:nth-child(2) { stop-color: #d8ffe6; }
+.fire-ring[data-look="aurora"] #fire-inner stop:nth-child(3) { stop-color: #7fe3c0; }
+.fire-ring[data-look="blue"] { --glow: #6fb3ff; --ember: #3a6fd8; }
+.fire-ring[data-look="blue"] #fire-outer stop:nth-child(1) { stop-color: #2b5fd9; }
+.fire-ring[data-look="blue"] #fire-outer stop:nth-child(2) { stop-color: #4f9cf5; }
+.fire-ring[data-look="blue"] #fire-outer stop:nth-child(3) { stop-color: #a9dcff; }
+.fire-ring[data-look="blue"] #fire-inner stop:nth-child(2) { stop-color: #d6efff; }
+.fire-ring[data-look="blue"] #fire-inner stop:nth-child(3) { stop-color: #7cc1ff; }
+.fire-sparks { position: absolute; inset: 0; pointer-events: none; }
+.fire-sparks span { position: absolute; left: var(--x); top: 50%; width: 4px; height: 4px; border-radius: 50%; background: #ffcf6b; box-shadow: 0 0 6px 2px rgba(255, 170, 60, .7); animation: spark-rise var(--d) ease-out var(--delay) infinite; }
+@keyframes spark-rise { from { translate: 0 0; opacity: 1; } to { translate: var(--drift) -150px; opacity: 0; scale: .3; } }
+
+/* Things by people's seats. */
+.seat-item { position: absolute; right: -6px; bottom: -4px; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; background: var(--surface); box-shadow: var(--shadow); font-size: 17px; line-height: 1; }
+.fire-ring.crowded .seat-item { width: 24px; height: 24px; font-size: 14px; }
+.fire-core { cursor: pointer; }
+
+/* A marshmallow on a stick, toasted over the flame. */
+.marshmallow { position: absolute; left: 50%; top: 44%; width: 0; height: 0; pointer-events: none; opacity: 0; }
+.marshmallow::before { content: ''; position: absolute; left: 14px; top: 6px; width: 90px; height: 3px; border-radius: 2px; background: #7b5a3c; rotate: -12deg; transform-origin: left center; }
+.marshmallow::after { content: ''; position: absolute; left: -6px; top: -4px; width: 22px; height: 18px; border-radius: 7px; background: #fffaf0; box-shadow: inset 0 -3px 0 rgba(0, 0, 0, .08); }
+.marshmallow.go { animation: toast-in 3.2s ease-out forwards; }
+.marshmallow.go::after { animation: toast-golden 3.2s ease-out forwards; }
+.marshmallow.go.perfect::after { animation-name: toast-perfect; }
+.marshmallow.go.burnt::after { animation-name: toast-burnt; }
+.marshmallow.go.sticky::after { animation-name: toast-sticky; }
+.marshmallow.go.dropped { animation-name: toast-drop; }
+@keyframes toast-in { 0% { opacity: 0; translate: 80px 10px; } 15%, 80% { opacity: 1; translate: 0 0; } 100% { opacity: 0; translate: 60px -6px; } }
+@keyframes toast-drop { 0% { opacity: 0; translate: 80px 10px; } 15%, 45% { opacity: 1; translate: 0 0; } 70% { opacity: 1; translate: 0 70px; } 100% { opacity: 0; translate: 0 80px; } }
+@keyframes toast-golden { 0%, 20% { background: #fffaf0; } 75%, 100% { background: #e7ad5f; } }
+@keyframes toast-perfect { 0%, 20% { background: #fffaf0; } 75%, 100% { background: #d38d3d; box-shadow: 0 0 10px #ffd27a; } }
+@keyframes toast-burnt { 0%, 20% { background: #fffaf0; } 45% { background: #c46b2a; } 60%, 100% { background: #2a1c14; box-shadow: 0 -6px 12px #ff7a2a; } }
+@keyframes toast-sticky { 0%, 20% { background: #fffaf0; border-radius: 7px; } 100% { background: #f4dcb0; border-radius: 40% 60% 30% 70%; scale: 1.25 .8; } }
+[data-motion="reduce"] .marshmallow { display: none; }
+@media (prefers-reduced-motion: reduce) { [data-motion="system"] .marshmallow { display: none; } }
+
+/* Decorations picker. */
+.modal-card.decor-modal { max-width: 600px; }
+.decor-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; }
+.decor-pick { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 6px; border: 2px solid transparent; border-radius: 14px; background: var(--surface-2); color: var(--text); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; text-align: center; }
+.decor-pick:hover:not(:disabled) { border-color: var(--line); }
+.decor-pick.chosen { border-color: var(--accent); background: var(--accent-soft); }
+.decor-pick:disabled { cursor: default; opacity: .55; }
+.decor-art { font-size: 28px; line-height: 1.2; }
+
+/* Birthdays. */
+.cake { font-size: 13px; }
+.profile-birthday { margin: 0; padding: 0 16px; font-size: 14px; color: var(--muted); }
+.birthday-row { display: flex; gap: 8px; align-items: flex-end; }
+.birthday-row label:first-child { flex: 1; }
+
+/* The hearth today: birthdays, the message of the day, the year in review. */
+.hearth-today { display: flex; flex-direction: column; gap: 8px; margin: 2px 4px 12px; }
+.today-birthday, .today-motd { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); font-size: 14px; }
+.today-birthday { background: var(--mention-bg); flex-wrap: wrap; }
+.today-cake { font-size: 20px; }
+.today-birthday > span:nth-child(2) { flex: 1; min-width: 0; }
+.today-motd { position: relative; flex-direction: column; align-items: stretch; padding-right: 34px; }
+.today-motd p { margin: 0; overflow-wrap: anywhere; }
+.today-photo { padding: 0; border: 0; background: none; cursor: zoom-in; }
+.today-photo img { display: block; width: 100%; max-height: 160px; object-fit: cover; border-radius: 10px; }
+.today-hide { position: absolute; right: 4px; top: 4px; padding: 4px; font-size: 12px; }
+.today-review { padding: 9px 12px; border: 1px dashed var(--line); border-radius: 14px; background: none; color: var(--text-strong); font: inherit; font-size: 14px; font-weight: 700; text-align: left; cursor: pointer; }
+.today-review:hover { background: var(--hover); }
+.motd-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.motd-list li { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 12px; background: var(--surface-2); }
+.motd-list img { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; flex: none; }
+.motd-text { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+
+/* The year in review. */
+.modal-card.review-modal { max-width: 620px; }
+.review-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.review-kicker { width: 100%; font-size: 13px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--ember); }
+.review-head h2 { flex: 1; font-size: 30px; }
+.review-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.review-stats div { display: flex; flex-direction: column; align-items: center; padding: 14px 6px; border-radius: 14px; background: linear-gradient(160deg, color-mix(in srgb, var(--ember) 16%, var(--surface-2)), var(--surface-2)); text-align: center; }
+.review-stats b { font-size: 28px; color: var(--text-strong); }
+.review-stats span { font-size: 12px; color: var(--muted); }
+.review-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; }
+.review-grid h3, .review-loved h3, .review-you h3 { margin: 0 0 4px; font-size: 15px; }
+.review-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 3px; font-size: 14px; }
+.review-list li > span:first-child { display: inline-block; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.review-list li > span.muted { float: right; }
+.review-emoji { display: flex; flex-wrap: wrap; gap: 6px; font-size: 24px; }
+.review-emoji span { display: inline-flex; align-items: baseline; gap: 2px; }
+.review-emoji small { font-size: 12px; color: var(--muted); }
+.review-emoji .cemoji { width: 26px; height: 26px; }
+.review-loved blockquote { margin: 0 0 2px; padding: 8px 12px; border-left: 3px solid var(--ember); border-radius: 0 10px 10px 0; background: var(--surface-2); overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .review-grid { grid-template-columns: 1fr; }
+  .review-stats b { font-size: 22px; }
+}

@@ -313,6 +313,7 @@ function renderChannels() {
   $('#add-channel').title = state.inDms ? 'New message' : 'New room, heading or order';
   renderBurrowHead(state.inDms ? null : s);
   renderEvents(state.inDms ? null : s);
+  renderToday(state.inDms ? null : s);
   if (state.inDms) {
     $('#archived-section').classList.add('hidden');
     return renderDmList();
@@ -530,6 +531,7 @@ function renderMembers() {
         const color = roleColor(s, m.id);
         if (color) name.style.color = color;
         if (m.bot) name.insertAdjacentHTML('beforeend', ' <span class="bot-tag">BOT</span>');
+        if (isBirthdayToday(m.birthday)) name.insertAdjacentHTML('beforeend', ' <span class="cake" title="Birthday today">🎂</span>');
         text.append(name);
         const sub = presenceLine(m);
         if (sub) {

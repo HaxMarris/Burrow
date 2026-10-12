@@ -170,7 +170,7 @@ export function hosting(ctx: HostingContext) {
     };
     for (const r of db.prepare('SELECT id FROM attachments').all() as { id: string }[]) keep.get('')!.add(r.id).add(`${r.id}.thumb`);
     add('avatars', 'SELECT avatar AS f FROM users UNION SELECT banner FROM users');
-    add('burrow-pictures', 'SELECT icon AS f FROM servers UNION SELECT banner FROM servers');
+    add('burrow-pictures', 'SELECT icon AS f FROM servers UNION SELECT banner FROM servers UNION SELECT picture FROM motd');
     add('emoji', 'SELECT file AS f FROM custom_emoji');
     add('sounds', 'SELECT file AS f FROM sounds');
     const cutoff = now() - 3600_000;
