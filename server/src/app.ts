@@ -1,11 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { writeFile, mkdir, unlink, stat, copyFile, readFile } from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomInt } from 'node:crypto';
 import { extname, join, normalize } from 'node:path';
-import { BlockList, isIP } from 'node:net';
 import { WebSocketServer, WebSocket } from 'ws';
-import { addModeratorRole, tokenHash, type Db } from './db.ts';
+import { addModeratorRole, inTransaction, tokenHash, withStatementCache, type Db } from './db.ts';
+import { APP_CSP, HttpError, MIME, bearer, clientIp, readBody, readLimited, sameText, send, type Json } from './http.ts';
+import { AVATAR_TYPES, INLINE_TYPES, MAX_AVATAR_BYTES, MAX_SOUND_BYTES, SOUND_TYPES } from './media.ts';
 import { hashPassword, verifyPassword, newToken, newInviteCode } from './auth.ts';
 import { closeRoom, removeFromRoom, setCanSpeak, voiceToken, type VoiceOptions } from './voice.ts';
 import { staticFiles } from './static.ts';
@@ -64,16 +65,6 @@ type Channel = {
 };
 const CHANNEL_COLS = `id, server_id AS serverId, name, kind, private, parent_id AS parentId,
   slow_seconds AS slow, announce, archived_at AS archivedAt, user_limit AS userLimit, keep_chat AS keepChat`;
-type Json = Record<string, unknown>;
-
-class HttpError extends Error {
-  status: number;
-  constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
-  }
-}
-
 const MAX_MESSAGE_LENGTH = 4000;
 const MAX_ATTACHMENTS = 10;
 const MAX_REACTIONS = 20; // different emoji on one message
@@ -84,116 +75,11 @@ const MAX_RULES = 2000;
 const MAX_GROUP_DM = 10; // people in a group conversation
 const MAX_FOLDERS = 20;
 const SESSION_IDLE_MS = 30 * 24 * 60 * 60 * 1000; // logins unused for 30 days expire
-const APP_CSP = [
-  "default-src 'self'",
-  // Noise suppression runs as WebAssembly.
-  "script-src 'self' 'wasm-unsafe-eval'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
-  "media-src 'self' blob:",
-  "font-src 'self'",
-  // Voice may live on another address (LIVEKIT_URL).
-  "connect-src 'self' https: wss: ws:",
-  "worker-src 'self' blob:",
-  // Listen together plays YouTube in its privacy-enhanced player.
-  "frame-src https://www.youtube-nocookie.com",
-  "object-src 'none'",
-  "base-uri 'none'",
-  "form-action 'self'",
-  "frame-ancestors 'none'",
-].join('; ');
-
-/** Compares secrets without leaking how much of them matched through timing. */
-function sameText(a: unknown, b: string) {
-  const x = Buffer.from(String(a ?? ''));
-  const y = Buffer.from(b);
-  return x.length === y.length && timingSafeEqual(x, y);
-}
-
-// Where a reverse proxy (Caddy) can reach Peiskos from: this machine, or Docker's own networks.
-const PROXIES = new BlockList();
-PROXIES.addSubnet('127.0.0.0', 8, 'ipv4');
-PROXIES.addSubnet('10.0.0.0', 8, 'ipv4');
-PROXIES.addSubnet('172.16.0.0', 12, 'ipv4');
-PROXIES.addAddress('::1', 'ipv6');
-
-/** The visitor's address. Behind Caddy on the same machine, Caddy passes it along in X-Forwarded-For. */
-export function clientIp(req: IncomingMessage) {
-  const direct = req.socket.remoteAddress ?? '';
-  const forwarded = String(req.headers['x-forwarded-for'] ?? '').split(',').pop()?.trim();
-  const v4 = direct.replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, '');
-  const local = isIP(v4) === 4 ? PROXIES.check(v4, 'ipv4') : PROXIES.check(direct, 'ipv6');
-  return local && forwarded ? forwarded : direct;
-}
-const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 // A user's picture link, from their users.avatar file name (or null).
 const avatarUrl = (col: string) => `CASE WHEN ${col} IS NULL THEN NULL ELSE '/api/avatars/' || ${col} END`;
-// Profile and burrow pictures are recognised by their first bytes, not by what the client says they are.
-const AVATAR_TYPES: { ext: string; type: string; magic: (b: Buffer) => boolean }[] = [
-  { ext: 'png', type: 'image/png', magic: (b) => b.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) },
-  { ext: 'jpg', type: 'image/jpeg', magic: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
-  { ext: 'gif', type: 'image/gif', magic: (b) => b.subarray(0, 4).toString('latin1') === 'GIF8' },
-  { ext: 'webp', type: 'image/webp', magic: (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP' },
-];
-// Soundboard clips, also recognised by their first bytes.
-const MAX_SOUND_BYTES = 1024 * 1024;
-const SOUND_TYPES: { ext: string; type: string; magic: (b: Buffer) => boolean }[] = [
-  { ext: 'mp3', type: 'audio/mpeg', magic: (b) => b.subarray(0, 3).toString('latin1') === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) },
-  { ext: 'ogg', type: 'audio/ogg', magic: (b) => b.subarray(0, 4).toString('latin1') === 'OggS' },
-  { ext: 'wav', type: 'audio/wav', magic: (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WAVE' },
-  { ext: 'webm', type: 'audio/webm', magic: (b) => b.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3])) },
-  { ext: 'm4a', type: 'audio/mp4', magic: (b) => b.subarray(4, 8).toString('latin1') === 'ftyp' },
-];
 const MAX_SOUNDS = 30;
 
 const EMOJI = /\p{Extended_Pictographic}|\p{Regional_Indicator}/u;
-// Shown in the page. Everything else downloads, so an uploaded .html or .svg can't run as part of Burrow.
-const INLINE_TYPES = new Set([
-  'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif',
-  'video/mp4', 'video/webm', 'video/quicktime', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
-  'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/flac',
-]);
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
-  '.woff2': 'font/woff2',
-  '.wasm': 'application/wasm',
-  '.webmanifest': 'application/manifest+json',
-};
-
-/**
- * Preparing SQL takes longer than running it, and the same few hundred queries run over and over
- * (some once per person in a burrow), so each prepared statement is kept and reused.
- */
-function withStatementCache(db: Db): Db {
-  const cache = new Map<string, ReturnType<Db['prepare']>>();
-  const prepare = (sql: string) => {
-    let st = cache.get(sql);
-    if (st) {
-      // Most recently used last, so the oldest go first when it's full.
-      cache.delete(sql);
-      cache.set(sql, st);
-      return st;
-    }
-    st = db.prepare(sql);
-    cache.set(sql, st);
-    // Queries with a list of ids in them differ each time; don't let those pile up.
-    if (cache.size > 1000) cache.delete(cache.keys().next().value!);
-    return st;
-  };
-  return new Proxy(db, {
-    get(target, key) {
-      if (key === 'prepare') return prepare;
-      const v = Reflect.get(target, key, target);
-      return typeof v === 'function' ? v.bind(target) : v;
-    },
-  });
-}
-
 export function createApp(opts: AppOptions): Server {
   const db = withStatementCache(opts.db);
   const now = () => Date.now();
@@ -929,16 +815,11 @@ export function createApp(opts: AppOptions): Server {
     if (ids.length > MAX_FAVORITES) throw new HttpError(400, `You can favorite up to ${MAX_FAVORITES} hearths`);
     const isBurrow = db.prepare("SELECT 1 FROM members m JOIN servers s ON s.id = m.server_id WHERE m.user_id = ? AND m.server_id = ? AND s.kind = 'burrow'");
     for (const id of ids) if (!isBurrow.get(user.id, id)) throw new HttpError(404, 'Hearth not found');
-    db.exec('BEGIN');
-    try {
+    inTransaction(db, () => {
       db.prepare('UPDATE members SET favorite = NULL WHERE user_id = ?').run(user.id);
       const set = db.prepare('UPDATE members SET favorite = ? WHERE user_id = ? AND server_id = ?');
       ids.forEach((id, i) => set.run(i + 1, user.id, id));
-      db.exec('COMMIT');
-    } catch (err) {
-      db.exec('ROLLBACK');
-      throw err;
-    }
+    });
     const serverIds = favoritesOf(user.id);
     sendTo([user.id], { type: 'favorites', serverIds }); // your other devices
     return { serverIds };
@@ -1106,7 +987,7 @@ export function createApp(opts: AppOptions): Server {
 
   /** Your standing in a burrow, if it lets you do this. */
   const allowed = (serverId: number, user: User, perm: Perm) => {
-    const kind = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind;
+    const kind = serverKind(serverId);
     const me = kind === 'burrow' ? standing(serverId, user.id) : null;
     if (!me) throw new HttpError(404, 'Hearth not found');
     if (!me.perms.has(perm)) throw new HttpError(403, "Your roles don't allow that");
@@ -1503,22 +1384,7 @@ export function createApp(opts: AppOptions): Server {
       if (count >= MAX_SOUNDS) throw new HttpError(400, `A hearth can have up to ${MAX_SOUNDS} sounds`);
     };
     check();
-    const tooBig = new HttpError(413, `Sounds can be at most ${MAX_SOUND_BYTES / 1024} KB`);
-    if (Number(req.headers['content-length']) > MAX_SOUND_BYTES) throw tooBig;
-    const chunks: Buffer[] = [];
-    let size = 0;
-    await new Promise<void>((resolve, reject) => {
-      req.on('data', (c: Buffer) => {
-        size += c.length;
-        if (size > MAX_SOUND_BYTES) {
-          req.pause();
-          reject(tooBig);
-        } else chunks.push(c);
-      });
-      req.on('end', resolve);
-      req.on('error', reject);
-    });
-    const data = Buffer.concat(chunks);
+    const data = await readLimited(req, MAX_SOUND_BYTES, new HttpError(413, `Sounds can be at most ${MAX_SOUND_BYTES / 1024} KB`));
     const kind = SOUND_TYPES.find((t) => t.magic(data));
     if (!kind) throw new HttpError(400, 'Sounds must be MP3, OGG, WAV, WebM or M4A audio');
     allowed(serverId, user, 'emoji');
@@ -1621,7 +1487,7 @@ export function createApp(opts: AppOptions): Server {
     (db.prepare("SELECT id FROM channels WHERE server_id = ? AND kind = 'voice'").get(serverId) as { id: number } | undefined)?.id;
   route('POST', '/api/dms/:id/call', ({ user, params }) => {
     const serverId = Number(params[0]);
-    const kind = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind;
+    const kind = serverKind(serverId);
     if (kind !== 'dm' || !isMember(serverId, user.id)) throw new HttpError(404, 'Conversation not found');
     if (!opts.voice) throw new HttpError(503, 'Voice is not set up on this server');
     let channelId = callRoom(serverId);
@@ -1999,7 +1865,7 @@ export function createApp(opts: AppOptions): Server {
 
   // The file is the raw request body; its name comes in the x-filename header.
   const handleUpload = async (req: IncomingMessage, res: ServerResponse, channelId: number) => {
-    const user = userByToken(req.headers.authorization?.replace(/^Bearer /, ''));
+    const user = userByToken(bearer(req));
     if (!user) throw new HttpError(401, 'Not logged in');
     if (!opts.uploadDir) throw new HttpError(503, 'Uploads are not set up on this server');
     const channel = channelById(channelId);
@@ -2059,28 +1925,13 @@ export function createApp(opts: AppOptions): Server {
     'image/jpeg': (b) => b[0] === 0xff && b[1] === 0xd8,
   };
   const handleThumbUpload = async (req: IncomingMessage, res: ServerResponse, id: string) => {
-    const user = userByToken(req.headers.authorization?.replace(/^Bearer /, ''));
+    const user = userByToken(bearer(req));
     if (!user) throw new HttpError(401, 'Not logged in');
     if (!opts.uploadDir) throw new HttpError(503, 'Uploads are not set up on this server');
     const a = db.prepare('SELECT type FROM attachments WHERE id = ? AND uploader_id = ? AND message_id IS NULL').get(id, user.id) as { type: string } | undefined;
     if (!a) throw new HttpError(404, 'File not found');
     if (!a.type.startsWith('video/')) throw new HttpError(400, 'Only videos have thumbnails');
-    const tooBig = new HttpError(413, 'That thumbnail is too big');
-    if (Number(req.headers['content-length']) > MAX_THUMB_BYTES) throw tooBig;
-    const chunks: Buffer[] = [];
-    let size = 0;
-    await new Promise<void>((resolve, reject) => {
-      req.on('data', (c: Buffer) => {
-        size += c.length;
-        if (size > MAX_THUMB_BYTES) {
-          req.pause();
-          reject(tooBig);
-        } else chunks.push(c);
-      });
-      req.on('end', resolve);
-      req.on('error', reject);
-    });
-    const data = Buffer.concat(chunks);
+    const data = await readLimited(req, MAX_THUMB_BYTES, new HttpError(413, 'That thumbnail is too big'));
     const kind = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
     if (!THUMB_TYPES[kind]?.(data)) throw new HttpError(400, 'Send the thumbnail as a WebP or JPEG picture');
     await writeFile(thumbPath(id), data);
@@ -2150,7 +2001,7 @@ export function createApp(opts: AppOptions): Server {
 
   /** The logged-in uploader of a picture, which is the raw request body. */
   const pictureUploader = (req: IncomingMessage) => {
-    const user = userByToken(req.headers.authorization?.replace(/^Bearer /, ''));
+    const user = userByToken(bearer(req));
     if (!user) throw new HttpError(401, 'Not logged in');
     if (!opts.uploadDir) throw new HttpError(503, 'Uploads are not set up on this server');
     return user;
@@ -2158,22 +2009,7 @@ export function createApp(opts: AppOptions): Server {
 
   /** Reads a picture from the request body and saves it in `folder`, returning its new file name. */
   const savePicture = async (req: IncomingMessage, folder: string, what: string) => {
-    const tooBig = new HttpError(413, `${what} can be at most ${MAX_AVATAR_BYTES / 1048576} MB`);
-    if (Number(req.headers['content-length']) > MAX_AVATAR_BYTES) throw tooBig;
-    const chunks: Buffer[] = [];
-    let size = 0;
-    await new Promise<void>((resolve, reject) => {
-      req.on('data', (c: Buffer) => {
-        size += c.length;
-        if (size > MAX_AVATAR_BYTES) {
-          req.pause();
-          reject(tooBig);
-        } else chunks.push(c);
-      });
-      req.on('end', resolve);
-      req.on('error', reject);
-    });
-    const data = Buffer.concat(chunks);
+    const data = await readLimited(req, MAX_AVATAR_BYTES, new HttpError(413, `${what} can be at most ${MAX_AVATAR_BYTES / 1048576} MB`));
     const kind = AVATAR_TYPES.find((t) => t.magic(data));
     if (!kind) throw new HttpError(400, `${what} must be PNG, JPEG, GIF or WebP images`);
     const file = `${randomBytes(16).toString('base64url')}.${kind.ext}`;
@@ -2839,7 +2675,7 @@ export function createApp(opts: AppOptions): Server {
         .get(channelId, lastReadId, userId, ...args) as { n: number }).n;
     const unread = count('');
     if (!unread) return { lastReadId, unread, mentions: 0 };
-    const dm = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind === 'dm';
+    const dm = serverKind(serverId) === 'dm';
     // In a DM everything is for you; elsewhere it's @mentions (your name, @everyone, your roles) and replies to you.
     const mentions = dm ? unread : count('AND EXISTS (SELECT 1 FROM mentions x WHERE x.message_id = m.id AND x.user_id = ?)', userId);
     return { lastReadId, unread, mentions };
@@ -2873,7 +2709,7 @@ export function createApp(opts: AppOptions): Server {
     ).run(userId, channel.id, messageId);
     sendTo([userId], { type: 'read', channelId: channel.id, ...readInfo(channel.id, channel.serverId, userId) });
     if (quiet || force || channel.kind !== 'text') return;
-    const kind = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(channel.serverId) as { kind: string }).kind;
+    const kind = serverKind(channel.serverId);
     const partner = kind === 'dm' ? dmPartner(channel.serverId, userId) : undefined;
     if (partner && readReceiptsOn(partner) && readReceiptsOn(userId))
       sendTo([partner], { type: 'dm_seen', serverId: channel.serverId, channelId: channel.id, userId, lastReadId: messageId });
@@ -3721,8 +3557,7 @@ export function createApp(opts: AppOptions): Server {
       if (groupId !== null && !groups.has(groupId)) throw new HttpError(400, 'That heading is gone');
       order.push({ id, groupId });
     }
-    db.exec('BEGIN');
-    try {
+    inTransaction(db, () => {
       let position = 1;
       const place = db.prepare('UPDATE channels SET position = ?, group_id = ? WHERE id = ?');
       for (const o of order) place.run(position++, o.groupId, o.id);
@@ -3732,11 +3567,7 @@ export function createApp(opts: AppOptions): Server {
         let gp = 1;
         for (const g of body.groups.map(Number)) if (groups.has(g) && !seen.has(g)) { seen.add(g); db.prepare('UPDATE room_groups SET position = ? WHERE id = ?').run(gp++, g); }
       }
-      db.exec('COMMIT');
-    } catch (err) {
-      db.exec('ROLLBACK');
-      throw err;
-    }
+    });
     sendServerUpdate(serverId);
     return serverSummary(serverId, user.id);
   });
@@ -3859,7 +3690,7 @@ export function createApp(opts: AppOptions): Server {
 
   route('POST', '/api/servers/:id/invites', ({ user, params, body }) => {
     const serverId = Number(params[0]);
-    const kind = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind;
+    const kind = serverKind(serverId);
     if (kind !== 'burrow' || !isMember(serverId, user.id)) throw new HttpError(404, 'Hearth not found');
     const expiresIn = body.expiresIn == null ? null : Math.floor(Number(body.expiresIn));
     if (expiresIn !== null && !(expiresIn >= 60 && expiresIn <= 30 * 86400)) throw new HttpError(400, 'Invites can last from a minute to 30 days');
@@ -3977,7 +3808,7 @@ export function createApp(opts: AppOptions): Server {
 
   route('POST', '/api/servers/:id/events', ({ user, params, body }) => {
     const serverId = Number(params[0]);
-    const kind = (db.prepare('SELECT kind FROM servers WHERE id = ?').get(serverId) as { kind: string } | undefined)?.kind;
+    const kind = serverKind(serverId);
     if (kind !== 'burrow' || !isMember(serverId, user.id)) throw new HttpError(404, 'Hearth not found');
     const upcoming = (db.prepare('SELECT COUNT(*) AS n FROM events WHERE server_id = ? AND starts_at > ?').get(serverId, now()) as { n: number }).n;
     if (upcoming >= 50) throw new HttpError(400, 'This hearth has 50 events coming up already');
@@ -4659,7 +4490,7 @@ export function createApp(opts: AppOptions): Server {
 
   // Export my data: a zip of your account, your messages (as JSON) and the files you sent.
   const handleExport = async (req: IncomingMessage, res: ServerResponse) => {
-    const user = userByToken(req.headers.authorization?.replace(/^Bearer /, ''));
+    const user = userByToken(bearer(req));
     if (!user) throw new HttpError(401, 'Not logged in');
     checkTries([`export:${user.id}`], 5);
     failedTry([`export:${user.id}`], 60 * 60 * 1000);
@@ -4720,32 +4551,6 @@ export function createApp(opts: AppOptions): Server {
   };
 
   // ---- HTTP plumbing ------------------------------------------------------
-
-  const readBody = (req: IncomingMessage) =>
-    new Promise<Json>((resolve, reject) => {
-      let size = 0;
-      const chunks: Buffer[] = [];
-      req.on('data', (c: Buffer) => {
-        size += c.length;
-        if (size > 1_000_000) reject(new HttpError(413, 'Body too large'));
-        else chunks.push(c);
-      });
-      req.on('end', () => {
-        if (!chunks.length) return resolve({});
-        try {
-          const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          resolve(parsed && typeof parsed === 'object' ? parsed : {});
-        } catch {
-          reject(new HttpError(400, 'Invalid JSON'));
-        }
-      });
-      req.on('error', reject);
-    });
-
-  const send = (res: ServerResponse, status: number, data: unknown) => {
-    res.writeHead(status, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(data));
-  };
 
   const sendFile = staticFiles();
   const serveStatic = async (req: IncomingMessage, res: ServerResponse, pathname: string) => {
@@ -4812,7 +4617,7 @@ export function createApp(opts: AppOptions): Server {
       for (const r of routes) {
         const m = r.method === req.method && url.pathname.match(r.pattern);
         if (!m) continue;
-        const token = req.headers.authorization?.replace(/^Bearer /, '');
+        const token = bearer(req);
         const user = userByToken(token);
         if (r.auth && !user) throw new HttpError(401, 'Not logged in');
         const body = req.method === 'GET' ? {} : await readBody(req);

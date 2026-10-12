@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
 import { openDb } from '../src/db.ts';
-import { clientIp, createApp } from '../src/app.ts';
+import { createApp } from '../src/app.ts';
+import { clientIp } from '../src/http.ts';
 
 const app = createApp({
   db: openDb(':memory:'),

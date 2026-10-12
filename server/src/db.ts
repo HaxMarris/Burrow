@@ -5,6 +5,48 @@ import { dirname } from 'node:path';
 
 export type Db = DatabaseSync;
 
+/**
+ * Preparing SQL takes longer than running it, and the same few hundred queries run over and over
+ * (some once per person in a burrow), so each prepared statement is kept and reused.
+ */
+export function withStatementCache(db: Db): Db {
+  const cache = new Map<string, ReturnType<Db['prepare']>>();
+  const prepare = (sql: string) => {
+    let st = cache.get(sql);
+    if (st) {
+      // Most recently used last, so the oldest go first when it's full.
+      cache.delete(sql);
+      cache.set(sql, st);
+      return st;
+    }
+    st = db.prepare(sql);
+    cache.set(sql, st);
+    // Queries with a list of ids in them differ each time; don't let those pile up.
+    if (cache.size > 1000) cache.delete(cache.keys().next().value!);
+    return st;
+  };
+  return new Proxy(db, {
+    get(target, key) {
+      if (key === 'prepare') return prepare;
+      const v = Reflect.get(target, key, target);
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+  });
+}
+
+/** Runs `fn` as one transaction: all of its changes, or (if it throws) none. */
+export function inTransaction<T>(db: Db, fn: () => T): T {
+  db.exec('BEGIN');
+  try {
+    const out = fn();
+    db.exec('COMMIT');
+    return out;
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+}
+
 export function openDb(file: string): Db {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
@@ -629,12 +671,7 @@ function hashSessionTokens(db: Db) {
   const old = db.prepare('SELECT token FROM sessions WHERE length(token) != 64').all() as { token: string }[];
   if (!old.length) return;
   const update = db.prepare('UPDATE sessions SET token = ? WHERE token = ?');
-  db.exec('BEGIN');
-  try {
+  inTransaction(db, () => {
     for (const { token } of old) update.run(tokenHash(token), token);
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+  });
 }
