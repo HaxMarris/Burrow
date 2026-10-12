@@ -121,6 +121,9 @@
         <svg viewBox="0 0 24 24"><path d="M12 2c.5 3 2.4 5 4.2 6.8A7.5 7.5 0 0 1 12 22a7.5 7.5 0 0 1-4.6-13.4c.2 1.6 1 2.9 2.3 3.6C9.6 8.5 10.4 5 12 2Z"/></svg>
         <span id="campfire-chip-label"></span><span id="campfire-chip-count"></span>
       </button>
+      <button class="icon-btn update-btn hidden" id="update-btn" title="Update ready" aria-label="Update ready">
+        <svg viewBox="0 0 24 24"><path d="M11 3h2v10.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4 3.6 3.6V3ZM5 19h14v2H5v-2Z"/></svg>
+      </button>
       <button class="icon-btn inbox-btn" id="inbox-btn" title="Mentions and replies" aria-label="Mentions and replies">
         <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 4.6 18.9l-.9-1.8A8 8 0 1 1 20 12v1.2a1.8 1.8 0 0 1-3.6 0V7.5h-2v.9A5 5 0 1 0 15 15.5a3.8 3.8 0 0 0 7-2.3V12A10 10 0 0 0 12 2Zm0 13a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z"/></svg>
         <span class="badge hidden" id="inbox-badge"></span>
@@ -297,7 +300,21 @@
               <div class="fire-ring" id="fire-ring">
                 <div class="fire-glow outer"></div>
                 <div class="fire-glow inner"></div>
-                <div class="fire-core"><svg viewBox="0 0 24 24"><path d="M12 2c.5 3 2.4 5 4.2 6.8A7.5 7.5 0 0 1 12 22a7.5 7.5 0 0 1-4.6-13.4c.2 1.6 1 2.9 2.3 3.6C9.6 8.5 10.4 5 12 2Z"/></svg></div>
+                <svg class="fire-core" viewBox="0 0 200 220" aria-hidden="true">
+                  <defs>
+                    <linearGradient id="fire-log" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9a7462"/><stop offset="1" stop-color="#6a4c3c"/></linearGradient>
+                    <linearGradient id="fire-outer" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e2501d"/><stop offset=".45" stop-color="#f28a35"/><stop offset="1" stop-color="#ffc768"/></linearGradient>
+                    <radialGradient id="fire-inner" cx=".5" cy=".85" r=".75"><stop offset="0" stop-color="#fffbea"/><stop offset=".45" stop-color="#ffe29a"/><stop offset="1" stop-color="#ffb04f"/></radialGradient>
+                    <radialGradient id="fire-base" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#fff3c4" stop-opacity=".95"/><stop offset="1" stop-color="#ffc46b" stop-opacity="0"/></radialGradient>
+                  </defs>
+                  <g class="fire-logs">
+                    <rect x="12" y="180" width="176" height="20" rx="10" fill="url(#fire-log)" transform="rotate(-9 100 190)"/>
+                    <rect x="12" y="180" width="176" height="20" rx="10" fill="url(#fire-log)" transform="rotate(9 100 190)"/>
+                  </g>
+                  <path class="fire-flame outer" fill="url(#fire-outer)" d="M100 14c4 30 14 48 22 64 3-10 3-20 0-30 20 18 32 46 32 84 0 38-24 66-54 66s-54-28-54-64c0-30 16-50 30-66 2 14 7 24 14 30-4-34 0-62 10-84Z"/>
+                  <path class="fire-flame inner" fill="url(#fire-inner)" d="M104 102c10 16 26 30 26 58 0 22-13 36-30 36s-30-14-30-34c0-16 8-26 16-34 1 8 4 13 8 16-2-16 2-30 10-42Z"/>
+                  <ellipse cx="100" cy="186" rx="34" ry="14" fill="url(#fire-base)"/>
+                </svg>
                 <div class="fire-notes" id="fire-notes" aria-live="polite"></div>
               </div>
             </div>

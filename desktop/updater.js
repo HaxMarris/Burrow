@@ -1,9 +1,11 @@
 // Keeps the desktop app up to date from the project's GitHub releases.
 //
 // Windows, Linux (AppImage) and signed Mac builds download the new version in the
-// background and install it on restart. macOS can only install updates for code-signed
-// apps, so an unsigned Mac build just says a new version is out and opens the download page.
-const { app, dialog, shell } = require('electron');
+// background; macOS can only install updates for code-signed apps, so an unsigned Mac build
+// just learns a new version is out. Either way the page shows an update button in the top bar
+// (as Discord does), and installing waits until it's clicked and confirmed. Anything not
+// installed by then goes in the next time the app quits.
+const { app, ipcMain, shell } = require('electron');
 
 const REPO = 'HaxMarris/Burrow';
 const RELEASES_PAGE = `https://github.com/${REPO}/releases/latest`;
@@ -11,40 +13,43 @@ const CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
 
 const canSelfInstall = process.platform === 'win32' || process.platform === 'darwin' || (process.platform === 'linux' && !!process.env.APPIMAGE);
 
+// The update waiting to go in: { version, install: true } once downloaded, or
+// { version, install: false } when it has to be downloaded by hand from the release page.
+let ready = null;
+let installNow = null;
+
 function startUpdateChecks(getWindow) {
+  const tell = (update) => {
+    ready = update;
+    const win = getWindow();
+    if (win && !win.isDestroyed()) win.webContents.send('update-ready', ready);
+  };
+  ipcMain.on('update-status', (e) => { e.returnValue = ready; });
+  ipcMain.on('update-install', () => {
+    if (ready?.install && installNow) installNow();
+    else if (ready) shell.openExternal(RELEASES_PAGE);
+  });
   if (!app.isPackaged) return;
-  let check = canSelfInstall ? selfInstallingCheck(getWindow, () => { check = notifyOnlyCheck(getWindow); check(); }) : notifyOnlyCheck(getWindow);
+  let check = canSelfInstall ? selfInstallingCheck(tell, () => { check = notifyOnlyCheck(tell); check(); }) : notifyOnlyCheck(tell);
   setTimeout(() => check(), 10 * 1000);
   setInterval(() => check(), CHECK_EVERY_MS);
 }
 
 /** fallBack() is called if this copy can't update itself after all (an unsigned Mac build). */
-function selfInstallingCheck(getWindow, fallBack) {
+function selfInstallingCheck(tell, fallBack) {
   const { autoUpdater } = require('electron-updater');
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
-  let asked = false;
+  installNow = () => autoUpdater.quitAndInstall();
 
-  autoUpdater.on('update-downloaded', async (info) => {
-    if (asked) return;
-    asked = true;
-    const { response } = await ask(getWindow(), {
-      type: 'info',
-      buttons: ['Restart now', 'Later'],
-      defaultId: 0,
-      cancelId: 1,
-      title: 'Update ready',
-      message: `Peiskos ${info.version} is ready`,
-      detail: 'Restart to finish updating. If you pick Later, it installs the next time you quit Peiskos.',
-    });
-    if (response === 0) autoUpdater.quitAndInstall();
-  });
+  autoUpdater.on('update-downloaded', (info) => tell({ version: info.version, install: true }));
   let gaveUp = false;
   autoUpdater.on('error', (err) => {
     const message = String(err?.message || err);
     console.error('Update check failed:', message);
     if (process.platform === 'darwin' && !gaveUp && /code ?sign|signature/i.test(message)) {
       gaveUp = true;
+      installNow = null;
       fallBack();
     }
   });
@@ -52,8 +57,7 @@ function selfInstallingCheck(getWindow, fallBack) {
   return () => { if (!gaveUp) autoUpdater.checkForUpdates().catch(() => {}); };
 }
 
-function notifyOnlyCheck(getWindow) {
-  let toldAbout = null;
+function notifyOnlyCheck(tell) {
   return async () => {
     try {
       const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
@@ -61,24 +65,10 @@ function notifyOnlyCheck(getWindow) {
       });
       if (!res.ok) return;
       const latest = String((await res.json()).tag_name || '').replace(/^v/, '');
-      if (!isNewer(latest, app.getVersion()) || toldAbout === latest) return;
-      toldAbout = latest;
-      const { response } = await ask(getWindow(), {
-        type: 'info',
-        buttons: ['Download', 'Later'],
-        defaultId: 0,
-        cancelId: 1,
-        title: 'Update available',
-        message: `Peiskos ${latest} is out`,
-        detail: `You have ${app.getVersion()}. Download the new version and install it over this one.`,
-      });
-      if (response === 0) shell.openExternal(RELEASES_PAGE);
+      if (!isNewer(latest, app.getVersion()) || ready?.version === latest) return;
+      tell({ version: latest, install: false });
     } catch {}
   };
-}
-
-function ask(win, options) {
-  return win && !win.isDestroyed() ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options);
 }
 
 // Compares plain x.y.z versions; anything unparseable never counts as newer.

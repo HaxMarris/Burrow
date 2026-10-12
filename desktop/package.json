@@ -38,6 +38,7 @@
       "hotkeys.js",
       "activity.js",
       "tray.js",
+      "shortcuts.js",
       "draw-overlay.js",
       "draw-overlay-preload.js",
       "draw-overlay.html",
