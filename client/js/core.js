@@ -1,5 +1,5 @@
 // Chat client. Runs both as the web app served by the chat server and inside
-// the desktop app (loaded from file://, where the user types the server address).
+// the desktop app (loaded from file://, where it connects to peiskos.app unless told otherwise).
 //
 // State, talking to the server, logging in, starting up, and the live connection.
 // Part of Burrow's client: plain scripts that index.html loads in order, sharing one global scope.
@@ -37,8 +37,18 @@ const store = {
   set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
 };
 
+// The desktop app connects to Peiskos's own server without asking; "Use a different server" on
+// the login screen picks another. Logins saved under the server's old address move to the new one.
+const DEFAULT_SERVER = 'https://peiskos.app';
+const OLD_ADDRESS = 'https://newburrow.duckdns.org';
+if (isDesktop) {
+  if (store.get('serverUrl') === OLD_ADDRESS) store.set('serverUrl', DEFAULT_SERVER);
+  const saved = store.get('accounts');
+  if (saved?.includes(OLD_ADDRESS)) store.set('accounts', saved.replaceAll(`"${OLD_ADDRESS}"`, `"${DEFAULT_SERVER}"`));
+}
+
 const state = {
-  serverUrl: isDesktop ? store.get('serverUrl') || '' : location.origin,
+  serverUrl: isDesktop ? store.get('serverUrl') || DEFAULT_SERVER : location.origin,
   token: store.get('token'),
   me: null,
   servers: new Map(),       // id -> { id, name, kind, ownerId, inviteCode, channels, members }; DMs are kind 'dm'
@@ -128,7 +138,9 @@ let registering = !!signupLink;
 async function showAuth() {
   $('#app').classList.add('hidden');
   $('#auth').classList.remove('hidden');
-  $('#server-url-row').classList.toggle('hidden', !isDesktop);
+  const otherServer = isDesktop && state.serverUrl !== DEFAULT_SERVER;
+  $('#server-url-row').classList.toggle('hidden', !otherServer);
+  $('#other-server-row').classList.toggle('hidden', !isDesktop || otherServer);
   $('#server-url').value = state.serverUrl;
   if (!isDesktop && !/Android|iPhone|iPad/.test(navigator.userAgent)) showDesktopDownloads();
   renderAuthMode();
@@ -249,6 +261,14 @@ $('#auth-toggle').addEventListener('click', (e) => {
   renderAuthMode();
 });
 
+$('#other-server').addEventListener('click', (e) => {
+  e.preventDefault();
+  $('#other-server-row').classList.add('hidden');
+  $('#server-url-row').classList.remove('hidden');
+  $('#server-url').select();
+  $('#server-url').focus();
+});
+
 $('#server-url').addEventListener('change', () => {
   state.serverUrl = normalizeServerUrl($('#server-url').value);
   renderAuthMode();
@@ -266,8 +286,7 @@ function normalizeServerUrl(v) {
 
 $('#auth-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (isDesktop) state.serverUrl = normalizeServerUrl($('#server-url').value);
-  if (!state.serverUrl) return ($('#auth-error').textContent = 'Enter the server address.');
+  if (isDesktop) state.serverUrl = normalizeServerUrl($('#server-url').value) || DEFAULT_SERVER;
   $('#auth-submit').disabled = true;
   try {
     await resolveServerUrl();

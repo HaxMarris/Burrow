@@ -78,8 +78,8 @@
         <div id="invite-card" class="invite-card hidden" aria-live="polite"></div>
         <h1 id="auth-title">Welcome back</h1>
         <p class="muted" id="auth-subtitle">Log in to chat with your friends.</p>
-        <label id="server-url-row">Server address
-          <input id="server-url" placeholder="my-server.example.com:3000" autocomplete="url" />
+        <label id="server-url-row" class="hidden">Server address
+          <input id="server-url" placeholder="peiskos.app" autocomplete="url" />
         </label>
         <label>Username <input id="username" autocomplete="username" required /></label>
         <label>Password <input id="password" type="password" autocomplete="current-password" required /></label>
@@ -91,6 +91,7 @@
         <button type="submit" class="btn" id="auth-submit">Log in</button>
         <button type="button" class="btn secondary passkey-btn hidden" id="passkey-login"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14a5 5 0 1 1 4.9-6H22v4h-2v3h-3v-3h-5.1A5 5 0 0 1 7 14Zm0-3a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/></svg>Log in with a passkey</button>
         <p class="muted small center"><a href="#" id="auth-toggle">Need an account? Register</a></p>
+        <p class="muted small center hidden" id="other-server-row"><a href="#" id="other-server">Use a different server</a></p>
         <div id="get-desktop" class="get-desktop hidden">
           <p class="muted small center">Get the desktop app</p>
           <div class="get-desktop-row">
