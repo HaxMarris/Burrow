@@ -3,8 +3,9 @@ import { writeFile, mkdir, unlink, stat, copyFile, readFile } from 'node:fs/prom
 import { createReadStream, createWriteStream } from 'node:fs';
 import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { extname, join, normalize } from 'node:path';
+import { BlockList, isIP } from 'node:net';
 import { WebSocketServer, WebSocket } from 'ws';
-import { addModeratorRole, type Db } from './db.ts';
+import { addModeratorRole, tokenHash, type Db } from './db.ts';
 import { hashPassword, verifyPassword, newToken, newInviteCode } from './auth.ts';
 import { closeRoom, removeFromRoom, setCanSpeak, voiceToken, type VoiceOptions } from './voice.ts';
 import { staticFiles } from './static.ts';
@@ -109,11 +110,19 @@ function sameText(a: unknown, b: string) {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+// Where a reverse proxy (Caddy) can reach Peiskos from: this machine, or Docker's own networks.
+const PROXIES = new BlockList();
+PROXIES.addSubnet('127.0.0.0', 8, 'ipv4');
+PROXIES.addSubnet('10.0.0.0', 8, 'ipv4');
+PROXIES.addSubnet('172.16.0.0', 12, 'ipv4');
+PROXIES.addAddress('::1', 'ipv6');
+
 /** The visitor's address. Behind Caddy on the same machine, Caddy passes it along in X-Forwarded-For. */
-function clientIp(req: IncomingMessage) {
+export function clientIp(req: IncomingMessage) {
   const direct = req.socket.remoteAddress ?? '';
   const forwarded = String(req.headers['x-forwarded-for'] ?? '').split(',').pop()?.trim();
-  const local = direct === '127.0.0.1' || direct === '::1' || direct === '::ffff:127.0.0.1' || /^(::ffff:)?(172|10)\./.test(direct);
+  const v4 = direct.replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, '');
+  const local = isIP(v4) === 4 ? PROXIES.check(v4, 'ipv4') : PROXIES.check(direct, 'ipv6');
   return local && forwarded ? forwarded : direct;
 }
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
@@ -192,8 +201,10 @@ export function createApp(opts: AppOptions): Server {
   // ---- data helpers -------------------------------------------------------
 
   // A login lasts until it goes unused for SESSION_IDLE_MS. Using it keeps it going.
-  const userByToken = (token: string | undefined): User | undefined => {
-    if (!token) return undefined;
+  // Logins are kept as the hash of their token (see tokenHash), never the token itself.
+  const userByToken = (raw: string | undefined): User | undefined => {
+    if (!raw) return undefined;
+    const token = tokenHash(raw);
     const row = db
       .prepare(
         `SELECT u.id, u.username, u.display_name AS displayName, ${avatarUrl('u.avatar')} AS avatar, COALESCE(s.last_used_at, s.created_at) AS lastUsed, u.bot
@@ -477,7 +488,7 @@ export function createApp(opts: AppOptions): Server {
   const startSession = (user: User, from?: { ip: string; ua: string }) => {
     const token = newToken();
     db.prepare('INSERT INTO sessions (token, user_id, created_at, last_used_at, device, ip) VALUES (?, ?, ?, ?, ?, ?)').run(
-      token, user.id, now(), now(), from?.ua.slice(0, 300) ?? null, from?.ip ?? null,
+      tokenHash(token), user.id, now(), now(), from?.ua.slice(0, 300) ?? null, from?.ip ?? null,
     );
     return { token, user: userById(user.id) ?? user };
   };
@@ -492,7 +503,7 @@ export function createApp(opts: AppOptions): Server {
   // ---- realtime -----------------------------------------------------------
 
   const sockets = new Map<number, Set<WebSocket>>(); // userId -> open sockets
-  const socketTokens = new WeakMap<WebSocket, string>(); // which login each socket belongs to
+  const socketTokens = new WeakMap<WebSocket, string>(); // which login (its token's hash) each socket belongs to
   const online = new Set<number>();
   const inVoice = new Map<number, number>(); // userId -> voice channel they are in
 
@@ -795,7 +806,8 @@ export function createApp(opts: AppOptions): Server {
 
   // ---- HTTP routes --------------------------------------------------------
 
-  type Handler = (ctx: { user: User; params: string[]; body: Json; url: URL; token: string | undefined; ip: string; ua: string; host: string; secure: boolean }) => unknown;
+  // `session` is the hash of the login's token, as it's kept in the sessions table.
+  type Handler = (ctx: { user: User; params: string[]; body: Json; url: URL; session: string | undefined; ip: string; ua: string; host: string; secure: boolean }) => unknown;
   type Route = { method: string; pattern: RegExp; auth: boolean; handler: Handler };
   const routes: Route[] = [];
   const route = (method: string, path: string, handler: Handler, auth = true) =>
@@ -872,15 +884,15 @@ export function createApp(opts: AppOptions): Server {
     false,
   );
 
-  route('POST', '/api/logout', ({ body }) => {
-    db.prepare('DELETE FROM sessions WHERE token = ?').run(String(body.token ?? ''));
+  route('POST', '/api/logout', ({ session }) => {
+    db.prepare('DELETE FROM sessions WHERE token = ?').run(session ?? '');
     return { ok: true };
   });
 
   route('GET', '/api/me', ({ user }) => ({ ...meJson(user), folders: foldersOf(user.id) }));
 
   // Changing your password signs you out everywhere else.
-  route('POST', '/api/me/password', ({ user, body, token }) => {
+  route('POST', '/api/me/password', ({ user, body, session }) => {
     const key = `password-user:${user.id}`;
     checkTries([key], 10);
     const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(user.id) as { password_hash: string };
@@ -892,8 +904,7 @@ export function createApp(opts: AppOptions): Server {
     if (typeof body.newPassword !== 'string' || body.newPassword.length < 8)
       throw new HttpError(400, 'New password must be at least 8 characters');
     db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(body.newPassword), user.id);
-    db.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(user.id, token ?? '');
-    for (const ws of sockets.get(user.id) ?? []) if (socketTokens.get(ws) !== token) ws.close(4001, 'Password changed');
+    signOutOthers(user.id, session ?? null, 'Password changed');
     return { ok: true };
   });
 
@@ -1220,9 +1231,12 @@ export function createApp(opts: AppOptions): Server {
     if (targetId !== user.id && target.rank <= me.rank) throw new HttpError(403, "You can't change their roles");
     const wanted = new Set(roleList(serverId, body.roleIds));
     const changeable = (id: number) => roleById(id)!.position > me.rank;
+    // A role that allows something you can't do yourself would hand that out, so only the host can give or take it.
+    const withinMine = (id: number) => parsePerms(roleById(id)!.perms).every((p) => me.perms.has(p));
     for (const id of new Set([...wanted, ...target.roleIds])) {
       if (wanted.has(id) === target.roleIds.includes(id)) continue;
       if (!changeable(id)) throw new HttpError(403, 'You can only give or take roles below your own');
+      if (!withinMine(id)) throw new HttpError(403, `Only the host can give or take ${roleName(id)}: it allows things your roles don't`);
       if (wanted.has(id)) db.prepare('INSERT INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?)').run(serverId, targetId, id);
       else db.prepare('DELETE FROM member_roles WHERE role_id = ? AND user_id = ?').run(id, targetId);
       audit(serverId, user.id, wanted.has(id) ? 'role_give' : 'role_take', targetId, roleName(id));
@@ -1650,13 +1664,11 @@ export function createApp(opts: AppOptions): Server {
 
   route('POST', '/api/channels/:id/messages', ({ user, params, body }) => postMessage(user, Number(params[0]), body));
 
+  /** A message you wrote, in a room you can still see (someone removed from a burrow can't edit what they left behind). */
   const ownMessage = (user: User, id: number) => {
-    const msg = db.prepare('SELECT author_id, channel_id FROM messages WHERE id = ?').get(id) as
-      | { author_id: number; channel_id: number }
-      | undefined;
-    if (!msg) throw new HttpError(404, 'Message not found');
-    if (msg.author_id !== user.id) throw new HttpError(403, 'You can only change your own messages');
-    return channelById(msg.channel_id)!;
+    const { channel, authorId } = visibleMessage(user, id);
+    if (authorId !== user.id) throw new HttpError(403, 'You can only change your own messages');
+    return channel;
   };
 
   route('PATCH', '/api/messages/:id', ({ user, params, body }) => {
@@ -1963,6 +1975,12 @@ export function createApp(opts: AppOptions): Server {
   // ---- uploads ------------------------------------------------------------
 
   const maxUpload = opts.maxUploadBytes ?? 25 * 1024 * 1024;
+  // Files uploaded but not sent yet wait a day before they're cleared out; this many at most per person, so nobody can fill the disk.
+  const MAX_UNSENT = 3 * MAX_ATTACHMENTS;
+  const checkUnsent = (userId: number) => {
+    const n = (db.prepare('SELECT COUNT(*) AS n FROM attachments WHERE uploader_id = ? AND message_id IS NULL').get(userId) as { n: number }).n;
+    if (n >= MAX_UNSENT) throw new HttpError(429, 'You have a lot of files waiting to be sent. Send or remove some first.');
+  };
   const filePath = (id: string) => join(opts.uploadDir!, id);
   const removeFiles = (rows: Json[]) => {
     if (!opts.uploadDir) return;
@@ -1989,6 +2007,7 @@ export function createApp(opts: AppOptions): Server {
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
     const limit = uploadLimitFor(channel.serverId, user.id);
     if (!limit) throw new HttpError(403, "Your roles can't share files in this hearth");
+    checkUnsent(user.id);
     const tooBig = () => new HttpError(413, `You can share files up to ${Math.round(limit / 1048576)} MB here`);
     const declared = Number(req.headers['content-length']);
     if (declared > limit) throw tooBig();
@@ -2284,6 +2303,7 @@ export function createApp(opts: AppOptions): Server {
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
     const gif = gifsOn().get(String(body.id ?? ''));
     if (!gif) throw new HttpError(404, 'That GIF is no longer available. Search again.');
+    checkUnsent(user.id);
     let data: Buffer;
     try {
       data = await download(gif.full, maxUpload);
@@ -2744,7 +2764,7 @@ export function createApp(opts: AppOptions): Server {
   route(
     'POST',
     '/api/password/forgot',
-    async ({ body, ip }) => {
+    ({ body, ip }) => {
       if (!opts.mail) throw new HttpError(400, "Email isn't set up on this server, so ask whoever runs it to reset your password.");
       const name = String(body.username ?? '').trim();
       checkTries([`forgot-ip:${ip}`], 10);
@@ -2760,7 +2780,8 @@ export function createApp(opts: AppOptions): Server {
       const code = String(randomBytes(4).readUInt32BE() % 1_000_000).padStart(6, '0');
       db.prepare('UPDATE users SET reset_code = ?, reset_expires = ?, reset_tries = 0 WHERE id = ?').run(hashCode(code), now() + RESET_MINUTES * 60 * 1000, u.id);
       const link = opts.publicUrl ? `\n\nOpen Peiskos: ${opts.publicUrl}` : '';
-      await mailTo(u.email, `Your Peiskos password code: ${code}`, `Hi ${u.username},\n\nSomeone (hopefully you) asked to reset your Peiskos password. Your code is ${code}. It works for ${RESET_MINUTES} minutes.${link}\n\nIf it wasn't you, ignore this email: your password stays the same.`).catch((err) =>
+      // Not waited for, so how long the answer takes doesn't give away who has an email on file either.
+      void mailTo(u.email, `Your Peiskos password code: ${code}`, `Hi ${u.username},\n\nSomeone (hopefully you) asked to reset your Peiskos password. Your code is ${code}. It works for ${RESET_MINUTES} minutes.${link}\n\nIf it wasn't you, ignore this email: your password stays the same.`).catch((err) =>
         console.error('Sending a password reset email failed:', err),
       );
       return answer;
@@ -3106,7 +3127,7 @@ export function createApp(opts: AppOptions): Server {
   const newBotToken = (userId: number) => {
     db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
     const token = newToken();
-    db.prepare("INSERT INTO sessions (token, user_id, created_at, last_used_at, device) VALUES (?, ?, ?, ?, 'Bot')").run(token, userId, now(), now());
+    db.prepare("INSERT INTO sessions (token, user_id, created_at, last_used_at, device) VALUES (?, ?, ?, ?, 'Bot')").run(tokenHash(token), userId, now(), now());
     return token;
   };
   const removeBot = (serverId: number, userId: number) => {
@@ -4337,7 +4358,8 @@ export function createApp(opts: AppOptions): Server {
     return userChanged(user.id);
   });
 
-  const sessionId = (token: string) => createHash('sha256').update(token).digest('hex').slice(0, 16);
+  // A device's id in "your devices": the start of its login's hash.
+  const sessionId = (hash: string) => hash.slice(0, 16);
   /** "Chrome on Windows", "Burrow app on Mac" and so on, from a user agent. */
   const deviceName = (ua: string | null) => {
     if (!ua) return 'Unknown device';
@@ -4345,7 +4367,7 @@ export function createApp(opts: AppOptions): Server {
     const app = /Electron|Burrow\//.test(ua) ? 'Peiskos app' : /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /OPR\//.test(ua) ? 'Opera' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : /node/i.test(ua) ? 'Script' : 'Browser';
     return os ? `${app} on ${os}` : app;
   };
-  route('GET', '/api/me/sessions', ({ user, token }) =>
+  route('GET', '/api/me/sessions', ({ user, session }) =>
     (
       db.prepare('SELECT token, created_at, last_used_at, device, ip FROM sessions WHERE user_id = ? ORDER BY COALESCE(last_used_at, created_at) DESC').all(user.id) as
         { token: string; created_at: number; last_used_at: number | null; device: string | null; ip: string | null }[]
@@ -4355,21 +4377,21 @@ export function createApp(opts: AppOptions): Server {
       ip: s.ip,
       createdAt: s.created_at,
       lastUsedAt: s.last_used_at ?? s.created_at,
-      current: s.token === token,
+      current: s.token === session,
       online: [...(sockets.get(user.id) ?? [])].some((ws) => socketTokens.get(ws) === s.token),
     })),
   );
-  route('DELETE', '/api/me/sessions/:code', ({ user, params, token }) => {
+  route('DELETE', '/api/me/sessions/:code', ({ user, params, session }) => {
     const all = db.prepare('SELECT token FROM sessions WHERE user_id = ?').all(user.id) as { token: string }[];
     const s = all.find((x) => sessionId(x.token) === params[0]);
     if (!s) throw new HttpError(404, 'That device is already signed out');
-    if (s.token === token) throw new HttpError(400, 'Use Log out to sign out of this device');
+    if (s.token === session) throw new HttpError(400, 'Use Log out to sign out of this device');
     db.prepare('DELETE FROM sessions WHERE token = ?').run(s.token);
     for (const ws of sockets.get(user.id) ?? []) if (socketTokens.get(ws) === s.token) ws.close(4001, 'Signed out');
     return { ok: true };
   });
-  route('DELETE', '/api/me/sessions', ({ user, token }) => {
-    signOutOthers(user.id, token ?? null, 'Signed out');
+  route('DELETE', '/api/me/sessions', ({ user, session }) => {
+    signOutOthers(user.id, session ?? null, 'Signed out');
     return { ok: true };
   });
 
@@ -4792,10 +4814,9 @@ export function createApp(opts: AppOptions): Server {
         const user = userByToken(token);
         if (r.auth && !user) throw new HttpError(401, 'Not logged in');
         const body = req.method === 'GET' ? {} : await readBody(req);
-        if (url.pathname === '/api/logout') body.token = token;
         const ua = String(req.headers['user-agent'] ?? '');
         const secure = req.headers['x-forwarded-proto'] === 'https' || !!(req.socket as { encrypted?: boolean }).encrypted;
-        return send(res, 200, await r.handler({ user: user!, params: m.slice(1), body, url, token, ip: clientIp(req), ua, host: String(req.headers.host ?? ''), secure }));
+        return send(res, 200, await r.handler({ user: user!, params: m.slice(1), body, url, session: token ? tokenHash(token) : undefined, ip: clientIp(req), ua, host: String(req.headers.host ?? ''), secure }));
       }
       throw new HttpError(404, 'Not found');
     } catch (err) {
@@ -4807,7 +4828,9 @@ export function createApp(opts: AppOptions): Server {
 
   // ---- WebSocket ----------------------------------------------------------
 
-  const wss = new WebSocketServer({ noServer: true });
+  // The app only sends small messages (the biggest is a 4000-character chat message), so a
+  // connection that sends more than this is cut off rather than kept in memory.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -4817,7 +4840,7 @@ export function createApp(opts: AppOptions): Server {
       return socket.destroy();
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
-      socketTokens.set(ws, url.searchParams.get('token')!);
+      socketTokens.set(ws, tokenHash(url.searchParams.get('token')!));
       onConnection(ws, user);
     });
   });
@@ -4836,6 +4859,9 @@ export function createApp(opts: AppOptions): Server {
     }
     ws.send(JSON.stringify({ type: 'ready', user }));
     deliverReminders(user.id);
+
+    // A broken or oversized frame closes the connection. Without a listener the error would stop the whole server.
+    ws.on('error', () => ws.terminate());
 
     let alive = true;
     ws.on('pong', () => (alive = true));
@@ -4878,6 +4904,8 @@ export function createApp(opts: AppOptions): Server {
         } else if (msg.type === 'fireside_send') {
           const channelId = inVoice.get(user.id);
           if (channelId === undefined) throw new HttpError(400, 'Join the fire to talk there');
+          const left = timeoutLeft(channelById(channelId)!.serverId, user.id);
+          if (left) throw new HttpError(403, `You're timed out for ${left}`);
           const content = typeof msg.content === 'string' ? msg.content.trim() : '';
           if (!content) throw new HttpError(400, 'Message is empty');
           if (content.length > 1000) throw new HttpError(400, 'Message is too long');

@@ -1,7 +1,10 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
-import { openDb } from '../src/db.ts';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openDb, tokenHash } from '../src/db.ts';
 import { createApp } from '../src/app.ts';
 
 const db = openDb(':memory:');
@@ -62,9 +65,30 @@ test('wrong current passwords are limited too', async () => {
 test('logins expire after 30 days unused', async () => {
   const me = (await call('/api/register', { body: { username: 'old', password: 'password1', registrationCode: 'secret-code' } })).data;
   assert.equal((await call('/api/me', { token: me.token })).status, 200);
-  db.prepare('UPDATE sessions SET last_used_at = ? WHERE token = ?').run(Date.now() - 31 * 24 * 60 * 60 * 1000, me.token);
+  db.prepare('UPDATE sessions SET last_used_at = ? WHERE token = ?').run(Date.now() - 31 * 24 * 60 * 60 * 1000, tokenHash(me.token));
   assert.equal((await call('/api/me', { token: me.token })).status, 401);
+  assert.equal(db.prepare('SELECT 1 FROM sessions WHERE token = ?').get(tokenHash(me.token)), undefined);
+});
+
+test('logins are kept as hashes, so a copy of the database can not log anyone in', async () => {
+  const me = (await call('/api/register', { body: { username: 'hashy', password: 'password1', registrationCode: 'secret-code' } })).data;
   assert.equal(db.prepare('SELECT 1 FROM sessions WHERE token = ?').get(me.token), undefined);
+  const kept = db.prepare('SELECT s.token FROM sessions s JOIN users u ON u.id = s.user_id WHERE u.username = ?').get('hashy') as { token: string };
+  assert.equal(kept.token, tokenHash(me.token));
+  // The kept value itself doesn't work as a login.
+  assert.equal((await call('/api/me', { token: kept.token })).status, 401);
+  assert.equal((await call('/api/me', { token: me.token })).status, 200);
+});
+
+test('logins from before hashing keep working after an update', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'peiskos-')), 'old.db');
+  const old = openDb(file);
+  old.prepare("INSERT INTO users (id, username, password_hash, created_at) VALUES (1, 'early', 'x', 0)").run();
+  old.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, 1, 0)').run('raw-token-from-before');
+  old.close();
+  const reopened = openDb(file);
+  assert.deepEqual(reopened.prepare('SELECT token FROM sessions').all().map((r) => (r as { token: string }).token), [tokenHash('raw-token-from-before')]);
+  reopened.close();
 });
 
 test('security headers', async () => {

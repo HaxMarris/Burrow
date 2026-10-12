@@ -233,11 +233,12 @@ Send them the link it prints (it uses `PUBLIC_URL`). Add `--two-step-off` if the
 
 - Everything travels encrypted: Caddy serves HTTPS (and Peiskos then tells browsers to always use it), and voice uses WebRTC's built-in encryption. Passwords are stored hashed with scrypt.
 - Too many wrong passwords lock that account's login for 15 minutes; registration code guesses are limited per address the same way.
-- Logins expire after 30 days without use. Changing your password logs you out everywhere else, and *Your devices* in the account shows every login and can sign any of them out.
+- Logins expire after 30 days without use. Changing your password logs you out everywhere else, and *Your devices* in the account shows every login and can sign any of them out. The database only keeps a hash of each login, so a copy of it (a backup, say) can't be used to log in as anyone.
 - Two-step login is optional: each person can turn it on in their account, after which their password also needs a code from an authenticator app (or one of 10 one-time recovery codes).
 - Passkeys work in the web app over HTTPS (they belong to the site's address, so set `PUBLIC_URL` if people reach Peiskos by more than one name). The desktop app logs in with a password.
 - With Docker, port 3000 only listens on the server itself, so the only way in is through Caddy. Set `BURROW_BIND=0.0.0.0` in `.env` if you run without a reverse proxy.
-- The web app only runs its own scripts (a strict Content-Security-Policy), which blunts any injected code.
+- The web app and the desktop app only run their own scripts (a strict Content-Security-Policy), which blunts any injected code.
+- If `ADMIN_USERS` is set, keep it in step with usernames: if a listed admin changes their username, whoever takes the old one becomes an admin.
 - A weekly check on GitHub (`.github/workflows/security.yml`) looks for known holes in Peiskos's packages and makes sure those protective headers are still sent, and Dependabot proposes updates to packages, Docker images and workflows.
 
 ### The admin page
