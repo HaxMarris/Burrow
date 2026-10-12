@@ -1,4 +1,4 @@
-// The one bridge between the app window and Electron: picking what to share on screen, its sound, voice hotkeys, the game you're playing, the icon badge, zoom and the tray settings.
+// The one bridge between the app window and Electron: picking what to share on screen, its sound, voice hotkeys, the game you're playing, the icon badge, zoom, the tray settings and updates.
 const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
 const appAudioSupported = ipcRenderer.sendSync('app-audio-supported');
@@ -39,6 +39,15 @@ contextBridge.exposeInMainWorld('burrowDesktop', {
   settings: {
     get: () => ipcRenderer.sendSync('desktop-settings'),
     set: (change) => ipcRenderer.invoke('desktop-settings-set', change),
+  },
+  /**
+   * A newer version, once there is one: { version, install } (install false means it has to be
+   * downloaded from the release page). install() restarts into it, or opens that page.
+   */
+  update: {
+    get: () => ipcRenderer.sendSync('update-status'),
+    onReady: (fn) => ipcRenderer.on('update-ready', (_e, update) => fn(update)),
+    install: () => ipcRenderer.send('update-install'),
   },
   platform: process.platform,
   hotkeys: {

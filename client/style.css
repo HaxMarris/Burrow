@@ -678,10 +678,13 @@ a.btn { text-decoration: none; display: inline-block; }
 .fire-glow { background: radial-gradient(circle, color-mix(in srgb, var(--glow) 34%, transparent), color-mix(in srgb, var(--ember) 10%, transparent) 60%, transparent 72%); }
 .fire-glow.outer { width: 47%; }
 .fire-glow.inner { width: 28%; animation: fire-breathe 3.2s ease-in-out infinite; }
-.fire-core { width: 15.6%; background: radial-gradient(circle at 50% 62%, var(--glow), var(--ember) 72%); color: #fff8ee; display: grid; place-items: center; box-shadow: 0 0 36px 6px color-mix(in srgb, var(--ember) 45%, transparent); }
-.fire-core svg { width: 48%; height: 48%; fill: currentColor; }
+.fire-core { width: 30%; aspect-ratio: 200 / 220; height: auto; border-radius: 0; overflow: visible; filter: drop-shadow(0 0 22px color-mix(in srgb, var(--ember) 55%, transparent)); }
+.fire-flame { transform-box: fill-box; transform-origin: 50% 100%; }
+.fire-flame.outer { animation: fire-flicker 2.6s ease-in-out infinite; }
+.fire-flame.inner { animation: fire-flicker 1.9s ease-in-out infinite reverse; }
+@keyframes fire-flicker { 0%, 100% { transform: scale(1, 1) skewX(0deg); } 30% { transform: scale(.97, 1.04) skewX(-1.5deg); } 65% { transform: scale(1.02, .97) skewX(1.5deg); } }
 @keyframes fire-breathe { 50% { scale: 1.08; } }
-@media (prefers-reduced-motion: reduce) { .fire-glow.inner { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .fire-glow.inner, .fire-flame { animation: none; } }
 
 .seat { position: absolute; translate: -50% -50%; width: 170px; display: flex; flex-direction: column; align-items: center; gap: 5px; text-align: center; transition: left .3s, top .3s; }
 .seat-face-wrap { position: relative; display: grid; place-items: center; }
@@ -757,7 +760,7 @@ button.seat-face { cursor: pointer; }
   .fire-ring { --face: 64px; --rx: 34; --ry: 39; width: min(420px, 100cqw, 92cqh); aspect-ratio: 360 / 400; }
   .fire-glow.outer { width: 56%; }
   .fire-glow.inner { width: 34%; }
-  .fire-core { width: 19%; }
+  .fire-core { width: 36%; }
   .fire-ring.crowded { --face: 48px; }
   .seat { width: 120px; font-size: 14px; }
   .fire-ring-wrap { padding: 8px; }
@@ -1191,6 +1194,9 @@ button.seat-face { cursor: pointer; }
 #tab-dot { position: absolute; right: -2px; bottom: -2px; width: 9px; height: 9px; box-shadow: 0 0 0 2px var(--topbar); }
 .inbox-btn { position: relative; }
 .inbox-btn svg { width: 20px; height: 20px; }
+.update-btn { color: #3f9f5c; }
+.update-btn:hover { color: #4fb86d; background: color-mix(in srgb, #3f9f5c 14%, transparent); }
+.update-btn svg { width: 22px; height: 22px; fill: currentColor; }
 
 .status-picks { display: flex; flex-direction: column; padding-bottom: 4px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
 .status-picks button { display: flex; align-items: center; gap: 10px; }

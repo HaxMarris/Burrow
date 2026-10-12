@@ -98,6 +98,30 @@ async function installApp() {
 $('#install-btn').onclick = installApp;
 $('#shortcuts-btn').onclick = () => openShortcuts();
 
+// A newer desktop app: a green button in the top bar, as in Discord, that restarts into it once
+// you confirm. (An unsigned Mac build can't install it itself, so the button opens the download.)
+const updates = window.burrowDesktop?.update;
+function showUpdateButton(update) {
+  if (!update) return;
+  const btn = $('#update-btn');
+  const label = update.install ? `Update to ${update.version}` : `Peiskos ${update.version} is out`;
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+  btn.classList.remove('hidden');
+  btn.onclick = () => {
+    modal(`<h2>Update Peiskos?</h2>
+      <p class="muted">${update.install
+        ? `Version ${escapeHtml(update.version)} is ready. Peiskos closes and opens again in a few seconds. If you're by a fire, you'll need to join it again.`
+        : `Version ${escapeHtml(update.version)} is out. Download it and install it over this one.`}</p>
+      <div class="modal-row"><span class="spacer"></span><button type="button" class="btn secondary" data-close>Not now</button><button type="button" class="btn" id="update-go">${update.install ? 'Restart and update' : 'Download'}</button></div>`);
+    $('#update-go').onclick = () => { closeModal(); updates.install(); };
+  };
+}
+if (updates) {
+  showUpdateButton(updates.get());
+  updates.onReady(showUpdateButton);
+}
+
 // The service worker: alerts while Burrow is closed, the app's files for working offline, and
 // things shared from other apps. (Only on the web; the desktop app has its files built in.)
 if (!isDesktop && 'serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
