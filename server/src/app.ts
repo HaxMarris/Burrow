@@ -2984,10 +2984,10 @@ export function createApp(opts: AppOptions): Server {
   });
 
   /** Sends reminders that are due to whoever set them, if they're connected. The rest wait until they are. */
-  const deliverReminders = (userId?: number) => {
+  const deliverReminders = (userId?: number, at = now()) => {
     const rows = db
       .prepare(`SELECT * FROM saved_messages WHERE remind_at <= ? AND reminded = 0 ${userId ? 'AND user_id = ?' : ''}`)
-      .all(...(userId ? [now(), userId] : [now()])) as Json[];
+      .all(...(userId ? [at, userId] : [at])) as Json[];
     for (const r of rows) {
       const uid = r.user_id as number;
       if (!sockets.has(uid)) continue;
@@ -4078,7 +4078,8 @@ export function createApp(opts: AppOptions): Server {
     wakeTimer = setTimeout(tick, Math.max(0, Math.min(t - now(), 3600_000)));
     wakeTimer.unref();
   };
-  const nextDue = () =>
+  // `at` is the time the clock last looked, so a reminder that fell due just after that still counts as coming up.
+  const nextDue = (at = now()) =>
     (db
       .prepare(
         `SELECT MIN(t) AS t FROM (
@@ -4087,19 +4088,20 @@ export function createApp(opts: AppOptions): Server {
            UNION ALL SELECT MIN(closes_at) FROM polls WHERE ended = 0
            UNION ALL SELECT MIN(starts_at) - ? FROM events WHERE reminded = 0 AND starts_at > ?)`,
       )
-      .get(now(), EVENT_REMIND_MS, now()) as { t: number | null }).t;
+      .get(at, EVENT_REMIND_MS, now()) as { t: number | null }).t;
   const tick = () => {
     wakeTimer = null;
     wakeTime = Infinity;
+    const at = now();
     try {
       sendScheduled();
-      deliverReminders();
+      deliverReminders(undefined, at);
       endPolls();
       remindEvents();
     } catch (err) {
       console.error(err);
     } finally {
-      const next = nextDue();
+      const next = nextDue(at);
       if (next !== null) wakeAt(next);
     }
   };
