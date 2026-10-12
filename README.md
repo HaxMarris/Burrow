@@ -319,7 +319,7 @@ the machine, which is what lets it rebuild Peiskos, so leave it off if you'd rat
 
 **Browser:** they open your server address (e.g. `https://chat.example.com`), click *Register*, and enter the registration code.
 
-**Desktop app:** the first time it opens it asks for the server address, then works the same way.
+**Desktop app:** it connects to `https://peiskos.app` by itself. To use your own server instead, click *Use a different server* on the login screen and enter its address.
 
 **Phones:** on Android, open the server address in Chrome and pick *Install the app* from your menu
 (your picture, top right) or Chrome's own *Install app*; Peiskos then has its own icon, opens without
