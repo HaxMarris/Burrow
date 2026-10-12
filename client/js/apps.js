@@ -30,12 +30,15 @@ function displaySettings() {
         <option value="reduce" ${d.motion === 'reduce' ? 'selected' : ''}>Less motion</option>
         <option value="full" ${d.motion === 'full' ? 'selected' : ''}>All animations</option>
       </select>
-    </label>`;
+    </label>
+    <label class="check"><input type="checkbox" id="display-seasons" ${d.seasons !== 'off' ? 'checked' : ''} /> Seasonal touches</label>
+    <span class="small muted">Snow on the fire in winter, falling leaves in autumn, and something extra for the holidays.</span>`;
 }
 function wireDisplaySettings() {
   $('#display-compact').onchange = (e) => saveDisplay({ compact: e.target.checked });
   $('#display-size').onchange = (e) => saveDisplay({ textSize: Number(e.target.value) });
   $('#display-motion').onchange = (e) => saveDisplay({ motion: e.target.value === 'system' ? undefined : e.target.value });
+  $('#display-seasons').onchange = (e) => { saveDisplay({ seasons: e.target.checked ? undefined : 'off' }); seasonLayer(); };
 }
 
 // Ctrl+plus, Ctrl+minus and Ctrl+0 in the desktop app (browsers zoom by themselves).

@@ -745,6 +745,9 @@ function handleEvent(ev) {
       toast(ev.muted ? `A moderator muted you in ${s?.name ?? 'a hearth'}.` : `You can speak again in ${s?.name ?? 'the hearth'}.`);
       break;
     }
+    case 'marshmallow':
+      onMarshmallow(ev);
+      break;
     case 'soundboard':
       onBoardSound(ev);
       break;

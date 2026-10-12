@@ -595,6 +595,7 @@ function renderFire(status) {
   const ids = [...(ch?.voiceUsers ?? [])];
   if (!ids.includes(state.me.id)) ids.push(state.me.id);
   const s = [...state.servers.values()].find((x) => x.channels.includes(ch));
+  decorateFire(s);
   $('#stage-title').textContent = ch && s && !isDm(s) ? `${s.name}'s ${ch.name}` : ch ? fireName(ch) : 'Campfire';
   const streamer = ids.find((id) => id !== state.me.id && state.sharing.get(id)?.screen);
   $('#fire-count').textContent = (typeof status === 'string' ? status : !room ? 'Connecting…' : `${ids.length} gathered`)
@@ -671,6 +672,7 @@ function renderFire(status) {
       if (!camTrack) seat.face = button;
     }
     const wrap = seat.el.querySelector('.seat-face-wrap');
+    decorateSeat(wrap, id);
     wrap.querySelector('.seat-live')?.remove();
     if (sharing?.screen) wrap.insertAdjacentHTML('beforeend', '<span class="seat-live">LIVE</span>');
     seat.el.className = 'seat' + (me ? ' me' : '') + (speaking ? ' speaking' : '') + (camTrack ? ' has-video' : '');

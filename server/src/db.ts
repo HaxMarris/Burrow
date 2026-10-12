@@ -197,6 +197,7 @@ export function openDb(file: string): Db {
   addProfiles(db);
   addMediaSizes(db);
   addHosting(db);
+  addExtras(db);
   hashSessionTokens(db);
   return db;
 }
@@ -660,6 +661,37 @@ function addHosting(db: Db) {
       last_at  INTEGER NOT NULL,
       count    INTEGER NOT NULL DEFAULT 1
     );
+  `);
+}
+
+/** Added with the fun extras: birthdays, the message of the day, time at the fire and its decorations. */
+function addExtras(db: Db) {
+  addColumn(db, 'users', 'birthday', 'TEXT'); // 'MM-DD', shown to people they share a hearth with
+  addColumn(db, 'users', 'fire_item', 'TEXT'); // what sits by their seat at the fire, unlocked by time there
+  addColumn(db, 'servers', 'fire_look', 'TEXT'); // the hearth's fire, unlocked by everyone's time there
+  db.exec(`
+    -- Time spent at fires (voice rooms), for decorations and the year in review. ended_at is kept
+    -- up to date while someone is still there, so a restart loses at most a minute.
+    CREATE TABLE IF NOT EXISTS voice_time (
+      id         INTEGER PRIMARY KEY,
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      channel_id INTEGER REFERENCES channels(id) ON DELETE SET NULL,
+      started_at INTEGER NOT NULL,
+      ended_at   INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS voice_time_by_user ON voice_time(user_id);
+    CREATE INDEX IF NOT EXISTS voice_time_by_server ON voice_time(server_id, started_at);
+    -- A hearth's messages of the day: one is shown each day, in turn.
+    CREATE TABLE IF NOT EXISTS motd (
+      id         INTEGER PRIMARY KEY,
+      server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      text       TEXT NOT NULL DEFAULT '',
+      picture    TEXT, -- a file in uploads/burrow-pictures
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS motd_by_server ON motd(server_id, id);
   `);
 }
 
