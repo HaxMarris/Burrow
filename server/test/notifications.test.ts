@@ -342,6 +342,8 @@ test('email: confirm an address with a code, then reset a forgotten password wit
 
   // Bob forgot his: a code arrives, and a wrong one doesn't work.
   assert.equal((await call('/api/password/forgot', { body: { username: bob.user.username } })).status, 200);
+  // The answer doesn't wait for the email (so its timing gives nothing away); it follows shortly.
+  for (let i = 0; i < 40 && !mails.length; i++) await wait(50);
   assert.equal(mails.length, 1);
   const mail = mailText(mails[0]);
   const reset = /code: (\d{6})/.exec(mail.subject)![1];

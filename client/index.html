@@ -3,6 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- For the desktop app, which opens this page from its own files and so gets no security headers.
+       Only its own scripts run; pictures, sound and the connection come from the server it's set to.
+       In a browser the server's stricter Content-Security-Policy header applies as well. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self' file: 'wasm-unsafe-eval'; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data: blob: https: http:; media-src 'self' file: blob: https: http:; font-src 'self' file:; connect-src 'self' file: https: http: wss: ws:; worker-src 'self' file: blob:; frame-src https://www.youtube-nocookie.com; object-src 'none'; base-uri 'none'; form-action 'self'" />
   <title>Peiskos</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
   <link rel="manifest" href="manifest.webmanifest" />

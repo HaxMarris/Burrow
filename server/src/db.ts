@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -154,6 +155,7 @@ export function openDb(file: string): Db {
   addProfiles(db);
   addMediaSizes(db);
   addHosting(db);
+  hashSessionTokens(db);
   return db;
 }
 
@@ -617,4 +619,22 @@ function addHosting(db: Db) {
       count    INTEGER NOT NULL DEFAULT 1
     );
   `);
+}
+
+/** What a login token is kept as: its SHA-256, so a copy of the database (a backup) can't be used to log in. */
+export const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
+
+/** Logins kept from before tokens were stored hashed are hashed in place; everyone stays logged in. */
+function hashSessionTokens(db: Db) {
+  const old = db.prepare('SELECT token FROM sessions WHERE length(token) != 64').all() as { token: string }[];
+  if (!old.length) return;
+  const update = db.prepare('UPDATE sessions SET token = ? WHERE token = ?');
+  db.exec('BEGIN');
+  try {
+    for (const { token } of old) update.run(tokenHash(token), token);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
 }
