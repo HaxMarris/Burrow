@@ -751,11 +751,15 @@ export function createApp(opts: AppOptions): Server {
         failedTry([`register-ip:${ip}`], 60 * 60 * 1000);
         throw new HttpError(403, 'Invalid registration code');
       }
+      // Where the server can send email, an address is required, and it counts right away, so a
+      // forgotten password can be reset from day one without confirming it first.
+      const email = opts.mail && typeof body.email === 'string' ? body.email.trim() : '';
+      if (opts.mail && !looksLikeEmail(email)) throw new HttpError(400, "Enter your email, so you can reset a forgotten password");
       if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username))
         throw new HttpError(409, 'That username is taken');
       const r = db
-        .prepare('INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)')
-        .run(username, hashPassword(body.password), now());
+        .prepare('INSERT INTO users (username, password_hash, created_at, email, email_verified) VALUES (?, ?, ?, ?, ?)')
+        .run(username, hashPassword(body.password), now(), email || null, email ? 1 : 0);
       if (link && link !== 'code') admin.useSignupLink(link);
       return startSession(userById(Number(r.lastInsertRowid))!, { ip, ua });
     },

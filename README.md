@@ -219,7 +219,7 @@ MAIL_FROM=Peiskos <you@example.com>
 PUBLIC_URL=https://chat.example.com
 ```
 
-Write `@` in the username as `%40`. Port 465 starts encrypted (`smtps://`); for port 587 use `smtp://`, and Peiskos switches to encryption before sending the password (it refuses to send it unencrypted). Then each person adds and confirms their address under *Email* in their account. Peiskos only sends the code that confirms an address and the code that resets a password, never anything else.
+Write `@` in the username as `%40`. Port 465 starts encrypted (`smtps://`); for port 587 use `smtp://`, and Peiskos switches to encryption before sending the password (it refuses to send it unencrypted). Then signing up asks for an email address, and it counts straight away, so a new account can reset its password from day one. People whose accounts are older add theirs under *Email* in their account (a reminder pops up once a day until they do), confirming it with a code. Peiskos only sends the code that confirms an address and the code that resets a password, never anything else.
 
 Without email (or for someone who lost their email too), whoever runs the server can make a one-hour reset link:
 

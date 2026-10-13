@@ -187,19 +187,22 @@ async function renderAuthMode() {
   $('#auth-error').textContent = '';
   let needsCode = false;
   let linksOnly = false;
-  if (registering && state.serverUrl && !signupLink) {
-    try { ({ registrationCodeRequired: needsCode, signupLinksOnly: linksOnly } = await api('/api/config')); } catch {}
+  let canEmail = false;
+  if (state.serverUrl) {
+    try {
+      const config = await api('/api/config');
+      canEmail = !!config.email;
+      if (registering && !signupLink) ({ registrationCodeRequired: needsCode, signupLinksOnly: linksOnly } = config);
+    } catch {}
   }
   // A signup link can be pasted here too (the desktop app can't be opened by one).
   $('#reg-code-row').classList.toggle('hidden', !needsCode && !linksOnly);
   $('#reg-code').placeholder = linksOnly ? 'Paste your signup link' : 'Ask whoever runs the server, or paste a signup link';
   if (registering && signupLink) $('#auth-subtitle').textContent = "You've been invited. Pick a username your friends will see.";
   if (linksOnly) $('#auth-subtitle').textContent = 'Signing up here needs a signup link from whoever runs this Peiskos.';
-  // "Forgot your password?" only where the server can send email.
-  let canEmail = false;
-  if (!registering && state.serverUrl) {
-    try { canEmail = (await api('/api/config')).email; } catch {}
-  }
+  // Where the server can send email: an address when signing up, and "Forgot your password?" when logging in.
+  $('#email-row').classList.toggle('hidden', !registering || !canEmail);
+  $('#signup-email').required = registering && canEmail;
   $('#forgot-row').classList.toggle('hidden', registering || !canEmail);
   $('#passkey-login').classList.toggle('hidden', registering || !passkeysWork());
 }
@@ -292,6 +295,7 @@ $('#auth-form').addEventListener('submit', async (e) => {
     await resolveServerUrl();
     const body = { username: $('#username').value.trim(), password: $('#password').value };
     if (registering) body.registrationCode = $('#reg-code').value.trim();
+    if (registering && !$('#email-row').classList.contains('hidden')) body.email = $('#signup-email').value.trim();
     const pasted = /[?&]signup=([\w-]+)/.exec(body.registrationCode ?? '')?.[1];
     if (registering && (signupLink || pasted)) body.signupLink = signupLink || pasted;
     const result = await api(registering ? '/api/register' : '/api/login', { method: 'POST', body });
@@ -439,6 +443,7 @@ async function enterApp() {
   state.gifsEnabled = !!config.gifs;
   state.emailEnabled = !!config.email;
   $('#gif-btn').classList.toggle('hidden', !state.gifsEnabled);
+  nudgeForEmail();
   renderMyStatus();
   syncAdminButton();
   await loadServers();
