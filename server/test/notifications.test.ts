@@ -113,7 +113,7 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let n = 0;
 async function people(...names: string[]) {
   const out: any[] = [];
-  for (const name of names) out.push((await call('/api/register', { body: { username: `${name}${++n}`, password: 'password1' } })).data);
+  for (const name of names) out.push((await call('/api/register', { body: { username: `${name}${++n}`, password: 'password1', email: `${name}${n}@example.com` } })).data);
   return out;
 }
 async function burrow(host: any, ...others: any[]) {
@@ -321,8 +321,26 @@ test('a direct message pushes to the other person', async () => {
   assert.equal(pushes[0].message.badge, 1);
 });
 
+test('email: required at signup, and it counts right away', async () => {
+  const name = `zed${++n}`;
+  assert.equal((await call('/api/register', { body: { username: name, password: 'password1' } })).status, 400);
+  assert.equal((await call('/api/register', { body: { username: name, password: 'password1', email: 'not an email' } })).status, 400);
+  mails.length = 0;
+  const zed = (await call('/api/register', { body: { username: name, password: 'password1', email: ' zed@example.com ' } })).data;
+  const me = (await call('/api/me', { token: zed.token })).data;
+  assert.equal(me.email, 'zed@example.com');
+  assert.equal(me.emailVerified, true);
+  assert.equal(mails.length, 0); // nothing to confirm
+  // So "Forgot your password?" works straight away.
+  assert.equal((await call('/api/password/forgot', { body: { username: name } })).status, 200);
+  for (let i = 0; i < 40 && !mails.length; i++) await wait(50);
+  assert.equal(mails.length, 1);
+  assert.match(mails[0], /zed@example\.com/);
+});
+
 test('email: confirm an address with a code, then reset a forgotten password with it', async () => {
   const [bob, eve] = await people('bob', 'eve');
+  await call('/api/me/email', { method: 'DELETE', token: eve.token }); // like an account from before email was asked for
   mails.length = 0;
   let me = (await call('/api/me/email', { body: { email: 'bob@example.com' }, token: bob.token })).data;
   assert.equal(me.email, 'bob@example.com');

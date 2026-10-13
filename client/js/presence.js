@@ -299,6 +299,15 @@ function emailSettings() {
   </div>`;
 }
 
+// Accounts from before signup asked for an email: a reminder at most once a day until they add one.
+function nudgeForEmail() {
+  if (!state.emailEnabled || state.me.emailVerified) return;
+  const key = `emailNudge:${state.me.id}`;
+  if (Date.now() - Number(store.get(key) || 0) < 24 * 60 * 60 * 1000) return;
+  store.set(key, String(Date.now()));
+  toast('Add your email so you can reset your password if you ever forget it.', { action: 'Add email', onAction: () => openAccount('security'), timeout: 15000 });
+}
+
 function wireEmailSettings() {
   const box = $('#email-settings');
   if (!box) return;
