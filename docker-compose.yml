@@ -34,6 +34,8 @@ services:
       ADMIN_USERS: ${ADMIN_USERS:-}
       # Uptime: an address pinged every five minutes (see README).
       HEARTBEAT_URL: ${HEARTBEAT_URL:-}
+      # Fire decorations and marshmallows: all unlocked unless this is "hours" (see README).
+      FIRE_UNLOCKS: ${FIRE_UNLOCKS:-}
       # Off-site copies of backups and uploads, to any S3-style storage (see README).
       BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
       BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}

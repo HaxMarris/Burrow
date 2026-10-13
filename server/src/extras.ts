@@ -30,6 +30,12 @@ export const FIRE_LOOKS = [
 ];
 /** Toasting a marshmallow over the fire needs this much time at fires. */
 export const MARSHMALLOW_HOURS = 2;
+/**
+ * Everything at the fire is unlocked from the start while Peiskos is being tested. Set
+ * FIRE_UNLOCKS=hours to make things wait for hours at the fire again (hours are counted either way).
+ */
+const byHours = () => process.env.FIRE_UNLOCKS === 'hours';
+const need = (hours: number) => (byHours() ? hours : 0);
 const MARSHMALLOW_EVERY_MS = 15_000;
 const MAX_MOTD = 30;
 const MAX_MOTD_TEXT = 200;
@@ -94,8 +100,8 @@ export function extras(ctx: ExtrasContext) {
   const myFire = (userId: number) => ({
     hours: hoursOfUser(userId),
     item: (db.prepare('SELECT fire_item FROM users WHERE id = ?').get(userId) as { fire_item: string | null } | undefined)?.fire_item ?? null,
-    items: FIRE_ITEMS,
-    marshmallowHours: MARSHMALLOW_HOURS,
+    items: FIRE_ITEMS.map((i) => ({ ...i, hours: need(i.hours) })),
+    marshmallowHours: need(MARSHMALLOW_HOURS),
   });
   route('GET', '/api/me/fire', ({ user }) => myFire(user.id));
   route('PUT', '/api/me/fire', ({ user, body }) => {
@@ -103,7 +109,7 @@ export function extras(ctx: ExtrasContext) {
     if (id !== null) {
       const item = FIRE_ITEMS.find((i) => i.id === id);
       if (!item) throw fail(400, 'No such thing to bring');
-      if (hoursOfUser(user.id) < item.hours) throw fail(403, `That unlocks after ${item.hours} hours at the fire`);
+      if (hoursOfUser(user.id) < need(item.hours)) throw fail(403, `That unlocks after ${item.hours} hours at the fire`);
     }
     db.prepare('UPDATE users SET fire_item = ? WHERE id = ?').run(id, user.id);
     ctx.userChanged(user.id);
@@ -113,7 +119,7 @@ export function extras(ctx: ExtrasContext) {
   const hearthFire = (serverId: number, userId: number) => ({
     hours: hoursOfHearth(serverId),
     look: (db.prepare('SELECT fire_look FROM servers WHERE id = ?').get(serverId) as { fire_look: string | null }).fire_look ?? 'classic',
-    looks: FIRE_LOOKS,
+    looks: FIRE_LOOKS.map((l) => ({ ...l, hours: need(l.hours) })),
     canChange: ctx.can(serverId, userId, 'burrow'),
   });
   const hearth = (serverId: number, userId: number) => {
@@ -131,7 +137,7 @@ export function extras(ctx: ExtrasContext) {
     ctx.allowed(serverId, user, 'burrow');
     const look = FIRE_LOOKS.find((l) => l.id === body.look);
     if (!look) throw fail(400, 'No such fire');
-    if (hoursOfHearth(serverId) < look.hours) throw fail(403, `That fire unlocks after ${look.hours} hours around this hearth's fires`);
+    if (hoursOfHearth(serverId) < need(look.hours)) throw fail(403, `That fire unlocks after ${look.hours} hours around this hearth's fires`);
     db.prepare('UPDATE servers SET fire_look = ? WHERE id = ?').run(look.id === 'classic' ? null : look.id, serverId);
     ctx.sendServerUpdate(serverId);
     return hearthFire(serverId, user.id);
@@ -144,7 +150,7 @@ export function extras(ctx: ExtrasContext) {
     const channelId = ctx.inVoice.get(user.id);
     const channel = channelId === undefined ? undefined : ctx.channelById(channelId);
     if (!channel) throw fail(400, 'Sit down at a fire first');
-    if (hoursOfUser(user.id) < MARSHMALLOW_HOURS) throw fail(403, `Marshmallows unlock after ${MARSHMALLOW_HOURS} hours at the fire`);
+    if (hoursOfUser(user.id) < need(MARSHMALLOW_HOURS)) throw fail(403, `Marshmallows unlock after ${MARSHMALLOW_HOURS} hours at the fire`);
     if ((lastToast.get(user.id) ?? 0) > now() - MARSHMALLOW_EVERY_MS) throw fail(429, 'Let that one cool down first');
     lastToast.set(user.id, now());
     let roll = randomInt(100);

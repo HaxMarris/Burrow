@@ -60,6 +60,7 @@ const sat = (userId: number, serverId: number, channelId: number, hours: number,
   db.prepare('INSERT INTO voice_time (user_id, server_id, channel_id, started_at, ended_at) VALUES (?, ?, ?, ?, ?)').run(userId, serverId, channelId, at, at + hours * HOUR);
 
 test('time at the fire is counted, and unlocks things by your seat and the hearth\'s fire', async () => {
+  process.env.FIRE_UNLOCKS = 'hours';
   const max = await reg('max');
   const sam = await reg('sam');
   const s = (await call('/api/servers', { body: { name: 'Lodge' }, token: max.token })).data;
@@ -116,6 +117,26 @@ test('time at the fire is counted, and unlocks things by your seat and the heart
   assert.equal(heard.outcome, toast.data.outcome);
   assert.equal((await call('/api/voice/marshmallow', { body: {}, token: sam.token })).status, 429);
   assert.equal((await call('/api/voice/marshmallow', { body: {}, token: max.token })).status, 400);
+  ws.ws.close();
+  delete process.env.FIRE_UNLOCKS;
+});
+
+test('everything at the fire is unlocked from the start unless FIRE_UNLOCKS=hours', async () => {
+  const kit = await reg('kit');
+  const s = (await call('/api/servers', { body: { name: 'Den' }, token: kit.token })).data;
+  const fireId = await addRoom(s.id, kit.token, { name: 'Fire', kind: 'voice' });
+  const mine = (await call('/api/me/fire', { token: kit.token })).data;
+  assert.equal(mine.hours, 0);
+  assert.ok(mine.items.every((i: any) => i.hours === 0));
+  assert.equal(mine.marshmallowHours, 0);
+  assert.equal((await call('/api/me/fire', { method: 'PUT', body: { item: 'wolf' }, token: kit.token })).data.item, 'wolf');
+  assert.ok((await call(`/api/servers/${s.id}/fire`, { token: kit.token })).data.looks.every((l: any) => l.hours === 0));
+  assert.equal((await call(`/api/servers/${s.id}/fire`, { method: 'PUT', body: { look: 'blue' }, token: kit.token })).data.look, 'blue');
+  const ws = socket(kit.token);
+  await ws.next((e) => e.type === 'ready');
+  ws.ws.send(JSON.stringify({ type: 'voice_join', channelId: fireId }));
+  await ws.next((e) => e.type === 'voice_state' && e.userIds.length === 1);
+  assert.equal((await call('/api/voice/marshmallow', { body: {}, token: kit.token })).status, 200);
   ws.ws.close();
 });
 
