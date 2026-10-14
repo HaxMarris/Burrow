@@ -672,13 +672,13 @@ a.btn { text-decoration: none; display: inline-block; }
 .badge.hidden { display: none; }
 
 .fire-ring-wrap { flex: 1; min-height: 0; display: grid; place-items: center; padding: 16px; container-type: size; }
-.fire-ring { position: relative; width: min(640px, 100cqw, 123cqh); aspect-ratio: 640 / 520; --face: 84px; --rx: 41; --ry: 40; }
-.fire-ring.crowded { --face: 60px; }
-.fire-glow, .fire-core { position: absolute; left: 50%; top: 50%; translate: -50% -50%; border-radius: 50%; aspect-ratio: 1; }
+/* renderFire sets --face, where the fire sits (--cy) and how big it's drawn (--fire) to fit the space. */
+.fire-ring { position: relative; width: 100%; height: 100%; --face: 84px; --fire: 640px; }
+.fire-glow, .fire-core { position: absolute; left: 50%; top: var(--cy, 50%); translate: -50% -50%; border-radius: 50%; aspect-ratio: 1; }
 .fire-glow { background: radial-gradient(circle, color-mix(in srgb, var(--glow) 34%, transparent), color-mix(in srgb, var(--ember) 10%, transparent) 60%, transparent 72%); }
-.fire-glow.outer { width: 47%; }
-.fire-glow.inner { width: 28%; animation: fire-breathe 3.2s ease-in-out infinite; }
-.fire-core { width: 30%; aspect-ratio: 200 / 220; height: auto; border-radius: 0; overflow: visible; filter: drop-shadow(0 0 22px color-mix(in srgb, var(--ember) 55%, transparent)); }
+.fire-glow.outer { width: calc(var(--fire) * .47); }
+.fire-glow.inner { width: calc(var(--fire) * .28); animation: fire-breathe 3.2s ease-in-out infinite; }
+.fire-core { width: calc(var(--fire) * .3); aspect-ratio: 200 / 220; height: auto; border-radius: 0; overflow: visible; filter: drop-shadow(0 0 22px color-mix(in srgb, var(--ember) 55%, transparent)); }
 .fire-flame { transform-box: fill-box; transform-origin: 50% 100%; }
 .fire-flame.outer { animation: fire-flicker 2.6s ease-in-out infinite; }
 .fire-flame.inner { animation: fire-flicker 1.9s ease-in-out infinite reverse; }
@@ -686,7 +686,8 @@ a.btn { text-decoration: none; display: inline-block; }
 @keyframes fire-breathe { 50% { scale: 1.08; } }
 @media (prefers-reduced-motion: reduce) { .fire-glow.inner, .fire-flame { animation: none; } }
 
-.seat { position: absolute; translate: -50% -50%; width: 170px; display: flex; flex-direction: column; align-items: center; gap: 5px; text-align: center; transition: left .3s, top .3s; }
+/* A seat is pinned by the middle of its face, so every face sits on the ring and the name hangs below. */
+.seat { --face-h: var(--face); position: absolute; translate: -50% calc(var(--face-h) / -2); width: 170px; display: flex; flex-direction: column; align-items: center; gap: 5px; text-align: center; transition: left .3s, top .3s; }
 .seat-face-wrap { position: relative; display: grid; place-items: center; }
 .seat-face { display: grid; place-items: center; padding: 0; border: 0; background: none; border-radius: 50%; transition: box-shadow .12s; }
 button.seat-face { cursor: pointer; }
@@ -704,6 +705,8 @@ button.seat-face { cursor: pointer; }
 .seat-watch { display: flex; white-space: nowrap; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 16px; background: var(--accent); color: var(--accent-ink); font-size: 13px; font-weight: 800; }
 .seat-watch:hover { background: var(--accent-hover); }
 .seat-watch svg { width: 15px; height: 15px; fill: currentColor; }
+.seat.has-video { --face-h: calc(var(--face) * 1.15); }
+.seat.open { --face-h: calc(var(--face) * .76); }
 .seat.open .seat-face { width: calc(var(--face) * .76); height: calc(var(--face) * .76); border: 2px dashed var(--line); }
 
 .fire-controls { flex: none; display: flex; justify-content: center; gap: 12px; padding: 6px 12px 22px; }
@@ -757,11 +760,9 @@ button.seat-face { cursor: pointer; }
   .fire-sub { font-size: 12px; gap: 6px; }
   .fire-lock { background: none; padding: 0; }
   #stage-video { display: none; }
-  .fire-ring { --face: 64px; --rx: 34; --ry: 39; width: min(420px, 100cqw, 92cqh); aspect-ratio: 360 / 400; }
-  .fire-glow.outer { width: 56%; }
-  .fire-glow.inner { width: 34%; }
-  .fire-core { width: 36%; }
-  .fire-ring.crowded { --face: 48px; }
+  .fire-glow.outer { width: calc(var(--fire) * .56); }
+  .fire-glow.inner { width: calc(var(--fire) * .34); }
+  .fire-core { width: calc(var(--fire) * .36); }
   .seat { width: 120px; font-size: 14px; }
   .fire-ring-wrap { padding: 8px; }
   .fire-controls { gap: 6px; justify-content: space-around; padding: 6px 6px calc(16px + env(safe-area-inset-bottom)); }
@@ -1558,7 +1559,7 @@ kbd { display: inline-block; padding: 2px 7px; border: 1px solid var(--line); bo
 [data-motion="reduce"] .sky-layer * { animation: none !important; }
 [data-motion="reduce"] .sky-layer .meteor { display: none; }
 @media (prefers-reduced-motion: reduce) { [data-motion="system"] .sky-layer * { animation: none !important; } [data-motion="system"] .sky-layer .meteor { display: none; } }
-.fire-sparks span { position: absolute; left: var(--x); top: 50%; width: 4px; height: 4px; border-radius: 50%; background: #ffcf6b; box-shadow: 0 0 6px 2px rgba(255, 170, 60, .7); animation: spark-rise var(--d) ease-out var(--delay) infinite; }
+.fire-sparks span { position: absolute; left: calc(50% + var(--fire) * var(--x)); top: var(--cy, 50%); width: 4px; height: 4px; border-radius: 50%; background: #ffcf6b; box-shadow: 0 0 6px 2px rgba(255, 170, 60, .7); animation: spark-rise var(--d) ease-out var(--delay) infinite; }
 @keyframes spark-rise { from { translate: 0 0; opacity: 1; } to { translate: var(--drift) -150px; opacity: 0; scale: .3; } }
 
 /* Things by people's seats: a little pixel picture sitting just beside their face. */
