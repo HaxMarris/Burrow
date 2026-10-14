@@ -5,7 +5,7 @@ import { createHash, createHmac, randomBytes, randomInt } from 'node:crypto';
 import { extname, join, normalize } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { addModeratorRole, inTransaction, tokenHash, withStatementCache, type Db } from './db.ts';
-import { APP_CSP, HttpError, MIME, bearer, clientIp, readBody, readLimited, sameText, send, type Json } from './http.ts';
+import { APP_CSP, HttpError, MIME, allowance, bearer, clientIp, readBody, readLimited, sameText, send, type Json } from './http.ts';
 import { AVATAR_TYPES, INLINE_TYPES, MAX_AVATAR_BYTES, MAX_SOUND_BYTES, SOUND_TYPES } from './media.ts';
 import { hashPassword, verifyPassword, newToken, newInviteCode } from './auth.ts';
 import { closeRoom, removeFromRoom, setCanSpeak, voiceToken, type VoiceOptions } from './voice.ts';
@@ -594,6 +594,8 @@ export function createApp(opts: AppOptions): Server {
     ).map((r) => r.user_id);
 
   type PollInput = { question: string; options: string[]; multi: boolean; closesAt: number | null };
+  // Anyone can send a burst of messages, then about one a second: enough for any conversation, not for a flood.
+  const postAllowance = allowance(60, 1);
   type PostExtras = { forwarded?: Json; poll?: PollInput; scheduled?: boolean; live?: Json; webhook?: boolean };
 
   // ---- slash commands, worked out by the server so nobody can fake a dice roll
@@ -649,6 +651,8 @@ export function createApp(opts: AppOptions): Server {
     const problem = extras.webhook ? null : postProblem(channel, user.id);
     if (problem) throw new HttpError(403, problem);
     dmBlockCheck(channel.serverId, user.id);
+    if (!extras.scheduled && !extras.webhook && !postAllowance.take(user.id))
+      throw new HttpError(429, "You're sending messages very fast. Wait a moment.");
     const flagged = filterCheck(channel, user.id, typeof input.content === 'string' ? input.content : '');
     // Slow mode: people who manage rooms or messages aren't held back, and nor are scheduled messages.
     if (channel.slow && !extras.scheduled && !can(channel.serverId, user.id, 'rooms') && !can(channel.serverId, user.id, 'messages')) {
@@ -4830,6 +4834,8 @@ export function createApp(opts: AppOptions): Server {
 
     // A broken or oversized frame closes the connection. Without a listener the error would stop the whole server.
     ws.on('error', () => ws.terminate());
+    // Apps send a few messages a second at most (speaking, typing); far more than that is ignored.
+    const frames = allowance(200, 50);
 
     let alive = true;
     ws.on('pong', () => (alive = true));
@@ -4840,6 +4846,7 @@ export function createApp(opts: AppOptions): Server {
     }, 30_000);
 
     ws.on('message', (raw) => {
+      if (!frames.take(0)) return;
       let msg: Json;
       try {
         msg = JSON.parse(String(raw));

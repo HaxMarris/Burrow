@@ -162,3 +162,68 @@ test("a forwarded address is only believed from this machine or Docker's network
   assert.equal(ip('203.0.113.5', '10.9.9.9'), '203.0.113.5');
   assert.equal(ip('203.0.113.5'), '203.0.113.5');
 });
+
+test('messages can come in a burst, but not a flood', async () => {
+  const [host] = await people('host');
+  const room = (await burrow(host)).channels[0].id;
+  const post = (i: number) => call(`/api/channels/${room}/messages`, { body: { content: `m${i}` }, token: host.token });
+  for (let i = 0; i < 60; i++) assert.equal((await post(i)).status, 200);
+  const flood = await post(60);
+  assert.equal(flood.status, 429);
+  assert.match(flood.data.error, /very fast/);
+});
+
+test('the live connection ignores a flood of messages, without closing', async () => {
+  const [kim] = await people('kim');
+  const { ws } = await socket(kim.token);
+  let pongs = 0;
+  ws.on('message', (raw) => { if (JSON.parse(String(raw)).type === 'pong') pongs++; });
+  for (let i = 0; i < 400; i++) ws.send(JSON.stringify({ type: 'ping' }));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.ok(pongs >= 200 && pongs < 400, `${pongs} pongs`);
+  assert.equal(ws.readyState, WebSocket.OPEN);
+  ws.close();
+});
+
+test('a voice token is only good for joining soon after', async () => {
+  const [host] = await people('host');
+  const b = await burrow(host);
+  const fire = (await call(`/api/servers/${b.id}/channels`, { body: { name: 'Fire', kind: 'voice' }, token: host.token })).data.channels.find((c: any) => c.kind === 'voice');
+  const { token } = (await call(`/api/channels/${fire.id}/voice`, { body: {}, token: host.token })).data;
+  const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+  assert.ok(claims.exp - Date.now() / 1000 <= 15 * 60);
+});
+
+test("an admin name in ADMIN_USERS stays with its account when they change their username", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'peiskos-admins-'));
+  const hosted = createApp({
+    db: openDb(':memory:'),
+    publicDir: '/nonexistent',
+    hosting: { dbFile: join(dir, 'chat.db'), backupDir: join(dir, 'backups'), backupKeep: 0, dataDir: dir, admins: ['boss', 'later'] },
+  });
+  await new Promise<void>((r) => hosted.listen(0, r));
+  const at = `http://localhost:${(hosted.address() as AddressInfo).port}`;
+  const req = async (path: string, token?: string, body?: unknown) => {
+    const res = await fetch(at + path, {
+      method: body ? 'POST' : 'GET',
+      headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, data: (await res.json()) as any };
+  };
+  try {
+    const boss = (await req('/api/register', undefined, { username: 'boss', password: 'password1' })).data;
+    const admin = await req('/api/admin', boss.token);
+    assert.equal(admin.status, 200);
+    // "later" is listed but nobody has it yet: the admin page says so.
+    assert.match(admin.data.checks.find((c: any) => c.key === 'admins').text, /later/);
+    // Boss renames; whoever takes "boss" next isn't an admin, and nor is boss under the new name.
+    assert.equal((await req('/api/me/username', boss.token, { username: 'chief', password: 'password1' })).status, 200);
+    const sneaky = (await req('/api/register', undefined, { username: 'Boss', password: 'password1' })).data;
+    assert.equal((await req('/api/admin', sneaky.token)).status, 403);
+    assert.equal((await req('/api/admin', boss.token)).status, 403);
+  } finally {
+    hosted.closeAllConnections();
+    hosted.close();
+  }
+});
