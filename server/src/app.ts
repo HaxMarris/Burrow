@@ -291,7 +291,7 @@ export function createApp(opts: AppOptions): Server {
       .prepare(
         `SELECT id, name, kind, owner_id AS ownerId, invite_code AS inviteCode, dm_key AS dmKey, description, rules,
                 welcome_channel_id AS welcomeChannelId, afk_channel_id AS afkChannelId, afk_minutes AS afkMinutes, live_channel_id AS liveChannelId,
-                COALESCE(fire_look, 'classic') AS fireLook,
+                COALESCE(fire_look, 'classic') AS fireLook, COALESCE(sky_look, 'evening') AS skyLook,
                 CASE WHEN icon IS NULL THEN NULL ELSE '/api/burrow-pictures/' || icon END AS icon,
                 CASE WHEN banner IS NULL THEN NULL ELSE '/api/burrow-pictures/' || banner END AS banner
          FROM servers WHERE id = ?`,

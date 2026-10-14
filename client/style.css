@@ -1522,12 +1522,6 @@ kbd { display: inline-block; padding: 2px 7px; border: 1px solid var(--line); bo
 .fire-ring[data-look="birch"] .birch-marks { display: inline; }
 .fire-ring[data-look="birch"] #fire-log stop:first-child { stop-color: #f4f1ea; }
 .fire-ring[data-look="birch"] #fire-log stop:last-child { stop-color: #cfc6b6; }
-.fire-ring[data-look="aurora"] { --glow: #5fe0b0; --ember: #2f9e8f; }
-.fire-ring[data-look="aurora"] #fire-outer stop:nth-child(1) { stop-color: #3fb6a8; }
-.fire-ring[data-look="aurora"] #fire-outer stop:nth-child(2) { stop-color: #6be29b; }
-.fire-ring[data-look="aurora"] #fire-outer stop:nth-child(3) { stop-color: #b9f5c9; }
-.fire-ring[data-look="aurora"] #fire-inner stop:nth-child(2) { stop-color: #d8ffe6; }
-.fire-ring[data-look="aurora"] #fire-inner stop:nth-child(3) { stop-color: #7fe3c0; }
 .fire-ring[data-look="blue"] { --glow: #6fb3ff; --ember: #3a6fd8; }
 .fire-ring[data-look="blue"] #fire-outer stop:nth-child(1) { stop-color: #2b5fd9; }
 .fire-ring[data-look="blue"] #fire-outer stop:nth-child(2) { stop-color: #4f9cf5; }
@@ -1535,12 +1529,42 @@ kbd { display: inline-block; padding: 2px 7px; border: 1px solid var(--line); bo
 .fire-ring[data-look="blue"] #fire-inner stop:nth-child(2) { stop-color: #d6efff; }
 .fire-ring[data-look="blue"] #fire-inner stop:nth-child(3) { stop-color: #7cc1ff; }
 .fire-sparks { position: absolute; inset: 0; pointer-events: none; }
+
+/* The sky above a hearth's fires. Any sky but the evening glow makes it night around the fire,
+   whichever theme you use, so names there switch to night colors too. */
+.fire-ring-wrap { position: relative; }
+.fire-ring-wrap > .fire-ring { z-index: 1; }
+.sky-layer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.fire-ring-wrap[data-sky] {
+  --camp: #10121c; --text-strong: #fbf4ec; --text: #eadfd3; --muted: #b3a493; --surface: #241c17; --surface-2: #2e241d; --line: #3a3140;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 6px 20px rgba(0, 0, 0, .3);
+  background:
+    radial-gradient(ellipse 55% 45% at 50% 62%, color-mix(in srgb, var(--ember) 24%, transparent), transparent 72%),
+    linear-gradient(#0b1020, #161a2e 55%, #2a1d1c);
+}
+.sky-layer .star { position: absolute; left: var(--x); top: var(--y); width: var(--s); height: var(--s); border-radius: 50%; background: #fff8e8; box-shadow: 0 0 4px rgba(255, 248, 232, .7); animation: twinkle var(--d) ease-in-out var(--delay) infinite; }
+@keyframes twinkle { 50% { opacity: .25; } }
+.sky-layer .moon { position: absolute; right: 9%; top: 9%; width: clamp(44px, 9cqmin, 76px); aspect-ratio: 1; border-radius: 50%;
+  background: radial-gradient(circle at 34% 38%, #e4dccb 0 9%, transparent 10%), radial-gradient(circle at 62% 64%, #e4dccb 0 12%, transparent 13%), radial-gradient(circle at 66% 30%, #e9e2d3 0 6%, transparent 7%), #f7f1e2;
+  box-shadow: 0 0 30px 8px rgba(247, 241, 226, .28), 0 0 90px 30px rgba(247, 241, 226, .1); }
+.sky-layer .aurora { position: absolute; left: -10%; width: 120%; height: 34%; border-radius: 50%; filter: blur(22px); opacity: .55; mix-blend-mode: screen; animation: aurora-sway 14s ease-in-out infinite alternate; }
+.sky-layer .a1 { top: 2%; background: linear-gradient(90deg, transparent, #3fd6a0 25%, #6be29b 50%, #2fb8b0 75%, transparent); rotate: -6deg; }
+.sky-layer .a2 { top: 12%; height: 24%; background: linear-gradient(90deg, transparent 10%, #4fe3b5 35%, #8a6fe0 65%, transparent 90%); rotate: 5deg; animation-duration: 18s; animation-delay: -6s; opacity: .45; }
+.sky-layer .a3 { top: -6%; height: 22%; background: linear-gradient(90deg, transparent 20%, #b9f5c9 50%, transparent 80%); rotate: -2deg; animation-duration: 11s; opacity: .35; }
+@keyframes aurora-sway { from { translate: -4% 0; scale: 1 1; } to { translate: 4% 6%; scale: 1.05 1.25; } }
+.sky-layer .meteor { position: absolute; left: var(--x); top: var(--y); width: 90px; height: 2px; border-radius: 2px; rotate: -32deg;
+  background: linear-gradient(90deg, #fff8e8, transparent); opacity: 0; animation: meteor var(--d) linear var(--delay) infinite; }
+@keyframes meteor { 0% { translate: 0 0; opacity: 0; } 2% { opacity: 1; } 9% { translate: -160px 100px; opacity: 0; } 100% { translate: -160px 100px; opacity: 0; } }
+[data-motion="reduce"] .sky-layer * { animation: none !important; }
+[data-motion="reduce"] .sky-layer .meteor { display: none; }
+@media (prefers-reduced-motion: reduce) { [data-motion="system"] .sky-layer * { animation: none !important; } [data-motion="system"] .sky-layer .meteor { display: none; } }
 .fire-sparks span { position: absolute; left: var(--x); top: 50%; width: 4px; height: 4px; border-radius: 50%; background: #ffcf6b; box-shadow: 0 0 6px 2px rgba(255, 170, 60, .7); animation: spark-rise var(--d) ease-out var(--delay) infinite; }
 @keyframes spark-rise { from { translate: 0 0; opacity: 1; } to { translate: var(--drift) -150px; opacity: 0; scale: .3; } }
 
-/* Things by people's seats. */
-.seat-item { position: absolute; right: -6px; bottom: -4px; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; background: var(--surface); box-shadow: var(--shadow); font-size: 17px; line-height: 1; }
-.fire-ring.crowded .seat-item { width: 24px; height: 24px; font-size: 14px; }
+/* Things by people's seats: a little pixel picture sitting just beside their face. */
+.seat-item { position: absolute; left: calc(100% + 2px); bottom: -2px; width: calc(var(--face) * .5); height: calc(var(--face) * .5); pointer-events: auto; }
+.pixel-art { display: block; width: 100%; height: 100%; image-rendering: pixelated; filter: drop-shadow(0 1px 0 rgba(43, 29, 22, .35)); }
+.decor-art .pixel-art { width: 32px; height: 32px; margin: 2px 0; }
 .fire-core { cursor: pointer; }
 
 /* A marshmallow on a stick, toasted over the flame. */

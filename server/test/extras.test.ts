@@ -101,6 +101,14 @@ test('time at the fire is counted, and unlocks things by your seat and the heart
   assert.equal((await call(`/api/servers/${s.id}/fire`, { method: 'PUT', body: { look: 'sparks' }, token: max.token })).status, 403);
   assert.equal((await call(`/api/servers/${s.id}/fire`, { method: 'PUT', body: { look: 'birch' }, token: max.token })).data.look, 'birch');
   assert.equal((await call('/api/servers', { token: sam.token })).data.find((x: any) => x.id === s.id).fireLook, 'birch');
+  // The sky above it works the same way: 12 hours give a starry night but not the northern lights.
+  assert.equal(f.sky, 'evening');
+  assert.equal((await call(`/api/servers/${s.id}/fire`, { method: 'PUT', body: { sky: 'stars' }, token: sam.token })).status, 403);
+  assert.equal((await call(`/api/servers/${s.id}/fire`, { method: 'PUT', body: { sky: 'aurora' }, token: max.token })).status, 403);
+  assert.equal((await call(`/api/servers/${s.id}/fire`, { method: 'PUT', body: { sky: 'nope' }, token: max.token })).status, 400);
+  const starry = (await call(`/api/servers/${s.id}/fire`, { method: 'PUT', body: { sky: 'stars' }, token: max.token })).data;
+  assert.deepEqual([starry.sky, starry.look], ['stars', 'birch']);
+  assert.equal((await call('/api/servers', { token: sam.token })).data.find((x: any) => x.id === s.id).skyLook, 'stars');
   // Time at the AFK fire doesn't count.
   const afkId = await addRoom(s.id, max.token, { name: 'AFK', kind: 'voice' });
   db.prepare('UPDATE servers SET afk_channel_id = ? WHERE id = ?').run(afkId, s.id);

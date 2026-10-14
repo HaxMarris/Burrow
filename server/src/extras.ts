@@ -1,5 +1,5 @@
 // The fun extras: time at the fire and what it unlocks (something by your seat, and the look of a
-// hearth's fire), toasting marshmallows, the message of the day and the year in review.
+// hearth's fire and the sky above it), toasting marshmallows, the message of the day and the year in review.
 // Birthdays live with the rest of the profile in app.ts.
 import { randomInt } from 'node:crypto';
 import type { Db } from './db.ts';
@@ -25,8 +25,15 @@ export const FIRE_LOOKS = [
   { id: 'classic', name: 'Pine logs', hours: 0 },
   { id: 'birch', name: 'Birch logs', hours: 10 },
   { id: 'sparks', name: 'Sparks', hours: 25 },
-  { id: 'aurora', name: 'Northern lights', hours: 50 },
   { id: 'blue', name: 'Blue flame', hours: 100 },
+];
+/** The sky above a hearth's fires, unlocked the same way. */
+export const SKY_LOOKS = [
+  { id: 'evening', name: 'Evening glow', hours: 0 },
+  { id: 'stars', name: 'Starry night', hours: 5 },
+  { id: 'moon', name: 'Full moon', hours: 15 },
+  { id: 'aurora', name: 'Northern lights', hours: 50 },
+  { id: 'meteors', name: 'Shooting stars', hours: 75 },
 ];
 /** Toasting a marshmallow over the fire needs this much time at fires. */
 export const MARSHMALLOW_HOURS = 2;
@@ -116,12 +123,17 @@ export function extras(ctx: ExtrasContext) {
     return myFire(user.id);
   });
 
-  const hearthFire = (serverId: number, userId: number) => ({
-    hours: hoursOfHearth(serverId),
-    look: (db.prepare('SELECT fire_look FROM servers WHERE id = ?').get(serverId) as { fire_look: string | null }).fire_look ?? 'classic',
-    looks: FIRE_LOOKS.map((l) => ({ ...l, hours: need(l.hours) })),
-    canChange: ctx.can(serverId, userId, 'burrow'),
-  });
+  const hearthFire = (serverId: number, userId: number) => {
+    const s = db.prepare('SELECT fire_look, sky_look FROM servers WHERE id = ?').get(serverId) as { fire_look: string | null; sky_look: string | null };
+    return {
+      hours: hoursOfHearth(serverId),
+      look: s.fire_look ?? 'classic',
+      looks: FIRE_LOOKS.map((l) => ({ ...l, hours: need(l.hours) })),
+      sky: s.sky_look ?? 'evening',
+      skies: SKY_LOOKS.map((l) => ({ ...l, hours: need(l.hours) })),
+      canChange: ctx.can(serverId, userId, 'burrow'),
+    };
+  };
   const hearth = (serverId: number, userId: number) => {
     const s = db.prepare("SELECT kind FROM servers WHERE id = ?").get(serverId) as { kind: string } | undefined;
     if (!s || s.kind !== 'burrow' || !ctx.isMember(serverId, userId)) throw fail(404, 'Hearth not found');
@@ -135,10 +147,18 @@ export function extras(ctx: ExtrasContext) {
     const serverId = Number(params[0]);
     hearth(serverId, user.id);
     ctx.allowed(serverId, user, 'burrow');
-    const look = FIRE_LOOKS.find((l) => l.id === body.look);
-    if (!look) throw fail(400, 'No such fire');
-    if (hoursOfHearth(serverId) < need(look.hours)) throw fail(403, `That fire unlocks after ${look.hours} hours around this hearth's fires`);
-    db.prepare('UPDATE servers SET fire_look = ? WHERE id = ?').run(look.id === 'classic' ? null : look.id, serverId);
+    // Either the fire ({ look }) or the sky above it ({ sky }).
+    if (body.sky !== undefined) {
+      const sky = SKY_LOOKS.find((l) => l.id === body.sky);
+      if (!sky) throw fail(400, 'No such sky');
+      if (hoursOfHearth(serverId) < need(sky.hours)) throw fail(403, `That sky unlocks after ${sky.hours} hours around this hearth's fires`);
+      db.prepare('UPDATE servers SET sky_look = ? WHERE id = ?').run(sky.id === 'evening' ? null : sky.id, serverId);
+    } else {
+      const look = FIRE_LOOKS.find((l) => l.id === body.look);
+      if (!look) throw fail(400, 'No such fire');
+      if (hoursOfHearth(serverId) < need(look.hours)) throw fail(403, `That fire unlocks after ${look.hours} hours around this hearth's fires`);
+      db.prepare('UPDATE servers SET fire_look = ? WHERE id = ?').run(look.id === 'classic' ? null : look.id, serverId);
+    }
     ctx.sendServerUpdate(serverId);
     return hearthFire(serverId, user.id);
   });
