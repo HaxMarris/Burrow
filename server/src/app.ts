@@ -664,6 +664,8 @@ export function createApp(opts: AppOptions): Server {
       if (!target || target.channel_id !== channelId) throw new HttpError(400, "Can't reply to that message");
       replyId = Number(replyTo);
     }
+    // Before the message goes out, so the conversation is back in their list when it arrives.
+    if (serverKind(channel.serverId) === 'dm') reopenDm(channel.serverId);
     const r = db
       .prepare('INSERT INTO messages (channel_id, author_id, content, created_at, reply_to, sticker_id, forwarded, live) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
       .run(channelId, user.id, content, now(), replyId, stickerId, extras.forwarded ? JSON.stringify(extras.forwarded) : null, extras.live ? JSON.stringify(extras.live) : null);
@@ -854,7 +856,7 @@ export function createApp(opts: AppOptions): Server {
         `SELECT s.id, COALESCE((SELECT MAX(msg.created_at) FROM channels c JOIN messages msg ON msg.channel_id = c.id
                                 WHERE c.server_id = s.id), s.created_at) AS lastActive
          FROM members m JOIN servers s ON s.id = m.server_id
-         WHERE m.user_id = ? AND s.kind = 'dm' ORDER BY lastActive DESC`,
+         WHERE m.user_id = ? AND s.kind = 'dm' AND m.hidden_at IS NULL ORDER BY lastActive DESC`,
       )
       .all(user.id) as { id: number; lastActive: number }[];
     return rows.map((r) => ({ ...serverSummary(r.id, user.id), lastActive: r.lastActive }));
@@ -888,7 +890,10 @@ export function createApp(opts: AppOptions): Server {
     const ids = (Array.isArray(body.userIds) ? body.userIds : [body.userId]).map(Number);
     if (ids.length === 1 && ids[0] !== user.id) {
       const existing = db.prepare('SELECT id FROM servers WHERE dm_key = ?').get([user.id, ids[0]].sort((a, b) => a - b).join(':')) as { id: number } | undefined;
-      if (existing) return serverSummary(existing.id, user.id);
+      if (existing) {
+        db.prepare('UPDATE members SET hidden_at = NULL WHERE server_id = ? AND user_id = ?').run(existing.id, user.id);
+        return serverSummary(existing.id, user.id);
+      }
     }
     const others = dmPeople(user, ids);
     if (!others.length) throw new HttpError(400, "You can't message yourself");
@@ -918,6 +923,29 @@ export function createApp(opts: AppOptions): Server {
     sendServerUpdate(serverId);
     return serverSummary(serverId, user.id);
   });
+
+  /**
+   * Closes a conversation: it leaves your list (on all your devices) but nothing is deleted, and
+   * it comes back when someone writes in it or you message them again. What's in it counts as read.
+   */
+  route('POST', '/api/dms/:id/close', ({ user, params }) => {
+    const serverId = Number(params[0]);
+    if (serverKind(serverId) !== 'dm' || !isMember(serverId, user.id)) throw new HttpError(404, 'Conversation not found');
+    db.prepare('UPDATE members SET hidden_at = ? WHERE server_id = ? AND user_id = ?').run(now(), serverId, user.id);
+    for (const { id } of db.prepare("SELECT id FROM channels WHERE server_id = ? AND kind = 'text'").all(serverId) as { id: number }[]) {
+      const newest = (db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE channel_id = ?').get(id) as { id: number }).id;
+      if (newest) markRead(user.id, channelById(id)!, newest, { quiet: true });
+    }
+    sendTo([user.id], { type: 'server_deleted', serverId });
+    return { ok: true };
+  });
+  /** Someone wrote or called in a conversation: it comes back for whoever had closed it. */
+  const reopenDm = (serverId: number) => {
+    const closed = db.prepare('SELECT user_id FROM members WHERE server_id = ? AND hidden_at IS NOT NULL').all(serverId) as { user_id: number }[];
+    if (!closed.length) return;
+    db.prepare('UPDATE members SET hidden_at = NULL WHERE server_id = ?').run(serverId);
+    for (const { user_id } of closed) sendTo([user_id], { type: 'server_updated', server: serverSummary(serverId, user_id) });
+  };
 
   /** Leaves a group conversation. The last one out takes it with them. */
   const leaveGroup = (serverId: number, user: User) => {
@@ -1485,6 +1513,7 @@ export function createApp(opts: AppOptions): Server {
       channelId = Number(db.prepare("INSERT INTO channels (server_id, name, kind, created_at) VALUES (?, 'Call', 'voice', ?)").run(serverId, now()).lastInsertRowid);
       sendServerUpdate(serverId);
     }
+    reopenDm(serverId);
     const inCall = new Set(usersInVoice(channelId));
     const others = serverMemberIds(serverId).filter((id) => id !== user.id && !inCall.has(id));
     sendTo(others, { type: 'ring', serverId, channelId, from: { id: user.id, username: user.displayName || user.username } });

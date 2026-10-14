@@ -83,3 +83,43 @@ test('direct messages', async () => {
   samSocket.ws.close();
   eveSocket.ws.close();
 });
+
+test('closing a conversation hides it until someone writes', async () => {
+  const reg = async (username: string) => (await call('/api/register', { body: { username, password: 'password1' } })).data;
+  const ann = await reg('ann');
+  const bob = await reg('bob');
+  const burrow = (await call('/api/servers', { body: { name: 'Nook' }, token: ann.token })).data;
+  await call('/api/join', { body: { inviteCode: burrow.inviteCode }, token: bob.token });
+  const dm = (await call('/api/dms', { body: { userId: bob.user.id }, token: ann.token })).data;
+  const room = dm.channels[0].id;
+  await call(`/api/channels/${room}/messages`, { body: { content: 'hi' }, token: bob.token });
+  const annSocket = listen(ann.token);
+  await annSocket.ready;
+
+  // Only members can close it, and only for themselves.
+  assert.equal((await call(`/api/dms/${dm.id}/close`, { body: {}, token: (await reg('cat')).token })).status, 404);
+  assert.equal((await call(`/api/dms/${dm.id}/close`, { body: {}, token: ann.token })).status, 200);
+  await tick();
+  assert.ok(annSocket.events.some((e) => e.type === 'server_deleted' && e.serverId === dm.id));
+  assert.equal((await call('/api/dms', { token: ann.token })).data.length, 0);
+  assert.equal((await call('/api/dms', { token: bob.token })).data.length, 1);
+  // The history is still there.
+  assert.equal((await call(`/api/channels/${room}/messages`, { token: ann.token })).data[0].content, 'hi');
+
+  // A new message brings it back, announced before the message itself.
+  annSocket.events.length = 0;
+  await call(`/api/channels/${room}/messages`, { body: { content: 'you there?' }, token: bob.token });
+  await tick();
+  const back = annSocket.events.findIndex((e) => e.type === 'server_updated' && e.server.id === dm.id);
+  const msg = annSocket.events.findIndex((e) => e.type === 'message' && e.message.content === 'you there?');
+  assert.ok(back >= 0 && back < msg);
+  // What was in it when it was closed counted as read.
+  assert.equal(annSocket.events[back].server.channels[0].unread, 0);
+  assert.deepEqual((await call('/api/dms', { token: ann.token })).data.map((s: any) => s.id), [dm.id]);
+
+  // So does messaging them again yourself.
+  await call(`/api/dms/${dm.id}/close`, { body: {}, token: ann.token });
+  assert.equal((await call('/api/dms', { body: { userId: bob.user.id }, token: ann.token })).data.id, dm.id);
+  assert.equal((await call('/api/dms', { token: ann.token })).data.length, 1);
+  annSocket.ws.close();
+});

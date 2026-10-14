@@ -311,6 +311,7 @@ function openRoleEditor(serverId, roleId) {
 const FIRE_ICON = '<svg viewBox="0 0 24 24"><path d="M12 2c.5 3 2.4 5 4.2 6.8A7.5 7.5 0 0 1 12 22a7.5 7.5 0 0 1-4.6-13.4c.2 1.6 1 2.9 2.3 3.6C9.6 8.5 10.4 5 12 2Z"/></svg>';
 const CHEVRON_ICON = '<svg viewBox="0 0 24 24" class="chev"><path d="m6 9 6 6 6-6"/></svg>';
 const STAR_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3 6.4 20.2l1.1-6.2L3 9.6l6.2-.9z"/></svg>';
+const CLOSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4z"/></svg>';
 const CHECK_ICON = '<svg viewBox="0 0 24 24" class="check" aria-label="Current"><path d="M9.5 16.2 5.3 12l-1.4 1.4 5.6 5.6 11-11-1.4-1.4z"/></svg>';
 const ROOM_ICON = '<svg viewBox="0 0 24 24" class="room-icon" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
 function roomIcon() {
@@ -384,6 +385,10 @@ function renderDmList() {
     const n = id === state.serverId || notifyState(s, null).muted ? 0 : s.channels.reduce((sum, c) => sum + (c.unread ?? 0), 0);
     if (n) li.insertAdjacentHTML('beforeend', `<span class="ping-count">${n > 99 ? '99+' : n}</span>`);
     li.onclick = () => { store.set('lastDm', id); selectServer(id); showView('chat'); };
+    const close = iconButton('', `Close conversation with ${dmTitle(s)}`, (e) => { e.stopPropagation(); closeDm(s); });
+    close.classList.add('room-gear', 'dm-close');
+    close.innerHTML = CLOSE_ICON;
+    li.append(close);
     return li;
   });
   if (!items.length) {
@@ -407,6 +412,15 @@ function renderDmList() {
   $('#fire-main').replaceChildren();
   $('#voice-list').replaceChildren();
   $('#voice-section').classList.add('hidden');
+}
+
+// Takes a conversation off your list. Nothing is deleted: it comes back when someone writes.
+async function closeDm(s) {
+  try {
+    await api(`/api/dms/${s.id}/close`, { method: 'POST' });
+    handleEvent({ type: 'server_deleted', serverId: s.id });
+    toast(`Closed your conversation with ${dmTitle(s)}. It comes back if someone writes in it.`);
+  } catch (err) { alertError(err); }
 }
 
 // Pick someone you share a burrow with, or several for a group conversation.
