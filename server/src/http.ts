@@ -116,3 +116,23 @@ export async function readLimited(req: IncomingMessage, max: number, tooBig: Err
 
 /** The login token a request carries, from its Authorization header. */
 export const bearer = (req: IncomingMessage) => req.headers.authorization?.replace(/^Bearer /, '');
+
+/**
+ * A per-key allowance that refills over time (a token bucket): up to `burst` at once, then
+ * `perSecond` more each second. `take` uses one and says whether there was one to use.
+ */
+export function allowance(burst: number, perSecond: number) {
+  const left = new Map<number, { n: number; at: number }>();
+  return {
+    take(key: number) {
+      const t = Date.now();
+      const b = left.get(key) ?? { n: burst, at: t };
+      b.n = Math.min(burst, b.n + ((t - b.at) / 1000) * perSecond);
+      b.at = t;
+      left.set(key, b);
+      if (b.n < 1) return false;
+      b.n -= 1;
+      return true;
+    },
+  };
+}

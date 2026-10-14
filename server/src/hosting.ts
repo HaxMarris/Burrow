@@ -57,13 +57,23 @@ export function hosting(ctx: HostingContext) {
 
   const firstUserId = () =>
     (db.prepare('SELECT MIN(id) AS id FROM users WHERE bot = 0 AND deleted_at IS NULL').get() as { id: number | null }).id;
+  const adminNames = () => (ctx.hosting?.admins ?? []).map((n) => n.toLowerCase());
+  /**
+   * With ADMIN_USERS, each name listed belongs to the first account seen with it, for good. If
+   * that person changes their username, whoever takes the old one doesn't become an admin.
+   */
   const isAdmin = (userId: number) => {
     const u = db.prepare('SELECT username, bot, deleted_at FROM users WHERE id = ?').get(userId) as
       | { username: string; bot: number; deleted_at: number | null }
       | undefined;
     if (!u || u.bot || u.deleted_at) return false;
-    const names = ctx.hosting?.admins ?? [];
-    return names.length ? names.some((n) => n.toLowerCase() === u.username.toLowerCase()) : userId === firstUserId();
+    const names = adminNames();
+    if (!names.length) return userId === firstUserId();
+    const name = u.username.toLowerCase();
+    if (!names.includes(name)) return false;
+    const pinned = setting(`admin_pin:${name}`);
+    if (pinned === undefined) setSetting(`admin_pin:${name}`, String(userId));
+    return pinned === undefined || pinned === String(userId);
   };
   const admin = (handler: Handler): Handler => (c) => {
     if (!isAdmin(c.user.id)) throw fail(403, 'Only whoever runs this Peiskos can do that');
@@ -325,6 +335,8 @@ export function hosting(ctx: HostingContext) {
     const h = ctx.hosting;
     const off = h ? offsiteStatus(h.backupDir) : null;
     const updater = updaterStatus();
+    // A name in ADMIN_USERS that no account has yet goes to whoever signs up with it first.
+    const unclaimed = adminNames().filter((n) => !setting(`admin_pin:${n}`) && !db.prepare('SELECT 1 FROM users WHERE username = ? AND deleted_at IS NULL').get(n));
     return [
       { ok: https, text: https ? 'Reached over https' : 'Not on https yet: passwords and messages cross the internet unprotected', key: 'https' },
       { ok: mode !== 'open', text: mode === 'open' ? 'Anyone who finds this server can sign up' : mode === 'links' ? 'Signing up needs a signup link' : 'Signing up needs the registration code or a signup link', key: 'signup' },
@@ -332,6 +344,7 @@ export function hosting(ctx: HostingContext) {
       { ok: !!h && h.backupKeep > 0, text: h && h.backupKeep > 0 ? `Daily backups, keeping ${h.backupKeep}` : 'Daily backups are off', key: 'backups' },
       { ok: !!h?.offsite && !off?.lastError, text: !h?.offsite ? 'Backups stay on this server only (set up off-site copies)' : off?.lastError && (off.lastErrorAt ?? 0) > (off.lastOk ?? 0) ? `Off-site copy failed: ${off.lastError}` : 'Backups are copied off-site', key: 'offsite' },
       { ok: !!ctx.hosting?.heartbeatUrl, text: ctx.hosting?.heartbeatUrl ? 'An uptime monitor hears from this server' : 'No uptime monitor (see Uptime alerts in the README)', key: 'uptime' },
+      { ok: !unclaimed.length, text: `ADMIN_USERS names ${unclaimed.join(', ')}, which no account has yet: whoever signs up with it first becomes an admin`, key: 'admins', hidden: !unclaimed.length },
       { ok: !!updater?.running, text: updater?.running ? 'Updates can be installed from here' : 'Updating needs SSH (the updater is off)', key: 'updater' },
     ].filter((c) => !c.hidden);
   };

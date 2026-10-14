@@ -22,8 +22,12 @@ function sign(opts: VoiceOptions, claims: Record<string, unknown>, ttlSeconds: n
 /** What someone may send: everything, or (muted for everyone by a moderator) everything but their microphone. */
 const sources = (canSpeak: boolean) => [...(canSpeak ? ['microphone'] : []), 'camera', 'screen_share', 'screen_share_audio'];
 
-/** A LiveKit access token (HS256 JWT) that lets one user join one voice room, with their mic, camera and screen. */
-export function voiceToken(opts: VoiceOptions, user: { id: number; username: string }, room: string, ttlSeconds = 6 * 3600, canSpeak = true) {
+/**
+ * A LiveKit access token (HS256 JWT) that lets one user join one voice room, with their mic, camera and screen.
+ * It's only for joining (the app asks for a fresh one each time, and LiveKit renews it while they're in), so it
+ * runs out soon: someone removed from a hearth can't use one they kept to sit back down.
+ */
+export function voiceToken(opts: VoiceOptions, user: { id: number; username: string }, room: string, ttlSeconds = 15 * 60, canSpeak = true) {
   return sign(
     opts,
     {

@@ -238,7 +238,8 @@ Send them the link it prints (it uses `PUBLIC_URL`). Add `--two-step-off` if the
 - Passkeys work in the web app over HTTPS (they belong to the site's address, so set `PUBLIC_URL` if people reach Peiskos by more than one name). The desktop app logs in with a password.
 - With Docker, port 3000 only listens on the server itself, so the only way in is through Caddy. Set `BURROW_BIND=0.0.0.0` in `.env` if you run without a reverse proxy.
 - The web app and the desktop app only run their own scripts (a strict Content-Security-Policy), which blunts any injected code.
-- If `ADMIN_USERS` is set, keep it in step with usernames: if a listed admin changes their username, whoever takes the old one becomes an admin.
+- Each name in `ADMIN_USERS` belongs to the first account seen with it. If that person changes their username they stop being an admin (add the new name), and whoever takes the old name doesn't become one. A listed name nobody has yet goes to whoever signs up with it first, so the admin page warns about those.
+- Sending is limited to a burst of 60 messages and then about one a second per person, and voice tokens are only good for joining for 15 minutes.
 - A weekly check on GitHub (`.github/workflows/security.yml`) looks for known holes in Peiskos's packages and makes sure those protective headers are still sent, and Dependabot proposes updates to packages, Docker images and workflows.
 
 ### The admin page
