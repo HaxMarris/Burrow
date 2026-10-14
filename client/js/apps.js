@@ -339,7 +339,8 @@ function stepRoom(step, unreadOnly) {
 document.addEventListener('keydown', (e) => {
   if (!state.me || $('#app').classList.contains('hidden')) return;
   const mod = e.ctrlKey || e.metaKey;
-  const key = e.key.toLowerCase();
+  // Chrome's autofill sends a keydown with no key at all.
+  const key = (e.key || '').toLowerCase();
   if (mod && !e.shiftKey && !e.altKey && key === 'k') {
     e.preventDefault();
     openQuickSwitcher();
