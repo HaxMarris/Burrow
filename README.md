@@ -41,7 +41,7 @@ moving anything.
 - Pinned messages, threads off any message, polls, forwarding, saved messages with reminders, and messages scheduled to send later
 - An emoji picker, each hearth's own custom emoji and stickers, and voice messages
 - Drafts kept per room, edit history on edited messages, long pastes sent as a text file you can read inline, and "Seen" in direct messages (you can turn it off)
-- Desktop app for Windows, macOS and Linux (Electron), plus the same UI in any browser
+- Desktop app for Windows, macOS and Linux (Electron), Android and iPhone apps (Capacitor), plus the same UI in any browser
 - Scandinavian-forest look with light and dark themes
 
 
@@ -50,14 +50,16 @@ moving anything.
 ```
 chat-app/
 ├── server/     Node.js + TypeScript server (HTTP API, WebSockets, SQLite)
-├── client/     The chat UI (plain HTML/CSS/JS), served by the server and bundled into the desktop app
+├── client/     The chat UI (plain HTML/CSS/JS), served by the server and bundled into the desktop and phone apps
 │   └── js/     The app itself, in parts that index.html loads in order (they share one scope)
 ├── desktop/    Electron wrapper that packages the client as an installable app
+├── mobile/     Capacitor wrapper that packages the client as Android and iPhone apps (see mobile/README.md)
 ├── scripts/    check-client.mjs, the client check that runs on every pull request
 ├── Dockerfile, docker-compose.yml
 └── .github/workflows/
     ├── checks.yml           On every pull request: server types and tests, client checks, Docker build
-    └── desktop-release.yml  Builds installers on GitHub when you publish a release
+    ├── desktop-release.yml  Builds installers on GitHub when you publish a release
+    └── mobile-release.yml   Builds the Android app (attached to the release) and sends the iPhone app to TestFlight
 ```
 
 The server has one runtime dependency (`ws`). It uses Node's built-in SQLite
@@ -324,7 +326,13 @@ the machine, which is what lets it rebuild Peiskos, so leave it off if you'd rat
 
 **Desktop app:** it connects to `https://peiskos.app` by itself. To use your own server instead, click *Use a different server* on the login screen and enter its address.
 
-**Phones:** on Android, open the server address in Chrome and pick *Install the app* from your menu
+**Phone apps:** the Android app is attached to each release as `Peiskos-x.y.z.apk` (on an Android
+phone, the login page shows a *Get the Android app* button), and iPhone friends get the iPhone app
+through Apple's TestFlight. Like the desktop app they connect to `https://peiskos.app` unless told
+otherwise, and keep a voice call going with the screen off. Setting them up (a signing key for
+Android, an Apple developer account for iPhones) is in [mobile/README.md](mobile/README.md).
+
+**Or from the browser:** on Android, open the server address in Chrome and pick *Install the app* from your menu
 (your picture, top right) or Chrome's own *Install app*; Peiskos then has its own icon, opens without
 the browser around it, shows up in the share menu of other apps, and can send alerts while closed.
 On an iPhone or iPad, use Safari's Share › *Add to Home Screen*. Both need Peiskos on `https://`.

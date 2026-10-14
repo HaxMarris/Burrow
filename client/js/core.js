@@ -1,5 +1,6 @@
-// Chat client. Runs both as the web app served by the chat server and inside
-// the desktop app (loaded from file://, where it connects to peiskos.app unless told otherwise).
+// Chat client. Runs as the web app served by the chat server, inside the desktop app (loaded
+// from file://) and inside the Android and iPhone apps (from the app's own files). The apps
+// connect to peiskos.app unless told otherwise.
 //
 // State, talking to the server, logging in, starting up, and the live connection.
 // Part of Burrow's client: plain scripts that index.html loads in order, sharing one global scope.
@@ -7,6 +8,10 @@
 
 const $ = (sel) => document.querySelector(sel);
 const isDesktop = location.protocol === 'file:';
+// The Android and iPhone apps carry their own copy of this page too, so like the desktop app
+// they talk to a server somewhere else.
+const isPhoneApp = !!window.Capacitor?.isNativePlatform?.();
+const isApp = isDesktop || isPhoneApp;
 
 // Crashes in the app are sent to the server (a few per visit), where whoever runs it sees them
 // on the admin page. Just the error and where it happened; nothing you typed.
@@ -21,7 +26,7 @@ function reportError(error, where) {
   fetch(base + '/api/errors', {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) },
-    body: JSON.stringify({ message, stack: String(error?.stack ?? '').slice(0, 4000), where, app: `${isDesktop ? 'Desktop app' : 'Web'} · ${navigator.userAgent}` }),
+    body: JSON.stringify({ message, stack: String(error?.stack ?? '').slice(0, 4000), where, app: `${isDesktop ? 'Desktop app' : isPhoneApp ? 'Phone app' : 'Web'} · ${navigator.userAgent}` }),
   }).catch(() => {});
 }
 window.addEventListener('error', (e) => reportError(e.error ?? e.message, `${e.filename?.split('/').pop() ?? ''}:${e.lineno ?? ''}`));
@@ -37,18 +42,18 @@ const store = {
   set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
 };
 
-// The desktop app connects to Peiskos's own server without asking; "Use a different server" on
+// The desktop and phone apps connect to Peiskos's own server without asking; "Use a different server" on
 // the login screen picks another. Logins saved under the server's old address move to the new one.
 const DEFAULT_SERVER = 'https://peiskos.app';
 const OLD_ADDRESS = 'https://newburrow.duckdns.org';
-if (isDesktop) {
+if (isApp) {
   if (store.get('serverUrl') === OLD_ADDRESS) store.set('serverUrl', DEFAULT_SERVER);
   const saved = store.get('accounts');
   if (saved?.includes(OLD_ADDRESS)) store.set('accounts', saved.replaceAll(`"${OLD_ADDRESS}"`, `"${DEFAULT_SERVER}"`));
 }
 
 const state = {
-  serverUrl: isDesktop ? store.get('serverUrl') || DEFAULT_SERVER : location.origin,
+  serverUrl: isApp ? store.get('serverUrl') || DEFAULT_SERVER : location.origin,
   token: store.get('token'),
   me: null,
   servers: new Map(),       // id -> { id, name, kind, ownerId, inviteCode, channels, members }; DMs are kind 'dm'
@@ -118,11 +123,11 @@ function adoptOrigin(url) {
   const origin = new URL(url).origin;
   if (!state.serverUrl || origin === new URL(state.serverUrl).origin) return;
   state.serverUrl = origin;
-  if (isDesktop) store.set('serverUrl', origin);
+  if (isApp) store.set('serverUrl', origin);
 }
 
 async function resolveServerUrl() {
-  if (!isDesktop || !state.serverUrl) return;
+  if (!isApp || !state.serverUrl) return;
   try {
     const res = await fetch(state.serverUrl + '/api/config');
     if (res.redirected) adoptOrigin(res.url);
@@ -132,21 +137,22 @@ async function resolveServerUrl() {
 // ---------------------------------------------------------------- auth screen
 
 // A signup link from whoever runs the server: /?signup=… opens the register form, no code needed.
-let signupLink = isDesktop ? null : new URLSearchParams(location.search).get('signup');
+let signupLink = isApp ? null : new URLSearchParams(location.search).get('signup');
 let registering = !!signupLink;
 
 async function showAuth() {
   $('#app').classList.add('hidden');
   $('#auth').classList.remove('hidden');
-  const otherServer = isDesktop && state.serverUrl !== DEFAULT_SERVER;
+  const otherServer = isApp && state.serverUrl !== DEFAULT_SERVER;
   $('#server-url-row').classList.toggle('hidden', !otherServer);
-  $('#other-server-row').classList.toggle('hidden', !isDesktop || otherServer);
+  $('#other-server-row').classList.toggle('hidden', !isApp || otherServer);
   $('#server-url').value = state.serverUrl;
-  if (!isDesktop && !/Android|iPhone|iPad/.test(navigator.userAgent)) showDesktopDownloads();
+  if (!isApp && !/Android|iPhone|iPad/.test(navigator.userAgent)) showDesktopDownloads();
+  if (!isApp && /Android/.test(navigator.userAgent)) showAndroidDownload();
   renderAuthMode();
   showAuthInvite();
   showAccountsOnLogin();
-  if (resetLinkToken && !isDesktop) showResetLink();
+  if (resetLinkToken && !isApp) showResetLink();
 }
 
 // Download buttons for the desktop app, on the web only. They open the latest release page,
@@ -174,6 +180,22 @@ function showDesktopDownloads() {
       const intel = find('intel');
       $('#get-intel-mac').classList.toggle('hidden', !intel || mine !== 'mac');
       if (intel) $('#get-intel-mac a').href = intel.browser_download_url;
+    })
+    .catch(() => {});
+}
+
+// On an Android phone, the Android app instead, once a release has one.
+let androidLinkLoaded = false;
+function showAndroidDownload() {
+  if (androidLinkLoaded) return;
+  androidLinkLoaded = true;
+  fetch('https://api.github.com/repos/HaxMarris/Burrow/releases/latest')
+    .then((r) => (r.ok ? r.json() : null))
+    .then((release) => {
+      const apk = release?.assets?.find((f) => f.name.endsWith('.apk'));
+      if (!apk) return;
+      $('#get-android a').href = apk.browser_download_url;
+      $('#get-android').classList.remove('hidden');
     })
     .catch(() => {});
 }
@@ -289,7 +311,7 @@ function normalizeServerUrl(v) {
 
 $('#auth-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (isDesktop) state.serverUrl = normalizeServerUrl($('#server-url').value) || DEFAULT_SERVER;
+  if (isApp) state.serverUrl = normalizeServerUrl($('#server-url').value) || DEFAULT_SERVER;
   $('#auth-submit').disabled = true;
   try {
     await resolveServerUrl();
@@ -356,7 +378,7 @@ const b64u = {
   from: (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)).buffer,
   to: (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
 };
-const passkeysWork = () => !isDesktop && !!window.PublicKeyCredential && window.isSecureContext;
+const passkeysWork = () => !isApp && !!window.PublicKeyCredential && window.isSecureContext;
 $('#passkey-login').addEventListener('click', async () => {
   $('#auth-error').textContent = '';
   try {

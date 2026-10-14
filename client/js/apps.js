@@ -127,7 +127,7 @@ if (updates) {
 
 // The service worker: alerts while Burrow is closed, the app's files for working offline, and
 // things shared from other apps. (Only on the web; the desktop app has its files built in.)
-if (!isDesktop && 'serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
+if (!isApp && 'serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
 
 // ---- several servers in the desktop app
 //
@@ -139,7 +139,7 @@ const saveAccounts = (list) => store.set('accounts', JSON.stringify(list));
 const sameAccount = (a) => a.url === state.serverUrl && a.username === state.me?.username;
 
 function rememberAccount() {
-  if (!isDesktop || !state.me) return;
+  if (!isApp || !state.me) return;
   const list = readAccounts();
   const mine = list.find(sameAccount);
   const entry = { url: state.serverUrl, username: state.me.username, token: state.token, avatar: state.me.avatar ?? null, name: state.me.displayName || state.me.username };
@@ -149,7 +149,7 @@ function rememberAccount() {
   $('#servers-btn').classList.remove('hidden');
 }
 function forgetAccount() {
-  if (!isDesktop) return;
+  if (!isApp) return;
   saveAccounts(readAccounts().filter((a) => !(a.url === state.serverUrl && a.token === state.token)));
 }
 
@@ -205,7 +205,7 @@ $('#servers-btn').onclick = () => openServers();
 // The login screen lists the other servers you're logged in to, to go straight back.
 function showAccountsOnLogin() {
   const box = $('#auth-accounts');
-  const list = isDesktop ? readAccounts().filter((a) => a.token) : [];
+  const list = isApp ? readAccounts().filter((a) => a.token) : [];
   box.classList.toggle('hidden', !list.length);
   box.replaceChildren(...(list.length ? [Object.assign(document.createElement('p'), { className: 'muted small center', textContent: 'Or go back to' })] : []),
     ...list.map((a) => Object.assign(document.createElement('button'), {
@@ -412,6 +412,47 @@ document.addEventListener('keydown', (e) => {
   else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
   else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 });
+
+// ---------------------------------------------------------------- the Android and iPhone apps
+//
+// The phone apps are this same page inside an app shell (Capacitor), like the desktop app is inside
+// Electron. A few small native pieces reach the phone itself: Android's back button, and an
+// ongoing "In a voice room" notification so a call keeps going with the screen off.
+
+const phonePlatform = isPhoneApp ? window.Capacitor.getPlatform() : null;
+const native = (plugin, method, options = {}) => window.Capacitor.nativePromise(plugin, method, options);
+
+if (isPhoneApp) document.documentElement.classList.add(`${phonePlatform}-app`);
+// On iPhones the page reaches under the notch and the home bar, and keeps clear of them itself.
+// (Android keeps the page between its bars instead.)
+if (phonePlatform === 'ios') $('meta[name=viewport]').content = 'width=device-width, initial-scale=1, viewport-fit=cover';
+
+// Back closes whatever is open, then goes from a room back to the list, then puts Peiskos away
+// (still running, so a call carries on).
+if (phonePlatform === 'android') {
+  window.Capacitor.addListener('App', 'backButton', () => {
+    if (!$('#modal').classList.contains('hidden')) return closeModal();
+    if (!$('#me-menu').classList.contains('hidden')) return closeMeMenu();
+    if (!$('#stage').classList.contains('hidden')) return closeStage();
+    if (memberPane.classList.contains('open')) return memberPane.classList.remove('open');
+    if (isPhone() && $('#app').dataset.view === 'chat') return showView('rooms');
+    native('App', 'minimizeApp').catch(() => {});
+  });
+  window.Capacitor.addListener('VoiceCall', 'leave', () => leaveVoice());
+}
+
+// Called whenever the voice bar changes: shows the call notification while you're in (or getting
+// back into) a voice room, and takes it away when you leave.
+let phoneCallRoom = null;
+function syncPhoneCall() {
+  if (phonePlatform !== 'android') return;
+  const place = roomById(state.voice?.channelId ?? state.rejoin?.channelId);
+  const key = place ? `${place.s.id}:${place.c.id}` : null;
+  if (key === phoneCallRoom) return;
+  phoneCallRoom = key;
+  native('VoiceCall', place ? 'start' : 'stop', place ? { title: `In ${fireName(place.c)}`, text: isDm(place.s) ? dmTitle(place.s) : place.s.name } : {})
+    .catch((err) => console.warn('Call notification', err));
+}
 
 // ---------------------------------------------------------------- swipes on phones
 //

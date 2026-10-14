@@ -138,6 +138,7 @@ label input:focus, .modal-card input:focus, .modal-card textarea:focus, .gif-pic
 .auth-card .btn { padding: 12px; margin-top: 4px; }
 .get-desktop { margin-top: 14px; padding-top: 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
 .get-desktop p { margin: 0; }
+.get-desktop > .btn { text-decoration: none; text-align: center; margin: 0; }
 .get-desktop-row { display: flex; gap: 8px; }
 .auth-card .get-desktop-row .btn { flex: 1; margin: 0; padding: 10px 8px; display: flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; font-size: 14px; }
 .get-desktop-row svg { width: 16px; height: 16px; flex: none; fill: currentColor; }
@@ -1641,4 +1642,10 @@ kbd { display: inline-block; padding: 2px 7px; border: 1px solid var(--line); bo
 @media (max-width: 600px) {
   .review-grid { grid-template-columns: 1fr; }
   .review-stats b { font-size: 22px; }
+}
+
+/* The iPhone app reaches under the notch and home bar. The phone layout keeps clear of them itself;
+   on wider screens (iPads, an iPhone on its side) the computer layout sits inside them. */
+@media (min-width: 761px) {
+  html.ios-app body { box-sizing: border-box; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 }

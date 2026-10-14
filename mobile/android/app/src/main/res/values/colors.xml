@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Peiskos's oat background, behind the status bar and while the app opens. -->
+    <color name="peiskos_bg">#F6F0E7</color>
+</resources>

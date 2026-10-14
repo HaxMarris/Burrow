@@ -787,7 +787,7 @@ async function renderPasskeyBox(adding = false) {
   const box = $('#passkey-box');
   if (!box) return;
   if (!passkeysWork()) {
-    box.innerHTML = `<span class="small muted">${isDesktop
+    box.innerHTML = `<span class="small muted">${isApp
       ? 'Add passkeys from Peiskos in your web browser. You can then use them to log in there.'
       : "This browser can't use passkeys here."}</span>`;
     return;

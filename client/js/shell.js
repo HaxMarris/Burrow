@@ -469,6 +469,6 @@ function renderFriendsPanel() {
 
 // ---------------------------------------------------------------- start
 
-if (resetLinkToken && !isDesktop) showAuth();
+if (resetLinkToken && !isApp) showAuth();
 else if (state.token && state.serverUrl) resolveServerUrl().then(enterApp).catch((err) => startOffline(err) || showAuth());
 else showAuth();
