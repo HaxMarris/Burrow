@@ -709,22 +709,10 @@ function handleEvent(ev) {
       for (const s of state.servers.values())
         for (const c of s.channels)
           if (c.id === ev.channelId)
-            Object.assign(c, { voiceUsers: ev.userIds, voiceMuted: ev.muted, voiceDeafened: ev.deafened, voiceServerMuted: ev.serverMuted ?? [], voiceSpeaking: ev.speaking ?? [] });
+            Object.assign(c, { voiceUsers: ev.userIds, voiceMuted: ev.muted, voiceDeafened: ev.deafened, voiceServerMuted: ev.serverMuted ?? [] });
       checkRinging(ev.channelId, ev.userIds);
       renderChannels();
       renderCallButton();
-      break;
-    case 'voice_speaking':
-      for (const s of state.servers.values())
-        for (const c of s.channels)
-          if (c.id === ev.channelId) {
-            const talking = new Set(c.voiceSpeaking ?? []);
-            if (ev.speaking) talking.add(ev.userId);
-            else talking.delete(ev.userId);
-            c.voiceSpeaking = [...talking];
-          }
-      // The fire you're at already knows, straight from the voice server.
-      if (state.voice?.channelId !== ev.channelId) renderChannels();
       break;
     case 'voice_move': {
       if (!state.voice) break;

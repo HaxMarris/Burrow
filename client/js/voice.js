@@ -255,11 +255,8 @@ function updateSpeaking(voice) {
   for (const id of voice.serverSpeakers ?? []) if (!heardHere.has(id)) speaking.add(id);
   if (speaking.size === state.speaking.size && [...speaking].every((id) => state.speaking.has(id))) return;
   state.speaking = speaking;
-  // Tell the burrow, so people outside the fire can see who's talking.
-  const talking = speaking.has(state.me.id);
-  if (talking !== !!voice.talking && state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: 'voice_speaking', speaking: talking }));
-  voice.talking = talking;
-  renderChannels();
+  // Only the seats around the fire show it; the sidebar stays still while people talk.
+  renderFire();
   renderStage();
 }
 

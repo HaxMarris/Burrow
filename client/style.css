@@ -232,6 +232,7 @@ ul { list-style: none; margin: 0; padding: 0; }
 #channel-list li.unread { color: var(--text-strong); font-weight: 800; }
 #channel-list li.unread::after { content: ""; margin-left: auto; width: 8px; height: 8px; border-radius: 50%; background: var(--cloudberry); flex: none; }
 #channel-list li.unread .room-gear { margin-left: 4px; }
+#channel-list li .ping-count + .dm-close { margin-left: 4px; }
 #channel-list li.dm.unread { font-weight: 800; }
 #channel-list li.hint { cursor: default; font-weight: 400; font-size: 13px; }
 #channel-list li.hint:hover { background: none; color: var(--muted); }
@@ -495,7 +496,6 @@ label.check input { width: auto; }
 .voice-people { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 2px 24px; }
 .voice-person { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text); }
 .avatar.xs { width: 22px; height: 22px; border-radius: 8px; font-size: 11px; transition: box-shadow .12s; }
-.voice-person.speaking .avatar { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--moss); }
 .muted-icon { width: 14px; height: 14px; fill: var(--berry); flex: none; }
 .voice-bar { display: flex; flex-direction: column; gap: 4px; background: var(--surface); border-radius: var(--radius); padding: 8px 8px 6px 12px; box-shadow: var(--shadow); flex: none; }
 .voice-top { display: flex; align-items: center; gap: 4px; }
@@ -1108,7 +1108,6 @@ button.seat-face { cursor: pointer; }
 /* ---- voice and the Campfire: push to talk, moderating voice, soundboard, listen together, calls */
 .conn.talking { color: var(--moss); font-weight: 800; }
 .voice-icon + .room-name + .seat-count, .seat-count { margin-left: auto; font-size: 11px; font-weight: 800; color: var(--muted); font-variant-numeric: tabular-nums; }
-.fire-card.talking .fire-badge { box-shadow: 0 0 0 3px var(--surface), 0 0 0 5px var(--moss); }
 .muted-icon.server-muted { fill: var(--berry); }
 .vs-group { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); }
 .vs-label { font-size: 13px; font-weight: 800; color: var(--text-strong); }

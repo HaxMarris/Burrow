@@ -360,12 +360,9 @@ function renderChannels() {
     const ids = c.voiceUsers ?? [];
     li.className = (i === 0 ? 'fire-card' : 'voice-room') + (joined ? ' joined' : '');
     const streamer = ids.find((id) => state.voice?.channelId === c.id && state.sharing.get(id)?.screen);
-    // Who's talking: straight from the voice server at your own fire, or as the burrow hears it at others.
-    const talking = (id) => (joined ? state.speaking.has(id) : !!c.voiceSpeaking?.includes(id));
     const seats = c.userLimit ? ` of ${c.userLimit} seats` : ' gathered';
     const sub = !ids.length ? (c.userLimit ? `${c.userLimit} seats, all open` : 'Nobody here yet')
       : `${ids.length}${seats}` + (streamer ? ` · ${nameOf(streamer)} is sharing` : '');
-    if (ids.some((id) => talking(id) && !c.voiceMuted?.includes(id))) li.classList.add('talking');
     li.innerHTML = i === 0
       ? `<div class="voice-room-name"><span class="fire-badge">${FIRE_ICON}</span><span class="fire-text"><span class="room-name">${escapeHtml(c.name)}</span><span class="fire-sub">${escapeHtml(sub)}</span></span>${c.private ? LOCK_ICON : ''}</div>`
       : `<div class="voice-room-name">${FIRE_ICON.replace('<svg', '<svg class="voice-icon"')}<span class="room-name">${escapeHtml(c.name)}</span>${c.userLimit ? `<span class="seat-count">${ids.length}/${c.userLimit}</span>` : ''}${c.private ? LOCK_ICON : ''}</div>`;
@@ -375,7 +372,7 @@ function renderChannels() {
     const people = ids.map((id) => {
       const name = nameOfPerson(s.members.find((m) => m.id === id)) ?? '?';
       const row = document.createElement('div');
-      row.className = 'voice-person' + (talking(id) ? ' speaking' : '');
+      row.className = 'voice-person';
       const av = document.createElement('span');
       av.className = 'avatar xs';
       setAvatar(av, name, avatarOf(id));
