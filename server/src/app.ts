@@ -1433,10 +1433,11 @@ export function createApp(opts: AppOptions): Server {
     sendServerUpdate(row.server_id);
     return serverSummary(row.server_id, user.id);
   });
-  route('DELETE', '/api/sounds/:id', ({ user, params }) => {
+  route('DELETE', '/api/sounds/:id', async ({ user, params }) => {
     const row = managedSound(Number(params[0]), user);
     db.prepare('DELETE FROM sounds WHERE id = ?').run(row.id);
-    if (opts.uploadDir) unlink(soundPath(row.file)).catch(() => {});
+    // Gone before the answer, so nobody can still play it a moment later.
+    if (opts.uploadDir) await unlink(soundPath(row.file)).catch(() => {});
     sendServerUpdate(row.server_id);
     return serverSummary(row.server_id, user.id);
   });
