@@ -103,6 +103,33 @@ test('reset links and logging someone out', async () => {
   sam = (await call('/api/login', { body: { username: 'sam', password: 'password1' } })).data;
 });
 
+test('deleting someone from the admin page', async () => {
+  const gus = (await reg('gus')).data;
+  const kim = (await reg('kim')).data;
+  // Gus hosts a hearth Kim and Max are in, and one of his own.
+  const shared = (await call('/api/servers', { body: { name: 'Shared' }, token: gus.token })).data;
+  const solo = (await call('/api/servers', { body: { name: 'Solo' }, token: gus.token })).data;
+  for (const who of [kim, max]) assert.equal((await call('/api/join', { body: { inviteCode: shared.inviteCode }, token: who.token })).status, 200);
+  const room = shared.channels[0].id;
+  await call(`/api/channels/${room}/messages`, { body: { content: 'hello from gus' }, token: gus.token });
+
+  assert.equal((await call(`/api/admin/users/${gus.user.id}/delete`, { method: 'POST', token: sam.token })).status, 403);
+  assert.equal((await call(`/api/admin/users/${max.user?.id ?? max.id}/delete`, { method: 'POST', token: max.token })).status, 400);
+  assert.equal((await call(`/api/admin/users/${gus.user.id}/delete`, { method: 'POST', body: { deleteMessages: true }, token: max.token })).status, 200);
+
+  // Signed out, can't log in, gone from the list, his messages gone, and Kim (there first) hosts the shared hearth.
+  assert.equal((await call('/api/me', { token: gus.token })).status, 401);
+  assert.equal((await call('/api/login', { body: { username: 'gus', password: 'password1' } })).status, 401);
+  assert.ok(!(await call('/api/admin', { token: max.token })).data.users.some((u: any) => u.username === 'gus'));
+  const msgs = (await call(`/api/channels/${room}/messages`, { token: kim.token })).data;
+  assert.ok(!JSON.stringify(msgs).includes('hello from gus'));
+  const servers = (await call('/api/servers', { token: kim.token })).data;
+  assert.equal(servers.find((x: any) => x.id === shared.id).ownerId, kim.user.id);
+  assert.ok(!servers.some((x: any) => x.id === solo.id));
+  assert.equal((await call('/api/servers', { token: max.token })).data.some((x: any) => x.id === solo.id), false);
+  assert.equal((await call(`/api/admin/users/${gus.user.id}/delete`, { method: 'POST', token: max.token })).status, 404);
+});
+
 test('crash reports', async () => {
   for (let i = 0; i < 3; i++) await call('/api/errors', { body: { message: 'x is not a function', stack: 'at a.js:1', where: 'chat' } });
   await call('/api/errors', { body: { message: 'other' } });

@@ -252,7 +252,8 @@ first account made on the server, unless `ADMIN_USERS` in `.env` names others. I
   nothing points at any more, such as pictures from deleted hearths; it also runs by itself daily.
 - **People:** everyone with an account, when they were last on, what they've sent and uploaded.
   *Reset link* makes a one-hour link that sets a new password (send it to them); *Log out* signs
-  someone out everywhere.
+  someone out everywhere; *Delete* removes their account (keeping or deleting their messages), and
+  hearths they host go to whoever has been in them longest.
 - **Signing up:** who can make an account (anyone, people with the registration code, or only people
   with a signup link), and signup links: each works for 1 to 50 accounts and can run out after a
   day, a week or a month. Someone opening one sees the sign-up form with no code to type.
