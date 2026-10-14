@@ -16,6 +16,7 @@ import { newVapidKeys, sendPush, vapidKeysWork, type VapidKeys } from './push.ts
 import { looksLikeEmail, sendMail, type MailConfig } from './mail.ts';
 import { hosting, type HostingOptions } from './hosting.ts';
 import { extras, voiceTimeTracker } from './extras.ts';
+import { listenTogether } from './listen.ts';
 import { checkTotp, hashRecovery, newRecoveryCodes, newTotpSecret, verifyAssertion, verifyRegistration, ZipWriter } from './account.ts';
 
 export interface AppOptions {
@@ -196,6 +197,12 @@ export function createApp(opts: AppOptions): Server {
          UNION SELECT 1 FROM channel_role_access cra JOIN member_roles mr ON mr.role_id = cra.role_id WHERE cra.channel_id = ? AND mr.user_id = ?`,
       )
       .get(channel.id, userId, channel.id, userId);
+  };
+  /** A room someone can see, by its id. Anything else is "not found", whether it exists or not. */
+  const visibleRoom = (id: number, userId: number) => {
+    const channel = channelById(id);
+    if (!channel || !canSee(channel, userId)) throw new HttpError(404, 'Room not found');
+    return channel;
   };
   const channelAudience = (channel: Channel) => serverMemberIds(channel.serverId).filter((id) => canSee(channel, id));
 
@@ -430,46 +437,6 @@ export function createApp(opts: AppOptions): Server {
     const { voiceUsers, voiceMuted, voiceDeafened, voiceServerMuted, voiceSpeaking } = voiceSummary(channelId);
     return { type: 'voice_state', channelId, userIds: voiceUsers, muted: voiceMuted, deafened: voiceDeafened, serverMuted: voiceServerMuted, speaking: voiceSpeaking };
   };
-  // Listen together: one YouTube video per fire, played in step for everyone there, with a queue
-  // of what's next. Like the fireside chat, it's only kept while someone is at the fire.
-  type Queued = { id: number; videoId: string; title: string; by: number };
-  type Listening = {
-    videoId: string; title: string; playing: boolean; position: number; since: number; by: number;
-    queue: Queued[]; skips: Set<number>; ended: boolean; startedAt: number;
-  };
-  const listening = new Map<number, Listening>(); // voice channel id -> what's playing
-  let queuedId = 0;
-  const LISTEN_QUEUE_MAX = 50;
-  /** Votes it takes to skip: more than half of the people at the fire. */
-  const skipsNeeded = (channelId: number) => Math.floor(usersInVoice(channelId).length / 2) + 1;
-  const skipVotes = (channelId: number, l: Listening) => {
-    const here = new Set(usersInVoice(channelId));
-    return [...l.skips].filter((id) => here.has(id));
-  };
-  /** Where the video is now, in seconds, and the clock it was read at, so apps can line up. */
-  const listenEvent = (channelId: number) => {
-    const l = listening.get(channelId);
-    const at = Date.now();
-    return {
-      type: 'listen_state',
-      channelId,
-      at,
-      state: l
-        ? {
-            videoId: l.videoId,
-            title: l.title,
-            playing: l.playing,
-            by: l.by,
-            position: l.position + (l.playing ? (at - l.since) / 1000 : 0),
-            ended: l.ended,
-            queue: l.queue,
-            skipVotes: skipVotes(channelId, l),
-            skipsNeeded: skipsNeeded(channelId),
-          }
-        : null,
-    };
-  };
-
   const sendTo = (userIds: Iterable<number>, event: Json) => {
     const data = JSON.stringify(event);
     for (const id of userIds) for (const ws of sockets.get(id) ?? []) if (ws.readyState === WebSocket.OPEN) ws.send(data);
@@ -500,14 +467,10 @@ export function createApp(opts: AppOptions): Server {
       inVoice.delete(userId);
       voiceTime.stop(userId);
       // The last one out puts the fire out: its chat (unless it's kept) and whatever was playing.
-      if (!usersInVoice(prev).length) {
-        fireside.delete(prev);
-        listening.delete(prev);
-      }
+      if (!usersInVoice(prev).length) fireside.delete(prev);
       const old = channelById(prev);
       if (old) broadcastToChannel(old, voiceStateEvent(old.id));
-      // Fewer people at the fire means fewer votes to skip, which may now be enough.
-      if (listening.has(prev)) checkSkip(prev);
+      listen.left(prev);
     }
     if (channelId === null) lastActive.delete(userId);
     else {
@@ -516,7 +479,7 @@ export function createApp(opts: AppOptions): Server {
       voiceTime.start(userId, channel.serverId, channelId);
       lastActive.set(userId, Date.now());
       sendTo([userId], { type: 'fireside_history', channelId, messages: firesideHistory(channel) });
-      if (listening.has(channelId)) sendTo(usersInVoice(channelId), listenEvent(channelId));
+      listen.joined(channelId);
       broadcastToChannel(channel, voiceStateEvent(channelId));
     }
   };
@@ -1230,8 +1193,7 @@ export function createApp(opts: AppOptions): Server {
 
   // Rename a room, make it private or public, or change who's let in.
   route('PATCH', '/api/channels/:id', ({ user, params, body }) => {
-    const channel = channelById(Number(params[0]));
-    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    const channel = visibleRoom(Number(params[0]), user.id);
     if (channel.kind === 'thread') return renameThread(channel, user, body.name);
     allowed(channel.serverId, user, 'rooms');
     if (body.name !== undefined) db.prepare('UPDATE channels SET name = ? WHERE id = ?').run(roomName(body.name, channel.kind), channel.id);
@@ -1287,8 +1249,7 @@ export function createApp(opts: AppOptions): Server {
   });
 
   route('DELETE', '/api/channels/:id', ({ user, params }) => {
-    const channel = channelById(Number(params[0]));
-    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    const channel = visibleRoom(Number(params[0]), user.id);
     const threadMessage = channel.kind === 'thread' ? manageableThread(channel, user) : null;
     if (channel.kind !== 'thread') allowed(channel.serverId, user, 'rooms');
     const textRooms = db.prepare("SELECT COUNT(*) AS n FROM channels WHERE server_id = ? AND kind = 'text'").get(channel.serverId) as { n: number };
@@ -1305,8 +1266,7 @@ export function createApp(opts: AppOptions): Server {
   });
 
   route('POST', '/api/channels/:id/voice', ({ user, params }) => {
-    const channel = channelById(Number(params[0]));
-    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    const channel = visibleRoom(Number(params[0]), user.id);
     if (channel.kind !== 'voice') throw new HttpError(400, 'That is not a voice room');
     if (!opts.voice) throw new HttpError(503, 'Voice is not set up on this server');
     checkSeat(channel, user.id);
@@ -1498,103 +1458,17 @@ export function createApp(opts: AppOptions): Server {
 
   // ---- listen together
 
-  /** Whoever manages voice in the hearth (hosts and mods) can skip or stop for everyone. */
-  const listenBoss = (channelId: number, userId: number) => {
-    const channel = channelById(channelId);
-    return !!channel && serverKind(channel.serverId) === 'burrow' && !!standing(channel.serverId, userId)?.perms.has('voice');
-  };
-  /** Plays what's next in the queue, or stops at the end of this one when nothing is. */
-  const playNext = (channelId: number, l: Listening, t: number) => {
-    const next = l.queue.shift();
-    l.skips.clear();
-    if (next) Object.assign(l, { videoId: next.videoId, title: next.title, by: next.by, playing: true, position: 0, since: t, ended: false, startedAt: t });
-    else Object.assign(l, { position: l.position + (l.playing ? (t - l.since) / 1000 : 0), since: t, playing: false, ended: true });
-  };
-  // Defined as a function so leaving the fire (above) can call it.
-  function checkSkip(channelId: number) {
-    const l = listening.get(channelId);
-    if (!l) return;
-    if (l.skips.size && skipVotes(channelId, l).length >= skipsNeeded(channelId)) playNext(channelId, l, Date.now());
-    sendTo(usersInVoice(channelId), listenEvent(channelId));
-  }
-  /** Looks up a video's name for the queue, since its player hasn't loaded it yet. */
-  const nameQueued = (channelId: number, item: Queued) => {
-    if (!previewOpts) return;
-    fetchEmbed(`https://www.youtube.com/watch?v=${item.videoId}`, previewOpts)
-      .then((embed) => {
-        const l = listening.get(channelId);
-        const still = l?.queue.find((q) => q.id === item.id);
-        if (!embed?.title || !still || still.title) return;
-        still.title = embed.title;
-        sendTo(usersInVoice(channelId), listenEvent(channelId));
-      })
-      .catch(() => {});
-  };
-
-  const listenTogether = (user: User, msg: Json) => {
-    const channelId = inVoice.get(user.id);
-    if (channelId === undefined) throw new HttpError(400, 'Join a fire to listen together');
-    const t = Date.now();
-    const l = listening.get(channelId);
-    const here = (l: Listening) => l.position + (l.playing ? (t - l.since) / 1000 : 0);
-    const position = (value: unknown) => Math.max(0, Math.min(Number(value) || 0, 24 * 3600));
-    if (msg.action === 'start' || msg.action === 'queue') {
-      const videoId = typeof msg.videoId === 'string' && /^[\w-]{11}$/.test(msg.videoId) ? msg.videoId : null;
-      if (!videoId) throw new HttpError(400, "That isn't a YouTube video");
-      if (!l) {
-        listening.set(channelId, { videoId, title: '', playing: true, position: position(msg.position), since: t, by: user.id, queue: [], skips: new Set(), ended: false, startedAt: t });
-      } else if (l.ended && !l.queue.length) {
-        // The last one finished and nothing's next: this one plays now.
-        Object.assign(l, { videoId, title: '', playing: true, position: position(msg.position), since: t, by: user.id, ended: false, startedAt: t });
-        l.skips.clear();
-      } else {
-        // Something's already on: it goes to the back of the queue, rather than cutting in.
-        if (l.queue.length >= LISTEN_QUEUE_MAX) throw new HttpError(400, 'The queue is full');
-        const item = { id: ++queuedId, videoId, title: '', by: user.id };
-        l.queue.push(item);
-        nameQueued(channelId, item);
-      }
-    } else if (!l) {
-      return;
-    } else if (msg.action === 'title') {
-      // The app that started it says what it's called, once the video has loaded.
-      if (l.title || typeof msg.title !== 'string') return;
-      l.title = msg.title.trim().slice(0, 200);
-    } else if (msg.action === 'pause' || msg.action === 'play') {
-      Object.assign(l, { position: here(l), since: t, playing: msg.action === 'play', ended: false });
-    } else if (msg.action === 'seek') {
-      Object.assign(l, { position: position(msg.position), since: t, ended: false });
-    } else if (msg.action === 'ended') {
-      // On to what's next, or it stops at the end for everyone rather than starting over. Every
-      // app says so when its player reaches the end, so only the first one counts: the others
-      // name a video that's no longer on, or (older apps, which don't) arrive just after the next began.
-      if (msg.videoId !== undefined && msg.videoId !== l.videoId) return;
-      if (!l.playing || t - l.startedAt < 5000) return;
-      playNext(channelId, l, t);
-    } else if (msg.action === 'skip') {
-      // Whoever put it on, and the hearth's hosts and mods, skip right away; anyone else votes,
-      // and it's skipped once more than half the fire agrees. Voting again takes the vote back.
-      if (msg.videoId !== undefined && msg.videoId !== l.videoId) return;
-      if (l.by === user.id || listenBoss(channelId, user.id)) playNext(channelId, l, t);
-      else if (l.skips.has(user.id)) l.skips.delete(user.id);
-      else {
-        l.skips.add(user.id);
-        if (skipVotes(channelId, l).length >= skipsNeeded(channelId)) playNext(channelId, l, t);
-      }
-    } else if (msg.action === 'unqueue') {
-      // Taking something out of the queue: whoever added it, or a host or mod.
-      const i = l.queue.findIndex((q) => q.id === Number(msg.id));
-      if (i < 0) return;
-      if (l.queue[i].by !== user.id && !listenBoss(channelId, user.id)) throw new HttpError(403, 'Only whoever added it can take it out');
-      l.queue.splice(i, 1);
-    } else if (msg.action === 'stop') {
-      // Stopping ends the queue too, so it's for the same people who can skip right away.
-      if (l.by !== user.id && !listenBoss(channelId, user.id)) throw new HttpError(403, 'Vote to skip instead');
-      listening.delete(channelId);
-    } else return;
-    lastActive.set(user.id, t);
-    sendTo(usersInVoice(channelId), listenEvent(channelId));
-  };
+  const listen = listenTogether({
+    inVoice, usersInVoice, sendTo,
+    isBoss: (channelId, userId) => {
+      const channel = channelById(channelId);
+      return !!channel && serverKind(channel.serverId) === 'burrow' && !!standing(channel.serverId, userId)?.perms.has('voice');
+    },
+    // Named the way link previews are, so not at all when those are off.
+    videoTitle: async (videoId) => (previewOpts ? (await fetchEmbed(`https://www.youtube.com/watch?v=${videoId}`, previewOpts))?.title : undefined),
+    active: (userId, t) => lastActive.set(userId, t),
+    fail: (status, message) => new HttpError(status, message),
+  });
 
   // ---- calls in direct messages: a conversation's own voice room, and ringing the others
 
@@ -1628,8 +1502,7 @@ export function createApp(opts: AppOptions): Server {
   // The newest messages, or with ?before= older ones, ?after= newer ones (oldest first),
   // or ?around= the messages either side of one (to jump to it).
   route('GET', '/api/channels/:id/messages', ({ user, params, url }) => {
-    const channel = channelById(Number(params[0]));
-    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    const channel = visibleRoom(Number(params[0]), user.id);
     if (channel.kind === 'voice') return [];
     const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 100);
     const older = (before: number, n: number) =>
@@ -1806,8 +1679,7 @@ export function createApp(opts: AppOptions): Server {
   // Bulk delete: a message and everything after it in the room, up to 100 at a time.
   const MAX_BULK = 100;
   route('POST', '/api/channels/:id/bulk-delete', ({ user, params, body }) => {
-    const channel = channelById(Number(params[0]));
-    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    const channel = visibleRoom(Number(params[0]), user.id);
     allowed(channel.serverId, user, 'messages');
     const fromId = Number(body.fromId);
     const ids = (db.prepare('SELECT id FROM messages WHERE channel_id = ? AND id >= ? ORDER BY id LIMIT ?').all(channel.id, fromId, MAX_BULK + 1) as { id: number }[]).map((r) => r.id);
@@ -1983,8 +1855,7 @@ export function createApp(opts: AppOptions): Server {
     const user = userByToken(bearer(req));
     if (!user) throw new HttpError(401, 'Not logged in');
     if (!opts.uploadDir) throw new HttpError(503, 'Uploads are not set up on this server');
-    const channel = channelById(channelId);
-    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    const channel = visibleRoom(channelId, user.id);
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
     const limit = uploadLimitFor(channel.serverId, user.id);
     if (!limit) throw new HttpError(403, "Your roles can't share files in this hearth");
@@ -2261,8 +2132,7 @@ export function createApp(opts: AppOptions): Server {
 
   /** Saves a GIF from a search into a room, ready to send like an uploaded file. */
   route('POST', '/api/channels/:id/gifs', async ({ user, params, body }) => {
-    const channel = channelById(Number(params[0]));
-    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    const channel = visibleRoom(Number(params[0]), user.id);
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
     const gif = gifsOn().get(String(body.id ?? ''));
     if (!gif) throw new HttpError(404, 'That GIF is no longer available. Search again.');
@@ -2844,8 +2714,7 @@ export function createApp(opts: AppOptions): Server {
 
   // You've read a room up to here. With unread: true, it's set back to here ("mark unread").
   route('POST', '/api/channels/:id/read', ({ user, params, body }) => {
-    const channel = channelById(Number(params[0]));
-    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    const channel = visibleRoom(Number(params[0]), user.id);
     const newest = (db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE channel_id = ?').get(channel.id) as { id: number }).id;
     const id = Math.max(0, Math.min(Math.floor(Number(body.lastReadId) || 0), newest));
     markRead(user.id, channel, id, { force: body.unread === true });
@@ -2882,8 +2751,7 @@ export function createApp(opts: AppOptions): Server {
 
   /** A room's pinned messages, most recently pinned first. */
   route('GET', '/api/channels/:id/pins', ({ user, params }) => {
-    const channel = channelById(Number(params[0]));
-    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    const channel = visibleRoom(Number(params[0]), user.id);
     const ids = db.prepare('SELECT id FROM messages WHERE channel_id = ? AND pinned_at IS NOT NULL ORDER BY pinned_at DESC').all(channel.id) as { id: number }[];
     return messagesByIds(ids.map((r) => r.id));
   });
@@ -2972,8 +2840,7 @@ export function createApp(opts: AppOptions): Server {
   const scheduledChanged = (userId: number) => sendTo([userId], { type: 'scheduled', items: scheduledOf(userId) });
 
   route('POST', '/api/channels/:id/scheduled', ({ user, params, body }) => {
-    const channel = channelById(Number(params[0]));
-    if (!channel || !canSee(channel, user.id)) throw new HttpError(404, 'Room not found');
+    const channel = visibleRoom(Number(params[0]), user.id);
     if (channel.kind === 'voice') throw new HttpError(400, 'Voice rooms have no messages');
     const content = typeof body.content === 'string' ? body.content : '';
     if (!content.trim()) throw new HttpError(400, 'Message is empty');
@@ -4932,7 +4799,7 @@ export function createApp(opts: AppOptions): Server {
         } else if (msg.type === 'soundboard') {
           playSound(user, Number(msg.soundId));
         } else if (msg.type === 'listen') {
-          listenTogether(user, msg);
+          listen.handle(user, msg);
         } else if (msg.type === 'typing') {
           const channel = channelById(Number(msg.channelId));
           if (channel && canSee(channel, user.id))
