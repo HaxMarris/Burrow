@@ -714,6 +714,7 @@ export function createApp(opts: AppOptions): Server {
       db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
       for (const ws of sockets.get(userId) ?? []) ws.close(4001, 'Signed out');
     },
+    deleteAccount: (userId, deleteMessages) => deleteAccount(userById(userId)!, deleteMessages),
   });
   const fun = extras({
     db, route, fail: (status, message) => new HttpError(status, message),
@@ -4492,15 +4493,38 @@ export function createApp(opts: AppOptions): Server {
   // Your messages stay (as "Deleted user") or go, as you choose.
   route('DELETE', '/api/me', ({ user, body }) => {
     confirmIdentity(user, body);
-    const hosted = db.prepare("SELECT id, name FROM servers WHERE owner_id = ? AND kind = 'burrow'").all(user.id) as { id: number; name: string }[];
-    const busy = hosted.filter((s) => serverMemberIds(s.id).some((id) => id !== user.id));
+    const busy = busyHearths(user.id);
     if (busy.length)
       throw new HttpError(409, `Hand over or delete ${busy.map((s) => s.name).join(', ')} first: you're the host${busy.length > 1 ? ' of those burrows' : ''}.`);
+    deleteAccount(user, body.deleteMessages === true);
+    return { ok: true };
+  });
+
+  /** Burrows someone hosts that other people are in too. */
+  const busyHearths = (userId: number) =>
+    (db.prepare("SELECT id, name FROM servers WHERE owner_id = ? AND kind = 'burrow'").all(userId) as { id: number; name: string }[])
+      .filter((s) => serverMemberIds(s.id).some((id) => id !== userId));
+
+  /**
+   * Deletes an account: out of everything, their own things gone, their messages kept as
+   * "Deleted user" or removed. Burrows they still host with other people in them go to whoever
+   * has been there longest (only the admin page gets that far; people deleting themselves hand over first).
+   */
+  const deleteAccount = (user: User, deleteMessages: boolean) => {
+    for (const s of busyHearths(user.id)) {
+      const next = db
+        .prepare('SELECT m.user_id AS id FROM members m JOIN users u ON u.id = m.user_id WHERE m.server_id = ? AND m.user_id != ? AND u.bot = 0 AND u.deleted_at IS NULL ORDER BY m.joined_at, m.user_id LIMIT 1')
+        .get(s.id, user.id) as { id: number } | undefined;
+      if (!next) continue;
+      db.prepare('UPDATE servers SET owner_id = ? WHERE id = ?').run(next.id, s.id);
+      accessChanged(s.id);
+    }
+    const hosted = db.prepare("SELECT id FROM servers WHERE owner_id = ? AND kind = 'burrow'").all(user.id) as { id: number }[];
     signOutOthers(user.id, null, 'Account deleted');
     for (const s of hosted) deleteBurrow(s.id);
     const places = db.prepare('SELECT m.server_id AS id, s.kind, s.dm_key FROM members m JOIN servers s ON s.id = m.server_id WHERE m.user_id = ?').all(user.id) as
       { id: number; kind: string; dm_key: string | null }[];
-    if (body.deleteMessages === true) {
+    if (deleteMessages) {
       const touched = db.prepare('SELECT DISTINCT channel_id AS id FROM messages WHERE author_id = ?').all(user.id) as { id: number }[];
       removeFiles(db.prepare('SELECT a.id FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.author_id = ?').all(user.id) as Json[]);
       db.prepare('DELETE FROM messages WHERE author_id = ?').run(user.id);
@@ -4528,8 +4552,7 @@ export function createApp(opts: AppOptions): Server {
     ).run(`deleted-${user.id}-${randomBytes(4).toString('hex')}`, now(), user.id);
     for (const p of places) if (p.kind === 'dm' && p.dm_key) sendServerUpdate(p.id);
     userChanged(user.id);
-    return { ok: true };
-  });
+  };
 
   // Export my data: a zip of your account, your messages (as JSON) and the files you sent.
   const handleExport = async (req: IncomingMessage, res: ServerResponse) => {

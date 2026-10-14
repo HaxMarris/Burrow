@@ -137,9 +137,9 @@ function adminPeople(pane) {
       <td><b>${escapeHtml(u.displayName || u.username)}</b>${u.bot ? ' <span class="bot-tag">BOT</span>' : ''}${u.admin ? ' <span class="small muted">admin</span>' : ''}<br><span class="small muted">@${escapeHtml(u.username)}${u.twoStep ? ' · two-step' : ''}</span></td>
       <td class="small">${u.online ? '<b>Online</b>' : ago(u.lastSeen)}<br><span class="muted">joined ${dateText(u.createdAt)}</span></td>
       <td class="small">${u.messages.toLocaleString()} msgs<br><span class="muted">${formatSize(u.storage)}</span></td>
-      <td>${u.bot ? '' : `<button type="button" class="btn secondary tiny-btn" data-act="reset">Reset link</button>${u.id === state.me.id ? '' : ' <button type="button" class="btn secondary tiny-btn" data-act="out">Log out</button>'}`}</td>
+      <td>${u.bot ? '' : `<button type="button" class="btn secondary tiny-btn" data-act="reset">Reset link</button>${u.id === state.me.id ? '' : ' <button type="button" class="btn secondary tiny-btn" data-act="out">Log out</button> <button type="button" class="btn danger tiny-btn" data-act="delete">Delete</button>'}`}</td>
     </tr>`);
-  pane.innerHTML = `<p class="small muted">Everyone with an account here. A reset link lets someone who's locked out choose a new password (it works once, for an hour). Log out signs them out on every device.</p>
+  pane.innerHTML = `<p class="small muted">Everyone with an account here. A reset link lets someone who's locked out choose a new password (it works once, for an hour). Log out signs them out on every device. Delete removes their account for good, and hearths they host go to whoever has been in them longest.</p>
     <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Who</th><th>Last seen</th><th>Sent</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
   for (const b of pane.querySelectorAll('button[data-act]')) {
     const id = Number(b.closest('tr').dataset.id);
@@ -150,6 +150,8 @@ function adminPeople(pane) {
           const r = await api(`/api/admin/users/${id}/reset-link`, { method: 'POST' });
           await copyText(r.url);
           toast(`Reset link for ${r.username} copied. Send it to them; it works once, for the next hour.`, { timeout: 8000 });
+        } else if (b.dataset.act === 'delete') {
+          confirmDeleteAccount(u);
         } else if (confirm(`Log ${u.username} out on all their devices?`)) {
           await api(`/api/admin/users/${id}/sign-out`, { method: 'POST' });
           toast(`${u.username} is logged out everywhere.`);
@@ -157,6 +159,28 @@ function adminPeople(pane) {
       } catch (err) { alertError(err); }
     };
   }
+}
+
+// Deleting someone's account, the same way they could delete it themselves.
+function confirmDeleteAccount(u) {
+  modal(`<h2>Delete ${escapeHtml(u.username)}'s account?</h2>
+    <form id="admin-delete-form" class="danger-zone">
+      <p class="small muted">They're logged out everywhere and can't log in again. They leave every hearth and group, and hearths they host go to whoever has been in them longest. This can't be undone.</p>
+      <label class="check"><input type="radio" name="admin-delete-messages" value="keep" checked /> Keep their messages, shown as from "Deleted user"</label>
+      <label class="check"><input type="radio" name="admin-delete-messages" value="delete" /> Delete their messages and files too</label>
+      <div class="error" id="admin-delete-error"></div>
+      <div class="modal-row"><button type="button" class="btn secondary" id="admin-delete-cancel">Cancel</button><button type="submit" class="btn danger">Delete account</button></div>
+    </form>`);
+  $('#admin-delete-cancel').onclick = () => openAdmin('people');
+  $('#admin-delete-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const deleteMessages = $('#admin-delete-form').querySelector('input[name="admin-delete-messages"]:checked').value === 'delete';
+    try {
+      await api(`/api/admin/users/${u.id}/delete`, { method: 'POST', body: { deleteMessages } });
+      toast(`${u.username}'s account is deleted.`);
+      openAdmin('people');
+    } catch (err) { $('#admin-delete-error').textContent = err.message; }
+  };
 }
 
 const signupUrl = (code) => `${isDesktop ? state.serverUrl : location.origin}/?signup=${code}`;

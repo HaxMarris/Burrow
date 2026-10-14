@@ -39,6 +39,8 @@ export interface HostingContext {
   inVoice: Map<number, number>;
   /** Logs someone out everywhere, closing their open connections. */
   signOut: (userId: number) => void;
+  /** Deletes an account the way deleting your own does, handing over burrows they host. */
+  deleteAccount: (userId: number, deleteMessages: boolean) => void;
 }
 
 export type SignupMode = 'open' | 'code' | 'links';
@@ -304,6 +306,14 @@ export function hosting(ctx: HostingContext) {
     const id = Number(params[0]);
     if (id === user.id) throw fail(400, "That's you. Use Your devices in your account instead.");
     ctx.signOut(id);
+    return { ok: true };
+  }));
+
+  route('POST', '/api/admin/users/:id/delete', admin(({ params, user, body }) => {
+    const id = Number(params[0]);
+    if (id === user.id) throw fail(400, "That's you. Delete your own account from Your data in your account instead.");
+    if (!db.prepare('SELECT 1 FROM users WHERE id = ? AND deleted_at IS NULL AND bot = 0').get(id)) throw fail(404, 'Nobody by that name');
+    ctx.deleteAccount(id, body.deleteMessages === true);
     return { ok: true };
   }));
 
