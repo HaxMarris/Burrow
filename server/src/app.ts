@@ -430,10 +430,22 @@ export function createApp(opts: AppOptions): Server {
     const { voiceUsers, voiceMuted, voiceDeafened, voiceServerMuted, voiceSpeaking } = voiceSummary(channelId);
     return { type: 'voice_state', channelId, userIds: voiceUsers, muted: voiceMuted, deafened: voiceDeafened, serverMuted: voiceServerMuted, speaking: voiceSpeaking };
   };
-  // Listen together: one YouTube video per fire, played in step for everyone there. Like the
-  // fireside chat, it's only kept while someone is at the fire.
-  type Listening = { videoId: string; title: string; playing: boolean; position: number; since: number; by: number };
+  // Listen together: one YouTube video per fire, played in step for everyone there, with a queue
+  // of what's next. Like the fireside chat, it's only kept while someone is at the fire.
+  type Queued = { id: number; videoId: string; title: string; by: number };
+  type Listening = {
+    videoId: string; title: string; playing: boolean; position: number; since: number; by: number;
+    queue: Queued[]; skips: Set<number>; ended: boolean; startedAt: number;
+  };
   const listening = new Map<number, Listening>(); // voice channel id -> what's playing
+  let queuedId = 0;
+  const LISTEN_QUEUE_MAX = 50;
+  /** Votes it takes to skip: more than half of the people at the fire. */
+  const skipsNeeded = (channelId: number) => Math.floor(usersInVoice(channelId).length / 2) + 1;
+  const skipVotes = (channelId: number, l: Listening) => {
+    const here = new Set(usersInVoice(channelId));
+    return [...l.skips].filter((id) => here.has(id));
+  };
   /** Where the video is now, in seconds, and the clock it was read at, so apps can line up. */
   const listenEvent = (channelId: number) => {
     const l = listening.get(channelId);
@@ -442,7 +454,19 @@ export function createApp(opts: AppOptions): Server {
       type: 'listen_state',
       channelId,
       at,
-      state: l ? { videoId: l.videoId, title: l.title, playing: l.playing, by: l.by, position: l.position + (l.playing ? (at - l.since) / 1000 : 0) } : null,
+      state: l
+        ? {
+            videoId: l.videoId,
+            title: l.title,
+            playing: l.playing,
+            by: l.by,
+            position: l.position + (l.playing ? (at - l.since) / 1000 : 0),
+            ended: l.ended,
+            queue: l.queue,
+            skipVotes: skipVotes(channelId, l),
+            skipsNeeded: skipsNeeded(channelId),
+          }
+        : null,
     };
   };
 
@@ -482,6 +506,8 @@ export function createApp(opts: AppOptions): Server {
       }
       const old = channelById(prev);
       if (old) broadcastToChannel(old, voiceStateEvent(old.id));
+      // Fewer people at the fire means fewer votes to skip, which may now be enough.
+      if (listening.has(prev)) checkSkip(prev);
     }
     if (channelId === null) lastActive.delete(userId);
     else {
@@ -490,7 +516,7 @@ export function createApp(opts: AppOptions): Server {
       voiceTime.start(userId, channel.serverId, channelId);
       lastActive.set(userId, Date.now());
       sendTo([userId], { type: 'fireside_history', channelId, messages: firesideHistory(channel) });
-      if (listening.has(channelId)) sendTo([userId], listenEvent(channelId));
+      if (listening.has(channelId)) sendTo(usersInVoice(channelId), listenEvent(channelId));
       broadcastToChannel(channel, voiceStateEvent(channelId));
     }
   };
@@ -1468,6 +1494,39 @@ export function createApp(opts: AppOptions): Server {
 
   // ---- listen together
 
+  /** Whoever manages voice in the hearth (hosts and mods) can skip or stop for everyone. */
+  const listenBoss = (channelId: number, userId: number) => {
+    const channel = channelById(channelId);
+    return !!channel && serverKind(channel.serverId) === 'burrow' && !!standing(channel.serverId, userId)?.perms.has('voice');
+  };
+  /** Plays what's next in the queue, or stops at the end of this one when nothing is. */
+  const playNext = (channelId: number, l: Listening, t: number) => {
+    const next = l.queue.shift();
+    l.skips.clear();
+    if (next) Object.assign(l, { videoId: next.videoId, title: next.title, by: next.by, playing: true, position: 0, since: t, ended: false, startedAt: t });
+    else Object.assign(l, { position: l.position + (l.playing ? (t - l.since) / 1000 : 0), since: t, playing: false, ended: true });
+  };
+  // Defined as a function so leaving the fire (above) can call it.
+  function checkSkip(channelId: number) {
+    const l = listening.get(channelId);
+    if (!l) return;
+    if (l.skips.size && skipVotes(channelId, l).length >= skipsNeeded(channelId)) playNext(channelId, l, Date.now());
+    sendTo(usersInVoice(channelId), listenEvent(channelId));
+  }
+  /** Looks up a video's name for the queue, since its player hasn't loaded it yet. */
+  const nameQueued = (channelId: number, item: Queued) => {
+    if (!previewOpts) return;
+    fetchEmbed(`https://www.youtube.com/watch?v=${item.videoId}`, previewOpts)
+      .then((embed) => {
+        const l = listening.get(channelId);
+        const still = l?.queue.find((q) => q.id === item.id);
+        if (!embed?.title || !still || still.title) return;
+        still.title = embed.title;
+        sendTo(usersInVoice(channelId), listenEvent(channelId));
+      })
+      .catch(() => {});
+  };
+
   const listenTogether = (user: User, msg: Json) => {
     const channelId = inVoice.get(user.id);
     if (channelId === undefined) throw new HttpError(400, 'Join a fire to listen together');
@@ -1475,10 +1534,22 @@ export function createApp(opts: AppOptions): Server {
     const l = listening.get(channelId);
     const here = (l: Listening) => l.position + (l.playing ? (t - l.since) / 1000 : 0);
     const position = (value: unknown) => Math.max(0, Math.min(Number(value) || 0, 24 * 3600));
-    if (msg.action === 'start') {
+    if (msg.action === 'start' || msg.action === 'queue') {
       const videoId = typeof msg.videoId === 'string' && /^[\w-]{11}$/.test(msg.videoId) ? msg.videoId : null;
       if (!videoId) throw new HttpError(400, "That isn't a YouTube video");
-      listening.set(channelId, { videoId, title: '', playing: true, position: position(msg.position), since: t, by: user.id });
+      if (!l) {
+        listening.set(channelId, { videoId, title: '', playing: true, position: position(msg.position), since: t, by: user.id, queue: [], skips: new Set(), ended: false, startedAt: t });
+      } else if (l.ended && !l.queue.length) {
+        // The last one finished and nothing's next: this one plays now.
+        Object.assign(l, { videoId, title: '', playing: true, position: position(msg.position), since: t, by: user.id, ended: false, startedAt: t });
+        l.skips.clear();
+      } else {
+        // Something's already on: it goes to the back of the queue, rather than cutting in.
+        if (l.queue.length >= LISTEN_QUEUE_MAX) throw new HttpError(400, 'The queue is full');
+        const item = { id: ++queuedId, videoId, title: '', by: user.id };
+        l.queue.push(item);
+        nameQueued(channelId, item);
+      }
     } else if (!l) {
       return;
     } else if (msg.action === 'title') {
@@ -1486,13 +1557,35 @@ export function createApp(opts: AppOptions): Server {
       if (l.title || typeof msg.title !== 'string') return;
       l.title = msg.title.trim().slice(0, 200);
     } else if (msg.action === 'pause' || msg.action === 'play') {
-      Object.assign(l, { position: here(l), since: t, playing: msg.action === 'play' });
+      Object.assign(l, { position: here(l), since: t, playing: msg.action === 'play', ended: false });
     } else if (msg.action === 'seek') {
-      Object.assign(l, { position: position(msg.position), since: t });
+      Object.assign(l, { position: position(msg.position), since: t, ended: false });
     } else if (msg.action === 'ended') {
-      // Stops at the end for everyone, rather than starting over.
-      Object.assign(l, { position: here(l), since: t, playing: false });
+      // On to what's next, or it stops at the end for everyone rather than starting over. Every
+      // app says so when its player reaches the end, so only the first one counts: the others
+      // name a video that's no longer on, or (older apps, which don't) arrive just after the next began.
+      if (msg.videoId !== undefined && msg.videoId !== l.videoId) return;
+      if (!l.playing || t - l.startedAt < 5000) return;
+      playNext(channelId, l, t);
+    } else if (msg.action === 'skip') {
+      // Whoever put it on, and the hearth's hosts and mods, skip right away; anyone else votes,
+      // and it's skipped once more than half the fire agrees. Voting again takes the vote back.
+      if (msg.videoId !== undefined && msg.videoId !== l.videoId) return;
+      if (l.by === user.id || listenBoss(channelId, user.id)) playNext(channelId, l, t);
+      else if (l.skips.has(user.id)) l.skips.delete(user.id);
+      else {
+        l.skips.add(user.id);
+        if (skipVotes(channelId, l).length >= skipsNeeded(channelId)) playNext(channelId, l, t);
+      }
+    } else if (msg.action === 'unqueue') {
+      // Taking something out of the queue: whoever added it, or a host or mod.
+      const i = l.queue.findIndex((q) => q.id === Number(msg.id));
+      if (i < 0) return;
+      if (l.queue[i].by !== user.id && !listenBoss(channelId, user.id)) throw new HttpError(403, 'Only whoever added it can take it out');
+      l.queue.splice(i, 1);
     } else if (msg.action === 'stop') {
+      // Stopping ends the queue too, so it's for the same people who can skip right away.
+      if (l.by !== user.id && !listenBoss(channelId, user.id)) throw new HttpError(403, 'Vote to skip instead');
       listening.delete(channelId);
     } else return;
     lastActive.set(user.id, t);

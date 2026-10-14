@@ -722,8 +722,9 @@ function openSounds(serverId) {
 
 // ---------------------------------------------------------------- listen together
 //
-// One YouTube video per fire, played in step for everyone there. Anyone can start, pause, skip
-// or stop it. Burrow keeps what's playing and where it was at a moment in time; each app works
+// One YouTube video per fire, played in step for everyone there, with a queue of what's next.
+// Anyone can add to the queue, pause or seek. Skipping takes more than half the fire's votes,
+// except for whoever put it on and the hearth's hosts and mods, who can skip or stop right away. Burrow keeps what's playing and where it was at a moment in time; each app works
 // out where it should be now and nudges its player there. The player is YouTube's own, in a
 // frame, controlled with the messages its embed understands (no YouTube script runs in Burrow).
 
@@ -758,19 +759,20 @@ function youtubeStart(text) {
 const sendListen = (msg) => state.ws?.readyState === WebSocket.OPEN && state.ws.send(JSON.stringify({ type: 'listen', ...msg }));
 
 function openListen() {
-  modal(`<h2>Listen together</h2>
-    <p class="small muted">Paste a YouTube link. It plays for everyone at the fire, in step, and anyone can pause or change it.</p>
+  const queueing = !!listen?.state && !listen.state.ended;
+  modal(`<h2>${queueing ? 'Add to the queue' : 'Listen together'}</h2>
+    <p class="small muted">${queueing ? 'Paste a YouTube link. It plays for everyone once what&#39;s on now (and anything queued before it) is done.' : 'Paste a YouTube link. It plays for everyone at the fire, in step. Anyone can add to the queue, and skipping takes a vote.'}</p>
     <form id="listen-form">
       <input id="listen-link" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off" required />
       <div class="error" id="modal-error"></div>
-      <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">Play</button></div>
+      <div class="modal-row"><button type="button" class="btn secondary" data-close>Cancel</button><button type="submit" class="btn">${queueing ? 'Add' : 'Play'}</button></div>
     </form>`);
   $('#listen-link').focus();
   $('#listen-form').onsubmit = (e) => {
     e.preventDefault();
     const id = youtubeId($('#listen-link').value);
     if (!id) return ($('#modal-error').textContent = "That doesn't look like a YouTube link");
-    sendListen({ action: 'start', videoId: id, position: youtubeStart($('#listen-link').value) });
+    sendListen({ action: 'queue', videoId: id, position: youtubeStart($('#listen-link').value) });
     closeModal();
   };
 }
@@ -790,7 +792,7 @@ function onListenState(ev) {
   listen.state = ev.state;
   listen.at = performance.now(); // what Burrow says is where it is as of now
   if (before?.videoId !== ev.state.videoId) {
-    if (before) fireNote(`${nameOf(ev.state.by)} put on something new`);
+    if (before) fireNote(before.queue?.[0]?.videoId === ev.state.videoId ? `Up next, from ${nameOf(ev.state.by)}` : `${nameOf(ev.state.by)} put on something new`);
     loadListenFrame();
   } else syncListen(true);
   renderListen();
@@ -844,7 +846,7 @@ window.addEventListener('message', (e) => {
   if (typeof info.playerState === 'number' && info.playerState !== listen.playerState) {
     listen.playerState = info.playerState;
     // At the end it stops for everyone, rather than starting over.
-    if (info.playerState === 0 && listen.state.playing) sendListen({ action: 'ended' });
+    if (info.playerState === 0 && listen.state.playing) sendListen({ action: 'ended', videoId: listen.state.videoId });
     else syncListen();
   }
   const title = info.videoData?.title;
@@ -870,6 +872,48 @@ function renderListen() {
   $('#listen-toggle').innerHTML = st.playing ? PAUSE_ICON : PLAY_ICON;
   $('#listen-toggle').title = st.playing ? 'Pause for everyone' : 'Play for everyone';
   $('#listen-hide').textContent = listen.hidden ? 'Show video' : 'Hide video';
+  const boss = st.by === state.me.id || listenBoss();
+  const voted = st.skipVotes?.includes(state.me.id);
+  const skip = $('#listen-skip');
+  const votes = `${st.skipVotes?.length ?? 0}/${st.skipsNeeded ?? 1}`;
+  skip.classList.toggle('hidden', !!st.ended);
+  skip.classList.toggle('voted', !boss && !!voted);
+  skip.textContent = boss ? 'Skip' : voted ? `Voted to skip ${votes}` : `Vote to skip ${votes}`;
+  skip.title = boss ? 'Skip for everyone' : voted ? 'Take your vote back' : 'Skips once more than half the fire votes';
+  $('#listen-stop').classList.toggle('hidden', !boss);
+  $('#listen-change').textContent = st.ended ? 'Play another' : 'Add to queue';
+  renderListenQueue(st.queue ?? []);
+}
+
+/** Whether you're a host or mod (you manage voice) in the hearth whose fire this is. */
+function listenBoss() {
+  const s = [...state.servers.values()].find((x) => x.channels.some((c) => c.id === listen?.channelId));
+  return can(s, 'voice');
+}
+
+function renderListenQueue(queue) {
+  $('#listen-queue-box').classList.toggle('hidden', !queue.length);
+  const boss = listenBoss();
+  $('#listen-queue').replaceChildren(...queue.map((q) => {
+    const li = document.createElement('li');
+    const row = document.createElement('span');
+    const title = document.createElement('span');
+    title.className = 'q-title';
+    title.textContent = q.title || 'YouTube video';
+    const by = document.createElement('span');
+    by.className = 'small muted';
+    by.textContent = q.by === state.me.id ? 'you' : nameOf(q.by);
+    row.append(title, by);
+    if (q.by === state.me.id || boss) {
+      const remove = document.createElement('button');
+      remove.className = 'link-btn danger-link';
+      remove.textContent = 'Remove';
+      remove.onclick = () => sendListen({ action: 'unqueue', id: q.id });
+      row.append(remove);
+    }
+    li.append(row);
+    return li;
+  }));
 }
 
 function stopListen() {
@@ -886,6 +930,7 @@ $('#listen-toggle').onclick = () => sendListen({ action: listen?.state?.playing 
 $('#listen-back').onclick = () => sendListen({ action: 'seek', position: Math.max(0, listenTarget() - 10) });
 $('#listen-forward').onclick = () => sendListen({ action: 'seek', position: listenTarget() + 10 });
 $('#listen-stop').onclick = () => sendListen({ action: 'stop' });
+$('#listen-skip').onclick = () => sendListen({ action: 'skip', videoId: listen?.state?.videoId });
 $('#listen-change').onclick = openListen;
 $('#listen-hide').onclick = () => {
   listen.hidden = !listen.hidden;

@@ -353,8 +353,13 @@
                 <button class="icon-btn" id="listen-forward" title="Forward 10 seconds" aria-label="Forward 10 seconds"><svg viewBox="0 0 24 24"><path d="M12 5V2l5 4-5 4V7a6 6 0 1 0 6 6h2a8 8 0 1 1-8-8Z"/></svg></button>
                 <input type="range" id="listen-volume" min="0" max="100" step="5" aria-label="Your volume for the video" title="Your volume (only for you)" />
                 <button class="link-btn" id="listen-hide">Hide video</button>
-                <button class="link-btn" id="listen-change">Change</button>
+                <button class="link-btn" id="listen-skip"></button>
+                <button class="link-btn" id="listen-change">Add to queue</button>
                 <button class="link-btn danger-link" id="listen-stop">Stop</button>
+              </div>
+              <div class="listen-queue hidden" id="listen-queue-box">
+                <span class="small muted">Up next</span>
+                <ol id="listen-queue"></ol>
               </div>
             </section>
             <button class="fire-chat-bar" id="fire-chat-bar">
