@@ -35,6 +35,7 @@ async function joinVoice(channelId, { muted = false, deafened = false, rejoin = 
   // Made now, while the click still counts, or some browsers start it paused.
   if (wantsMicProcessor()) voice.micCtx = newMicContext();
   voice.talkCtx = new AudioContext({ latencyHint: 'interactive' });
+  keepAwake(voice.talkCtx);
   renderVoiceBar(rejoin ? 'Reconnecting…' : 'Connecting…');
   if (!rejoin) goToVoice(); // sit down at the fire
   try {
@@ -175,6 +176,22 @@ async function startMic(voice) {
   if (state.voice !== voice) return;
   if (wantsMicProcessor()) await micTrack()?.setProcessor(micProcessor(voice)).catch((err) => console.warn("Couldn't start the noise filter:", err));
   if (voice.muted) await lp.setMicrophoneEnabled(false);
+}
+
+// With the screen off or another app in front, a phone can pause the call's sound (iPhones call it
+// an interruption, and do the same for a phone call or Siri). Start it again as soon as it lets us,
+// and when Peiskos is back on screen, also bring back a microphone the phone took away.
+function wakeVoiceAudio() {
+  const voice = state.voice;
+  if (!voice?.room) return;
+  for (const ctx of [voice.micCtx, voice.talkCtx]) if (ctx && ctx.state !== 'running' && ctx.state !== 'closed') ctx.resume().catch(() => {});
+  voice.room.startAudio().catch(() => {});
+  if (!document.hidden && micTrack()?.mediaStreamTrack?.readyState === 'ended' && !voice.serverMuted) republishMic();
+}
+document.addEventListener('visibilitychange', wakeVoiceAudio);
+function keepAwake(ctx) {
+  ctx.addEventListener('statechange', () => { if (ctx.state === 'interrupted' || ctx.state === 'suspended') wakeVoiceAudio(); });
+  return ctx;
 }
 
 /** Music mode switched mid-call: your mic is sent again, as stereo or as voice. */

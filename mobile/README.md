@@ -10,7 +10,11 @@ What the app shell adds on top of the web page:
 - An icon on the home screen, and Peiskos opening without a browser around it.
 - Voice calls that keep going with the screen off. On Android an ongoing "In Campfire" notification
   (with a *Leave* button) shows while you're in a voice room; Android stops an app's microphone in
-  the background without one. On iPhones the app is allowed to keep playing sound in the background.
+  the background without one. On iPhones the app is marked as one that plays sound in the
+  background, which is what lets Apple's web view keep the microphone and the call's sound going with
+  the screen locked (the orange dot at the top shows the mic is still on). If the phone pauses the
+  sound anyway (a phone call, Siri), Peiskos starts it again as soon as it's allowed, and brings the
+  microphone back when you open the app.
 - Android's back button closes what's open, then goes back to the rooms, then puts Peiskos away.
 
 Not yet: alerts while the app is closed (that needs Firebase for Android and Apple's push service

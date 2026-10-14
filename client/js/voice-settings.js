@@ -192,7 +192,8 @@ async function setChimeOutput() {
 
 // ---- your microphone, through the noise filter
 
-const newMicContext = () => new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' }); // both filters want 48 kHz
+// Both filters want 48 kHz.
+const newMicContext = () => keepAwake(new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' }));
 
 /** Browsers start audio paused until you've clicked; if that happened, the next click starts it. */
 function keepRunning(ctx) {
