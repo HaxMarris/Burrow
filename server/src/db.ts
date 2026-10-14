@@ -669,6 +669,9 @@ function addExtras(db: Db) {
   addColumn(db, 'users', 'birthday', 'TEXT'); // 'MM-DD', shown to people they share a hearth with
   addColumn(db, 'users', 'fire_item', 'TEXT'); // what sits by their seat at the fire, unlocked by time there
   addColumn(db, 'servers', 'fire_look', 'TEXT'); // the hearth's fire, unlocked by everyone's time there
+  addColumn(db, 'servers', 'sky_look', 'TEXT'); // the sky above it, unlocked the same way
+  // The northern lights were a fire before they moved up into the sky.
+  db.exec("UPDATE servers SET sky_look = 'aurora', fire_look = NULL WHERE fire_look = 'aurora'");
   db.exec(`
     -- Time spent at fires (voice rooms), for decorations and the year in review. ended_at is kept
     -- up to date while someone is still there, so a restart loses at most a minute.

@@ -37,12 +37,107 @@ function sparksLayer(on) {
 // ---------------------------------------------------------------- decorations by the fire
 
 // What can sit by your seat, matching FIRE_ITEMS in server/src/extras.ts (the server decides
-// what's unlocked; this is how each one looks).
-const FIRE_ITEM_ART = {
-  cocoa: ['☕', 'A mug of cocoa'], marshmallow: ['🍡', 'Marshmallows'], mushroom: ['🍄', 'A forest mushroom'], guitar: ['🎸', 'A guitar'],
-  hedgehog: ['🦔', 'A hedgehog'], fox: ['🦊', 'A fox'], owl: ['🦉', 'An owl'], deer: ['🦌', 'A deer'], bear: ['🐻', 'A bear'], wolf: ['🐺', 'A wolf'],
+// what's unlocked; this is how each one looks): little pixel pictures, 16×16, one letter per
+// pixel ('.' is empty). Rows of 8 are the left half, mirrored to make the right.
+const FIRE_ITEM_NAMES = {
+  cocoa: 'A mug of cocoa', marshmallow: 'Marshmallows', mushroom: 'A forest mushroom', guitar: 'A guitar', hedgehog: 'A hedgehog',
+  fox: 'A fox', owl: 'An owl', deer: 'A deer', bear: 'A bear', wolf: 'A wolf',
 };
-const FIRE_LOOK_ART = { classic: '🪵', birch: '🤍', sparks: '✨', aurora: '🌌', blue: '💙' };
+const PIXEL_COLORS = {
+  k: '#2b1d16', w: '#fbf3e6', c: '#efd9bd', o: '#e27b30', O: '#b4521b', b: '#8a5a36', B: '#5c3a22', l: '#c99a6b',
+  g: '#9a9ca3', G: '#62656d', L: '#d5d7dc', r: '#cf4a33', R: '#982f22', p: '#f2b8b4', y: '#f6cf5a', Y: '#d99a2b',
+  m: '#e8ddcf', M: '#b8a690', s: '#a07a5a', e: '#f8f4ec',
+};
+const PIXEL_ART = {
+  cocoa: [
+    '................',
+    '.....e...e......',
+    '......e...e.....',
+    '.....e...e......',
+    '......e...e.....',
+    '................',
+    '..mmmmmmmmmm....',
+    '..mBbbbbbbBm....',
+    '..mmmmmmmmmmMM..',
+    '..mmmmmmmmmm.M..',
+    '..mmrmrmmmmm.M..',
+    '..mmrrrmmmmm.M..',
+    '..mmmrmmmmmmMM..',
+    '..mmmmmmmmmm....',
+    '...MmmmmmmM.....',
+    '....MMMMMM......',
+  ],
+  marshmallow: [
+    '................',
+    '...........ww...',
+    '..........wwww..',
+    '..........wcww..',
+    '...........ww...',
+    '........ww.s....',
+    '.......wwwws....',
+    '.......wcwws....',
+    '........wws.....',
+    '.....ww..s......',
+    '....wwwws.......',
+    '....wcwws.......',
+    '.....wws........',
+    '.......s........',
+    '......s.........',
+    '.....s..........',
+  ],
+  mushroom: [
+    '........', '........', '.....rrr', '...rrrrr', '..rrwwrr', '.rrrwwrr', '.rrrrrrr', 'rwwrrrrw',
+    'rwwrrrrr', 'RRRRRRRR', '....cccc', '....cccc', '....cccc', '....cccc', '...ccccc', '........',
+  ],
+  guitar: [
+    '......BB', '......Bk', '......BB', '.......b', '.......b', '.......b', '.......b', '....llll',
+    '...lllll', '...llllb', '....llkk', '...lllkk', '..llllll', '..llllBB', '...lllll', '.....lll',
+  ],
+  hedgehog: [
+    '........', '........', '.....B.B', '...BBBBB', '..BbBbBb', '.BBBBBBB', '.BbBcccc', 'BBBcckcc',
+    'BBBccccc', 'BbBcccck', 'BBBBcccc', '.BBBBccc', '.BBBBBcc', '..BBBBBB', '...cc...', '........',
+  ],
+  fox: [
+    '........', '..O.....', '..OO....', '..OpO...', '..oooooo', '.ooooooo', '.ooookoo', '.wwooooo',
+    '..wwwwwk', '...wwwww', '....oooo', '...owwww', '...owwww', '...oowww', '...kkooo', '........',
+  ],
+  owl: [
+    '........', '..b.....', '..bb....', '..bbbbbb', '.bbbbbbb', '.bwwwbbb', 'bwykywbb', 'bwyyywbb',
+    'bbwwwbYY', 'bbbbbbbY', 'bbllbllb', 'bblllllb', 'bbllbllb', '.bbllllb', '..YY.YY.', '........',
+  ],
+  deer: [
+    '.B....B.', 'B.B..B..', '.BBB.B..', '..BBB...', '....BB..', '..llllll', '.lllllll', '..llklll',
+    '...lllll', '...lllck', '....llll', '...lllww', '...llwww', '...llwww', '...kklll', '........',
+  ],
+  bear: [
+    '........', '.bb.....', '.blbbbbb', '.bbbbbbb', '.bbbbbbb', '.bbbkbbb', '.bbbbbll', '.bbbbllk',
+    '..bbblll', '...bbbbb', '..bbbbbb', '.bbbblll', '.bbbblll', '.bbbblll', '.BBbbbbb', '........',
+  ],
+  wolf: [
+    '........', '..G.....', '..GG....', '..GLG...', '..gggggg', '.ggggggg', '.ggggkgg', '.LLggggg',
+    '..LLLLLk', '...LLLLL', '....gggg', '...gLLLL', '...gLLLL', '...ggLLL', '...GGggg', '........',
+  ],
+};
+/** Turns one of PIXEL_ART into crisp SVG, a rect per run of one color. */
+function pixelSvg(id) {
+  const rows = PIXEL_ART[id];
+  if (!rows) return '';
+  let rects = '';
+  rows.forEach((half, y) => {
+    const row = half.length === 8 ? half + [...half].reverse().join('') : half;
+    for (let x = 0; x < row.length;) {
+      const ch = row[x];
+      let n = 1;
+      while (row[x + n] === ch) n++;
+      if (PIXEL_COLORS[ch]) rects += `<rect x="${x}" y="${y}" width="${n}" height="1" fill="${PIXEL_COLORS[ch]}"/>`;
+      x += n;
+    }
+  });
+  return `<svg class="pixel-art" viewBox="0 0 16 16" shape-rendering="crispEdges" aria-hidden="true">${rects}</svg>`;
+}
+const FIRE_LOOK_ART = { classic: '🪵', birch: '🤍', sparks: '✨', blue: '💙' };
+// The sky above a hearth's fires, matching SKY_LOOKS on the server.
+const SKY_ART = { evening: '🌆', stars: '✨', moon: '🌕', aurora: '🌌', meteors: '🌠' };
 
 /** What someone has by their seat, from whichever hearth or conversation knows them. */
 function fireItemOf(userId) {
@@ -58,17 +153,43 @@ function fireItemOf(userId) {
 function decorateSeat(wrap, userId) {
   const id = fireItemOf(userId);
   const el = wrap.querySelector('.seat-item');
-  if (!id || !FIRE_ITEM_ART[id]) return el?.remove();
-  const [emoji, name] = FIRE_ITEM_ART[id];
+  if (!id || !PIXEL_ART[id]) return el?.remove();
   if (el?.dataset.item === id) return;
   el?.remove();
-  wrap.insertAdjacentHTML('beforeend', `<span class="seat-item" data-item="${id}" title="${escapeHtml(name)}">${emoji}</span>`);
+  wrap.insertAdjacentHTML('beforeend', `<span class="seat-item" data-item="${id}" title="${escapeHtml(FIRE_ITEM_NAMES[id])}">${pixelSvg(id)}</span>`);
 }
 function decorateFire(s) {
-  const look = s && !isDm(s) ? s.fireLook || 'classic' : 'classic';
+  const hearth = s && !isDm(s);
+  const look = hearth ? s.fireLook || 'classic' : 'classic';
   $('#fire-ring').dataset.look = look;
   sparksLayer(look === 'sparks');
+  skyLayer(hearth ? s.skyLook || 'evening' : 'evening');
   seasonLayer();
+}
+
+// The sky above the fire: stars scattered over it, with a moon, northern lights or shooting stars.
+function skyLayer(sky) {
+  const wrap = $('.fire-ring-wrap');
+  const layer = $('#sky-layer');
+  if (sky === 'evening') { delete wrap.dataset.sky; return layer.replaceChildren(); }
+  if (wrap.dataset.sky === sky) return;
+  wrap.dataset.sky = sky;
+  const bits = [];
+  for (let i = 0; i < 70; i++) {
+    // Thicker towards the top, where the firelight doesn't reach.
+    const y = Math.pow(Math.random(), 1.6) * 85;
+    const dur = 2.5 + Math.random() * 4;
+    bits.push(`<span class="star" style="--x:${(Math.random() * 100).toFixed(1)}%;--y:${y.toFixed(1)}%;--s:${(1 + Math.random() * 1.6).toFixed(1)}px;--d:${dur.toFixed(1)}s;--delay:${(-Math.random() * dur).toFixed(1)}s"></span>`);
+  }
+  if (sky === 'moon') bits.push('<span class="moon"></span>');
+  if (sky === 'aurora') bits.push('<span class="aurora a1"></span><span class="aurora a2"></span><span class="aurora a3"></span>');
+  if (sky === 'meteors') {
+    for (let i = 0; i < 4; i++) {
+      const dur = 5 + Math.random() * 6;
+      bits.push(`<span class="meteor" style="--x:${(20 + Math.random() * 75).toFixed(1)}%;--y:${(Math.random() * 30).toFixed(1)}%;--d:${dur.toFixed(1)}s;--delay:${(-Math.random() * dur).toFixed(1)}s"></span>`);
+    }
+  }
+  layer.innerHTML = bits.join('');
 }
 
 const hoursText = (h) => (h < 1 ? `${Math.round(h * 60)} minutes` : `${h < 10 ? h.toFixed(1).replace(/\.0$/, '') : Math.floor(h)} hour${h >= 1 && h < 1.05 ? '' : 's'}`);
@@ -82,14 +203,18 @@ async function openFireDecor() {
   } catch (err) { return alertError(err); }
   const item = (it) => {
     const open = mine.hours >= it.hours;
-    const [emoji] = FIRE_ITEM_ART[it.id] ?? ['?'];
     return `<button type="button" class="decor-pick${mine.item === it.id ? ' chosen' : ''}" data-item="${it.id}" ${open ? '' : 'disabled'} aria-pressed="${mine.item === it.id}">
-      <span class="decor-art">${open ? emoji : '🔒'}</span><span>${escapeHtml(it.name)}</span><span class="small muted">${open ? (mine.item === it.id ? 'By your seat' : 'Unlocked') : `At ${it.hours} hours`}</span></button>`;
+      <span class="decor-art">${open ? pixelSvg(it.id) || '?' : '🔒'}</span><span>${escapeHtml(it.name)}</span><span class="small muted">${open ? (mine.item === it.id ? 'By your seat' : 'Unlocked') : `At ${it.hours} hours`}</span></button>`;
   };
   const look = (l) => {
     const open = fire.hours >= l.hours;
     return `<button type="button" class="decor-pick${fire.look === l.id ? ' chosen' : ''}" data-look="${l.id}" ${open && fire.canChange ? '' : 'disabled'} aria-pressed="${fire.look === l.id}">
       <span class="decor-art">${open ? FIRE_LOOK_ART[l.id] ?? '🔥' : '🔒'}</span><span>${escapeHtml(l.name)}</span><span class="small muted">${open ? (fire.look === l.id ? 'Burning now' : 'Unlocked') : `At ${l.hours} hours`}</span></button>`;
+  };
+  const sky = (l) => {
+    const open = fire.hours >= l.hours;
+    return `<button type="button" class="decor-pick${fire.sky === l.id ? ' chosen' : ''}" data-sky="${l.id}" ${open && fire.canChange ? '' : 'disabled'} aria-pressed="${fire.sky === l.id}">
+      <span class="decor-art">${open ? SKY_ART[l.id] ?? '✨' : '🔒'}</span><span>${escapeHtml(l.name)}</span><span class="small muted">${open ? (fire.sky === l.id ? 'Overhead now' : 'Unlocked') : `At ${l.hours} hours`}</span></button>`;
   };
   const canToast = mine.hours >= mine.marshmallowHours;
   modal(`<h2>By the fire</h2>
@@ -102,7 +227,9 @@ async function openFireDecor() {
       <span class="small muted">${canToast ? (state.voice ? 'Or click the fire.' : 'Sit down at a fire first.') : `Marshmallows unlock after ${mine.marshmallowHours} hours at the fire.`}</span></div>
     ${fire ? `<h3>${escapeHtml(hearth.name)}'s fire</h3>
       <p class="small muted">Everyone's time around ${escapeHtml(hearth.name)}'s fires together: <b>${hoursText(fire.hours)}</b>. ${fire.canChange ? 'Pick how its fires burn.' : 'People who can edit the hearth pick how its fires burn.'}</p>
-      <div class="decor-grid" id="decor-looks">${fire.looks.map(look).join('')}</div>` : ''}
+      <div class="decor-grid" id="decor-looks">${fire.looks.map(look).join('')}</div>
+      <h3>The sky above</h3>
+      <div class="decor-grid" id="decor-skies">${fire.skies.map(sky).join('')}</div>` : ''}
     <div class="modal-row"><button type="button" class="btn secondary" data-close>Close</button></div>`, 'decor-modal');
   for (const b of document.querySelectorAll('#decor-items [data-item]')) b.onclick = async () => {
     try {
@@ -116,6 +243,14 @@ async function openFireDecor() {
     try {
       await api(`/api/servers/${hearth.id}/fire`, { method: 'PUT', body: { look: b.dataset.look } });
       hearth.fireLook = b.dataset.look;
+      renderFire();
+      openFireDecor();
+    } catch (err) { alertError(err); }
+  };
+  for (const b of document.querySelectorAll('#decor-skies [data-sky]')) b.onclick = async () => {
+    try {
+      await api(`/api/servers/${hearth.id}/fire`, { method: 'PUT', body: { sky: b.dataset.sky } });
+      hearth.skyLook = b.dataset.sky;
       renderFire();
       openFireDecor();
     } catch (err) { alertError(err); }
