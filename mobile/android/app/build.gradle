@@ -8,7 +8,7 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         // Set by the release workflow from the release's tag (v0.7.0 -> 0.7.0, 7000).
-        versionCode (System.getenv('APP_VERSION_CODE') ?: '1') as int
+        versionCode Integer.parseInt(System.getenv('APP_VERSION_CODE') ?: '1')
         versionName System.getenv('APP_VERSION') ?: '0.1.0'
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
