@@ -30,7 +30,7 @@ function sparksLayer(on) {
   if (layer.childElementCount) return;
   layer.innerHTML = Array.from({ length: 12 }, () => {
     const dur = 1.6 + Math.random() * 1.8;
-    return `<span style="--x:${(40 + Math.random() * 20).toFixed(1)}%;--drift:${(Math.random() * 40 - 20).toFixed(0)}px;--d:${dur.toFixed(2)}s;--delay:${(-Math.random() * dur).toFixed(2)}s"></span>`;
+    return `<span style="--x:${(Math.random() * 0.2 - 0.1).toFixed(3)};--drift:${(Math.random() * 40 - 20).toFixed(0)}px;--d:${dur.toFixed(2)}s;--delay:${(-Math.random() * dur).toFixed(2)}s"></span>`;
   }).join('');
 }
 

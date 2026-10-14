@@ -586,6 +586,53 @@ function clearSeats() {
   $('#fire-ring').querySelectorAll('.seat').forEach((el) => el.remove());
 }
 
+/**
+ * Lays the circle out in the space it has. Each face sits on the ring, with its name, status and
+ * any "Watch screen" button hanging below it. Nobody sits straight above the fire, where their
+ * name would hang over it: seats start half a step round from the top, so six make two at the
+ * top, one each side and two at the bottom. The ring leaves room for half a face above the top
+ * seats and for the labels under the bottom ones; in a short window the faces shrink and the ring
+ * gets wider rather than taller, and the fire is drawn to fit inside it.
+ * Returns a function that puts a seat at its place.
+ */
+function sizeRing(ring, total, anyoneSharing) {
+  const phone = matchMedia('(max-width: 760px)').matches;
+  const W = ring.clientWidth, H = ring.clientHeight;
+  const face = Math.round(Math.min(phone ? 64 : 84, Math.max(40, H * (phone ? 0.11 : 0.15))) * (total > 8 ? 0.72 : 1));
+  const below = (phone ? 50 : 56) + (anyoneSharing ? 38 : 0); // name, status and the watch button
+  const labelW = phone ? 120 : 170;
+  const angle = (i) => (-90 + (180 + i * 360) / total) * (Math.PI / 180);
+  const sines = Array.from({ length: total }, (_, i) => Math.sin(angle(i)));
+  const up = -Math.min(...sines), down = Math.max(...sines); // how far above and below the fire the seats reach
+  // About as big as the old fixed layout on a computer; taller on a phone, which has the height.
+  const ry = Math.max(40, Math.min(phone ? 240 : 208, (H - face - below) / (up + down || 1)));
+  const rx = Math.max(60, Math.min(phone ? 160 : 262, (W - labelW) / 2, Math.max(ry * (phone ? 1 : 1.8), phone ? 0 : 230)));
+  // Whatever height is left over is shared above and below.
+  const cy = Math.max(0, (H - face - below - (up + down) * ry) / 2) + face / 2 + up * ry;
+  ring.style.setProperty('--face', `${face}px`);
+  ring.style.setProperty('--cy', `${cy}px`);
+  // The fire's size: the width the circle would have had in the old layout. On a phone the top
+  // seats' names hang close to the middle, so the flame also stays below them.
+  const fire = Math.min(rx / (phone ? 0.34 : 0.41), ry / (phone ? 0.433 : 0.325));
+  const underNames = (up * ry - face / 2 - below - 4) / 0.2;
+  ring.style.setProperty('--fire', `${phone ? Math.max(160, Math.min(fire, underNames)) : fire}px`);
+  ring.classList.toggle('crowded', total > 8);
+  return (el, i) => {
+    el.dataset.i = i;
+    el.style.left = `${W / 2 + rx * Math.cos(angle(i))}px`;
+    el.style.top = `${cy + ry * sines[i]}px`;
+  };
+}
+
+// The window or the chat beside the fire changed size: the circle is sized again and everyone moves with it.
+new ResizeObserver(() => {
+  const ring = $('#fire-ring');
+  const all = ring.querySelectorAll('.seat');
+  if (!all.length) return;
+  const place = sizeRing(ring, all.length, !!ring.querySelector('.seat-watch'));
+  all.forEach((el) => place(el, Number(el.dataset.i)));
+}).observe($('.fire-ring-wrap'));
+
 function renderFire(status) {
   const voice = state.voice;
   if (!voice || !state.stageOpen || state.stageShow !== 'fire') return clearSeats();
@@ -605,16 +652,7 @@ function renderFire(status) {
   // seats; one with a seat limit shows all of its seats (up to a dozen).
   const total = Math.max(ch?.userLimit && ch.userLimit <= 12 ? ch.userLimit : 6, ids.length);
   const ring = $('#fire-ring');
-  ring.classList.toggle('crowded', total > 8);
-  // How far from the fire the seats are, as a share of the circle's width and height (narrower on phones).
-  const css = getComputedStyle(ring);
-  const rx = Number(css.getPropertyValue('--rx')) || 41, ry = Number(css.getPropertyValue('--ry')) || 40;
-  const place = (el, i) => {
-    const a = (-90 + (i * 360) / total) * (Math.PI / 180);
-    el.style.left = `${50 + rx * Math.cos(a)}%`;
-    el.style.top = `${50 + ry * Math.sin(a)}%`;
-  };
-
+  const place = sizeRing(ring, total, ids.some((id) => state.sharing.get(id)?.screen));
   for (const [id, seat] of seats) {
     if (ids.includes(id)) continue;
     if (seat.track && seat.face) seat.track.detach(seat.face);
