@@ -1,0 +1,22 @@
+{
+  "name": "peiskos-mobile",
+  "productName": "Peiskos",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Android and iPhone apps for Peiskos: the same client as the web and desktop apps, in a phone app shell",
+  "scripts": {
+    "copy-client": "node scripts/copy-client.js",
+    "sync": "npm run copy-client && cap sync",
+    "android": "npm run sync && cap open android",
+    "ios": "npm run sync && cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.3",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/core": "8.5.3",
+    "@capacitor/ios": "8.5.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.3"
+  }
+}

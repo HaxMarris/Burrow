@@ -1,0 +1,140 @@
+# Builds the Android and iPhone apps.
+#
+# - On every pull request that touches the apps or the web client, both are built to check
+#   they still build (the Android test build can be downloaded from the run's page).
+# - Publish a release on GitHub (tag e.g. v0.7.0) and the Android app is attached to it, signed
+#   with Peiskos's own key, and the iPhone app goes to TestFlight. Each only happens once its
+#   secrets are set; see mobile/README.md.
+name: Mobile release
+
+on:
+  release:
+    types: [published]
+  pull_request:
+    paths:
+      - mobile/**
+      - client/**
+      - .github/workflows/mobile-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android app
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+        working-directory: mobile
+      - run: npm run copy-client && npx cap sync android
+        working-directory: mobile
+      # The version comes from the release tag (v0.7.0 -> 0.7.0), and each version gets a bigger
+      # number (0.7.0 -> 7000) so phones know it's newer.
+      - name: Version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = release ]; then v="${GITHUB_REF_NAME#v}"; else v=0.0.0; fi
+          IFS=. read -r major minor patch <<< "${v%%-*}"
+          code=$(( major * 1000000 + minor * 1000 + ${patch:-0} ))
+          echo "APP_VERSION=$v" >> "$GITHUB_ENV"
+          echo "APP_VERSION_CODE=$(( code > 0 ? code : 1 ))" >> "$GITHUB_ENV"
+      - name: Build
+        shell: bash
+        working-directory: mobile/android
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          mkdir -p ../dist
+          if [ -n "$ANDROID_KEYSTORE" ]; then
+            echo "$ANDROID_KEYSTORE" | base64 -d > "$RUNNER_TEMP/peiskos.keystore"
+            export ANDROID_KEYSTORE_FILE="$RUNNER_TEMP/peiskos.keystore"
+            [ -n "$ANDROID_KEY_PASSWORD" ] || unset ANDROID_KEY_PASSWORD
+            ./gradlew --no-daemon assembleRelease
+            cp app/build/outputs/apk/release/app-release.apk "../dist/Peiskos-$APP_VERSION.apk"
+          else
+            # No signing key yet: a test build, signed with a throwaway key. It installs, but the
+            # next one won't update it, so it isn't attached to releases.
+            ./gradlew --no-daemon assembleDebug
+            cp app/build/outputs/apk/debug/app-debug.apk "../dist/Peiskos-$APP_VERSION-test.apk"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peiskos-android
+          path: mobile/dist/*.apk
+          if-no-files-found: error
+      - uses: softprops/action-gh-release@v2
+        if: github.event_name == 'release' && hashFiles('mobile/dist/*-test.apk') == ''
+        with:
+          files: mobile/dist/*.apk
+
+  ios:
+    name: iPhone app
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci
+        working-directory: mobile
+      - run: npm run copy-client && npx cap sync ios
+        working-directory: mobile
+      # With an App Store Connect key, Xcode signs the app itself (no certificates to manage) and
+      # sends it straight to TestFlight. Without one, it just checks that the app builds.
+      - name: Build
+        shell: bash
+        working-directory: mobile/ios/App
+        env:
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ "${{ github.event_name }}" = release ] && [ -n "$ASC_KEY" ]; then
+            key="$RUNNER_TEMP/AuthKey.p8"
+            printf '%s' "$ASC_KEY" > "$key"
+            auth=(-allowProvisioningUpdates -authenticationKeyPath "$key" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+            version="${GITHUB_REF_NAME#v}"
+            xcodebuild -project App.xcodeproj -scheme App -configuration Release -destination 'generic/platform=iOS' \
+              -archivePath "$RUNNER_TEMP/Peiskos.xcarchive" "${auth[@]}" \
+              DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic \
+              MARKETING_VERSION="${version%%-*}" CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+              archive
+            cat > "$RUNNER_TEMP/export.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>$TEAM_ID</string>
+            <key>signingStyle</key><string>automatic</string>
+          </dict></plist>
+          EOF
+            xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Peiskos.xcarchive" \
+              -exportOptionsPlist "$RUNNER_TEMP/export.plist" -exportPath "$RUNNER_TEMP/export" "${auth[@]}"
+          else
+            xcodebuild -project App.xcodeproj -scheme App -configuration Release -destination 'generic/platform=iOS' \
+              CODE_SIGNING_ALLOWED=NO build
+          fi

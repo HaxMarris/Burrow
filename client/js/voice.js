@@ -357,6 +357,7 @@ function renderVoiceBar(status) {
   const voice = state.voice;
   $('#voice-bar').classList.toggle('hidden', !voice && !state.rejoin);
   renderVoicePlaces();
+  syncPhoneCall();
   if (!voice) {
     // Between tries at getting back into voice after the connection dropped.
     if (state.rejoin) {

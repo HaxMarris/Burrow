@@ -183,7 +183,7 @@ function confirmDeleteAccount(u) {
   };
 }
 
-const signupUrl = (code) => `${isDesktop ? state.serverUrl : location.origin}/?signup=${code}`;
+const signupUrl = (code) => `${isApp ? state.serverUrl : location.origin}/?signup=${code}`;
 function adminSignups(pane) {
   const s = adminData.signup;
   const linkRow = (l) => `<li class="${l.used ? 'used' : ''}" data-code="${escapeHtml(l.code)}">

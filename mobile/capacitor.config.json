@@ -1,0 +1,13 @@
+{
+  "appId": "app.peiskos",
+  "appName": "Peiskos",
+  "webDir": "app",
+  "backgroundColor": "#f6f0e7",
+  "android": {
+    "allowMixedContent": false
+  },
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#f6f0e7"
+  }
+}

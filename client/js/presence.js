@@ -208,14 +208,14 @@ async function openInbox() {
 
 // ---- alerts while Burrow is closed: a service worker and the browser's push service
 
-const pushSupported = () => !window.burrowDesktop && window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const pushSupported = () => !window.burrowDesktop && !isPhoneApp && window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 // iPhones and iPads only allow it once Burrow is on the Home Screen.
 const isIos = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 let swReady = null;
 
 async function startPush() {
-  if (window.burrowDesktop || !window.isSecureContext || !('serviceWorker' in navigator)) return;
+  if (window.burrowDesktop || isPhoneApp || !window.isSecureContext || !('serviceWorker' in navigator)) return;
   swReady = navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).catch(() => null);
   navigator.serviceWorker.addEventListener('message', (e) => {
     if (e.data?.type === 'open' && e.data.channelId) jumpTo(e.data.channelId, e.data.messageId);
@@ -274,7 +274,7 @@ function notificationSettings() {
   const pushOn = store.get('push') === '1' && pushSupported() && Notification.permission === 'granted';
   return `<h3>Notifications</h3>
     ${window.burrowDesktop ? '' : `<label class="check"><input type="checkbox" id="push-on" ${pushOn ? 'checked' : ''} /> Alert me when Peiskos is closed</label>
-    <span class="small muted" id="push-note">${pushSupported() ? 'Direct messages, @mentions and replies, on this device, while Peiskos isn\'t open.' : isIos() && !isStandalone() ? 'On an iPhone or iPad, add Peiskos to your Home Screen (Share › Add to Home Screen) and turn this on there.' : "This browser can't show alerts while Peiskos is closed."}</span>`}
+    <span class="small muted" id="push-note">${pushSupported() ? 'Direct messages, @mentions and replies, on this device, while Peiskos isn\'t open.' : isPhoneApp ? "The phone app can't alert you while it's closed yet." : isIos() && !isStandalone() ? 'On an iPhone or iPad, add Peiskos to your Home Screen (Share › Add to Home Screen) and turn this on there.' : "This browser can't show alerts while Peiskos is closed."}</span>`}
     <label class="check"><input type="checkbox" id="quiet-on" ${q ? 'checked' : ''} /> Quiet hours</label>
     <div class="quiet-times ${q ? '' : 'hidden'}" id="quiet-times">
       <label>From<input type="time" id="quiet-start" value="${minutesToTime(q?.start ?? 22 * 60)}" /></label>
