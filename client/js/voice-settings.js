@@ -25,7 +25,8 @@ const voicePrefs = (() => {
   const defaults = {
     quality: 'high', noise: 'strong', inputVolume: 1, outputVolume: 1,
     mode: 'voice', // or 'ptt': push to talk
-    sensitivity: null, // dB your voice must pass to be sent; null: send whenever the mic hears something
+    autoGate: true, // send your voice only when the noise filter hears speech
+    sensitivity: null, // dB your voice must pass to be sent (with autoGate off); null: send whenever the mic hears something
     fx: 'off', // voice changer
     music: false, // stereo, no filters, higher bitrate
     soundboard: true, soundboardVolume: 0.6, listenVolume: 0.6,
@@ -37,6 +38,8 @@ const voicePrefs = (() => {
     // Noise suppression used to be just on or off.
     if (saved.noiseSuppression === false && !saved.noise) saved.noise = 'off';
     delete saved.noiseSuppression;
+    // People who had set a sensitivity before the automatic gate keep their line.
+    if (saved.autoGate === undefined && typeof saved.sensitivity === 'number') saved.autoGate = false;
     return { ...defaults, ...saved, keys: { ...defaults.keys, ...saved.keys } };
   } catch { return defaults; }
 })();
@@ -60,9 +63,13 @@ function micPublishOptions() {
 }
 const noiseModel = () => (voicePrefs.music ? null : NOISE_LEVELS[voicePrefs.noise]?.model ?? null);
 const voiceFx = () => (voicePrefs.music ? VOICE_FX.off : VOICE_FX[voicePrefs.fx] ?? VOICE_FX.off);
-/** Push to talk, or a sensitivity you set: your voice goes through Burrow's gate. */
-const wantsGate = () => voicePrefs.mode === 'ptt' || (voicePrefs.sensitivity !== null && !voicePrefs.music);
-const wantsMicProcessor = () => !!noiseModel() || voiceFx() !== VOICE_FX.off || voicePrefs.inputVolume !== 1 || wantsGate();
+/** Any filtering at all: off and music mode leave your sound alone. */
+const filtersOn = () => !voicePrefs.music && voicePrefs.noise !== 'off';
+/** The automatic gate: your voice is sent only while RNNoise thinks you're talking. */
+const autoGate = () => voicePrefs.mode !== 'ptt' && voicePrefs.autoGate && filtersOn();
+/** Push to talk, the automatic gate, or a sensitivity you set: your voice goes through Burrow's gate. */
+const wantsGate = () => voicePrefs.mode === 'ptt' || autoGate() || (voicePrefs.sensitivity !== null && !voicePrefs.music);
+const wantsMicProcessor = () => filtersOn() || voiceFx() !== VOICE_FX.off || voicePrefs.inputVolume !== 1 || wantsGate();
 
 // The voice changer. Each one is a few Web Audio nodes (and the pitch shifter in voice-worklet.js)
 // between your noise filter and your volume, so what's sent and encrypted is the changed voice.
@@ -197,7 +204,7 @@ function keepRunning(ctx) {
 }
 
 const noiseWasm = new Map(); // model -> Promise<ArrayBuffer>, downloaded once
-async function noiseFilter(ctx, model) {
+async function noiseFilter(ctx, model, withSpeech = false) {
   if (!noiseWasm.has(model)) {
     const loading = fetch(`vendor/noise/${model}.wasm`).then((r) => {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -209,6 +216,8 @@ async function noiseFilter(ctx, model) {
   const [wasmBinary] = await Promise.all([noiseWasm.get(model), ctx.audioWorklet.addModule(`vendor/noise/${model}.worklet.js`)]);
   const node = new AudioWorkletNode(ctx, `@sapphi-red/web-noise-suppressor/${model}`, {
     channelCount: 1, channelCountMode: 'explicit', processorOptions: { maxChannels: 1, wasmBinary },
+    // RNNoise can add a second channel: how sure it is that you're talking (see the patch in its worklet).
+    ...(withSpeech ? { outputChannelCount: [2] } : {}),
   });
   node.onprocessorerror = () => console.warn(`The ${model} noise filter stopped working.`);
   return node;
@@ -216,13 +225,19 @@ async function noiseFilter(ctx, model) {
 
 /**
  * Microphone in, filtered and turned up or down, out as a new track. If the filter can't load,
- * your voice still goes through, just unfiltered.
+ * your voice still goes through, just unfiltered. With the automatic gate, RNNoise also says when
+ * you're talking: from the filter itself on Strong, or from a copy run only for that on Light and
+ * Strongest.
  */
 async function micChain(ctx, track) {
   const model = noiseModel();
-  let filter = null;
+  const auto = autoGate();
+  let filter = null, speech = null;
   if (model) {
-    try { filter = await noiseFilter(ctx, model); } catch (err) { console.warn(`Couldn't load the ${model} noise filter:`, err); }
+    try { filter = await noiseFilter(ctx, model, auto && model === 'rnnoise'); } catch (err) { console.warn(`Couldn't load the ${model} noise filter:`, err); }
+  }
+  if (auto) {
+    try { speech = filter && model === 'rnnoise' ? filter : await noiseFilter(ctx, 'rnnoise', true); } catch (err) { console.warn("Couldn't load the speech detector:", err); }
   }
   const channels = voicePrefs.music ? 2 : 1;
   const needsWorklet = wantsGate() || !!voiceFx().pitch;
@@ -231,15 +246,33 @@ async function micChain(ctx, track) {
   }
   let fx = null;
   try { fx = await fxNodes(ctx, voiceFx()); } catch (err) { console.warn("Couldn't start the voice changer:", err); fx = await fxNodes(ctx, VOICE_FX.off); }
+  // Takes out rumble under 90 Hz (desk thumps, hum, a bumped mic) before anything else hears it.
+  let front = ctx.createGain();
+  if (filtersOn()) {
+    front = ctx.createBiquadFilter();
+    front.type = 'highpass';
+    front.frequency.value = 90;
+  }
   const gain = ctx.createGain();
   gain.gain.value = voicePrefs.inputVolume;
   let gate = null;
   if (wantsGate()) {
-    try { gate = new AudioWorkletNode(ctx, 'burrow-gate', { outputChannelCount: [channels] }); } catch (err) { console.warn("Couldn't start the voice gate:", err); }
+    try { gate = new AudioWorkletNode(ctx, 'burrow-gate', { numberOfInputs: 2, outputChannelCount: [channels] }); } catch (err) { console.warn("Couldn't start the voice gate:", err); }
   }
   const out = ctx.createMediaStreamDestination();
   out.channelCount = channels;
-  filter?.connect(fx.input);
+  // The speech channel goes to the gate; on Strong, the voice channel carries on as usual.
+  const split = speech && gate ? ctx.createChannelSplitter(2) : null;
+  if (split) {
+    speech.connect(split);
+    split.connect(gate, 1, 1);
+    if (speech !== filter) front.connect(speech);
+  }
+  if (filter) {
+    if (split && speech === filter) split.connect(fx.input, 0);
+    else filter.connect(fx.input);
+    front.connect(filter);
+  } else front.connect(fx.input);
   fx.output.connect(gain);
   if (gate) gain.connect(gate).connect(out);
   else gain.connect(out);
@@ -249,18 +282,23 @@ async function micChain(ctx, track) {
     filtered: !!filter,
     gain, // how loud you are before the gate, for the level meter
     gated: !!gate,
+    auto: !!split, // the gate follows your speech
     setInput(t) {
       source?.disconnect();
       source = ctx.createMediaStreamSource(new MediaStream([t]));
-      source.connect(filter ?? fx.input);
+      source.connect(front);
     },
     setVolume(v) { gain.gain.setTargetAtTime(v, ctx.currentTime, 0.02); },
     /** Push to talk held or not, and the sensitivity, for the gate. */
-    setGate(settings) { gate?.port.postMessage(settings); },
+    setGate(settings) { gate?.port.postMessage({ ...settings, auto: settings.auto && !!split }); },
     destroy() {
       source?.disconnect();
-      filter?.port.postMessage('destroy');
-      filter?.disconnect();
+      front.disconnect();
+      for (const node of new Set([filter, speech])) {
+        node?.port.postMessage('destroy');
+        node?.disconnect();
+      }
+      split?.disconnect();
       fx.destroy();
       gain.disconnect();
       gate?.disconnect();
@@ -273,10 +311,11 @@ async function micChain(ctx, track) {
 }
 
 let pttHeld = false; // your push-to-talk key is down
-/** What the gate needs to know: push to talk and whether it's held, or the sensitivity. */
+/** What the gate needs to know: push to talk and whether it's held, the automatic gate, or the sensitivity. */
 const gateSettings = () => ({
   ptt: voicePrefs.mode === 'ptt',
   held: pttHeld,
+  auto: autoGate(),
   threshold: voicePrefs.music ? null : voicePrefs.sensitivity,
 });
 function updateGate() {
@@ -314,7 +353,7 @@ const micTrack = () => state.voice?.room?.localParticipant.getTrackPublication(w
 /** Push to talk or the sensitivity changed: the gate is told, or put in (or taken out) if it wasn't there. */
 function applyGateChange() {
   const chain = state.voice?.micChain;
-  if (chain && chain.gated === wantsGate()) updateGate();
+  if (chain && chain.gated === wantsGate() && chain.auto === autoGate()) updateGate();
   else applyNoiseLevel();
   if (micTest) startMicTest();
   renderVoiceBar();
@@ -653,6 +692,9 @@ async function pickBackgroundPicture(file) {
 
 // ---- the settings themselves: in your account, and from the gear on the voice bar
 
+/** The sensitivity line on the level meter: only when you've set one yourself. */
+const showsLine = () => voicePrefs.mode !== 'ptt' && !voicePrefs.autoGate && voicePrefs.sensitivity !== null;
+
 function voiceSettings() {
   const pct = (v) => Math.round(v * 100);
   const outputNote = isAppleMobile
@@ -662,7 +704,7 @@ function voiceSettings() {
     <div class="voice-settings">
       <label>Microphone<select id="vs-audioinput"></select></label>
       <div class="mic-test">
-        <div class="level-meter" title="How loud you are, after the noise filter"><span id="vs-level"></span><i id="vs-line" class="${voicePrefs.mode !== 'ptt' && voicePrefs.sensitivity !== null ? '' : 'hidden'}" style="left:${((voicePrefs.sensitivity ?? -45) + 60) * (100 / 60)}%"></i></div>
+        <div class="level-meter" title="How loud you are, after the noise filter"><span id="vs-level"></span><i id="vs-line" class="${showsLine() ? '' : 'hidden'}" style="left:${((voicePrefs.sensitivity ?? -45) + 60) * (100 / 60)}%"></i></div>
         <button type="button" class="btn secondary" id="vs-test">Test</button>
       </div>
       <label class="check"><input type="checkbox" id="vs-loopback" /> Hear yourself while testing (wear headphones)</label>
@@ -680,9 +722,13 @@ function voiceSettings() {
         </div>
         <div class="key-row ${voicePrefs.mode === 'ptt' ? '' : 'hidden'}" id="vs-ptt-row"><span>Hold to talk</span><button type="button" class="btn secondary key-btn" id="vs-key-ptt">${escapeHtml(keyLabel(voicePrefs.keys.ptt))}</button></div>
         <div class="${voicePrefs.mode === 'ptt' ? 'hidden' : ''}" id="vs-sens-row">
-          <label class="check"><input type="checkbox" id="vs-sens-on" ${voicePrefs.sensitivity !== null ? 'checked' : ''} /> Only send my voice when it's louder than the line</label>
-          <input type="range" id="vs-sens" min="-60" max="0" step="1" value="${voicePrefs.sensitivity ?? -45}" ${voicePrefs.sensitivity === null ? 'disabled' : ''} aria-label="Sensitivity" />
-          <span class="small muted">Press Test and talk: the bar should pass the line when you speak, and stay under it when you don't.</span>
+          <label class="check"><input type="checkbox" id="vs-auto" ${voicePrefs.autoGate ? 'checked' : ''} /> Only send my voice when I'm talking (automatic)</label>
+          <span class="small muted">Leaves out typing, clicks and noise between your words. Needs noise isolation on.</span>
+          <div class="${voicePrefs.autoGate ? 'hidden' : ''}" id="vs-manual">
+            <label class="check"><input type="checkbox" id="vs-sens-on" ${voicePrefs.sensitivity !== null ? 'checked' : ''} /> Only send my voice when it's louder than the line</label>
+            <input type="range" id="vs-sens" min="-60" max="0" step="1" value="${voicePrefs.sensitivity ?? -45}" ${voicePrefs.sensitivity === null ? 'disabled' : ''} aria-label="Sensitivity" />
+            <span class="small muted">Press Test and talk: the bar should pass the line when you speak, and stay under it when you don't.</span>
+          </div>
         </div>
       </div>
       <label>Voice changer
@@ -783,14 +829,22 @@ function wireVoiceSettings() {
     saveVoicePrefs();
     $('#vs-ptt-row').classList.toggle('hidden', r.value !== 'ptt');
     $('#vs-sens-row').classList.toggle('hidden', r.value === 'ptt');
-    $('#vs-line').classList.toggle('hidden', r.value === 'ptt' || voicePrefs.sensitivity === null);
+    $('#vs-line').classList.toggle('hidden', !showsLine());
     if (state.voice && wantsMicProcessor()) state.voice.micCtx ??= newMicContext();
     applyGateChange();
     syncHotkeys();
   };
   const showLine = () => {
     $('#vs-line').style.left = `${(Number($('#vs-sens').value) + 60) * (100 / 60)}%`;
-    $('#vs-line').classList.toggle('hidden', voicePrefs.sensitivity === null || voicePrefs.mode === 'ptt');
+    $('#vs-line').classList.toggle('hidden', !showsLine());
+  };
+  $('#vs-auto').onchange = (e) => {
+    voicePrefs.autoGate = e.target.checked;
+    saveVoicePrefs();
+    $('#vs-manual').classList.toggle('hidden', voicePrefs.autoGate);
+    showLine();
+    if (state.voice && wantsMicProcessor()) state.voice.micCtx ??= newMicContext();
+    applyGateChange();
   };
   $('#vs-sens-on').onchange = (e) => {
     voicePrefs.sensitivity = e.target.checked ? Number($('#vs-sens').value) : null;
