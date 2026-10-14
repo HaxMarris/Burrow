@@ -1117,10 +1117,33 @@ function playSound(name, force = false) {
   } catch {}
 }
 
+// A dropped connection takes someone out of the fire and puts them straight back a moment later,
+// so a leave waits this long before it chimes, and says nothing if they're back by then.
+const LEAVE_GRACE_MS = 4000;
+const leavingSoon = new Map(); // 'room:user' -> timer for their leave sound
+
 /** Someone else came into or left the voice room you're in. */
 function voiceSounds(channelId, userIds) {
   const before = [...state.servers.values()].flatMap((s) => s.channels).find((c) => c.id === channelId)?.voiceUsers ?? [];
   const others = (ids) => ids.filter((id) => id !== state.me.id);
-  if (others(userIds).some((id) => !before.includes(id))) playSound('join');
-  else if (others(before).some((id) => !userIds.includes(id))) playSound('leave');
+  let joined = false;
+  for (const id of others(userIds)) {
+    if (before.includes(id)) continue;
+    const key = `${channelId}:${id}`;
+    if (leavingSoon.has(key)) {
+      // Back already: they never really left.
+      clearTimeout(leavingSoon.get(key));
+      leavingSoon.delete(key);
+    } else joined = true;
+  }
+  if (joined) playSound('join');
+  for (const id of others(before)) {
+    const key = `${channelId}:${id}`;
+    if (userIds.includes(id) || leavingSoon.has(key)) continue;
+    leavingSoon.set(key, setTimeout(() => {
+      leavingSoon.delete(key);
+      // Several leaving together get one chime, and none once you've left too.
+      if (state.voice?.channelId === channelId && !leavingSoon.size) playSound('leave');
+    }, LEAVE_GRACE_MS));
+  }
 }
