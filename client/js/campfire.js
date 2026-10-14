@@ -603,7 +603,7 @@ function renderFire(status) {
 
   // Seats are spread evenly around the fire, starting at the top. A small fire keeps a few open
   // seats; one with a seat limit shows all of its seats (up to a dozen).
-  const total = Math.max(ch?.userLimit && ch.userLimit <= 12 ? ch.userLimit : 5, ids.length);
+  const total = Math.max(ch?.userLimit && ch.userLimit <= 12 ? ch.userLimit : 6, ids.length);
   const ring = $('#fire-ring');
   ring.classList.toggle('crowded', total > 8);
   // How far from the fire the seats are, as a share of the circle's width and height (narrower on phones).

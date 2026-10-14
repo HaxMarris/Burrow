@@ -34,6 +34,7 @@ async function joinVoice(channelId, { muted = false, deafened = false, rejoin = 
   state.fireside = { channelId, messages: [], unread: 0 };
   // Made now, while the click still counts, or some browsers start it paused.
   if (wantsMicProcessor()) voice.micCtx = newMicContext();
+  voice.talkCtx = new AudioContext({ latencyHint: 'interactive' });
   renderVoiceBar(rejoin ? 'Reconnecting…' : 'Connecting…');
   if (!rejoin) goToVoice(); // sit down at the fire
   try {
@@ -111,13 +112,10 @@ async function joinVoice(channelId, { muted = false, deafened = false, rejoin = 
       })
       .on(LK.RoomEvent.TrackSubscribed, renderFire)
       .on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
-        state.speaking = new Set(speakers.map((p) => Number(p.identity)));
-        // Tell the burrow, so people outside the fire can see who's talking.
-        const talking = state.speaking.has(state.me.id);
-        if (talking !== !!voice.talking && state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: 'voice_speaking', speaking: talking }));
-        voice.talking = talking;
-        renderChannels();
-        renderStage();
+        // The voice server's view, which runs most of a second behind; only used for anyone we
+        // can't hear ourselves (see watchTalking).
+        voice.serverSpeakers = new Set(speakers.map((p) => Number(p.identity)));
+        updateSpeaking(voice);
       })
       .on(LK.RoomEvent.TrackMuted, (pub, p) => (pub.kind === 'audio' && pub.source === LK.Track.Source.Microphone ? setMuted(p, true) : renderStage()))
       .on(LK.RoomEvent.TrackUnmuted, (pub, p) => (pub.kind === 'audio' && pub.source === LK.Track.Source.Microphone ? setMuted(p, false) : renderStage()))
@@ -149,6 +147,7 @@ async function joinVoice(channelId, { muted = false, deafened = false, rejoin = 
     await room.startAudio();
     if (!voice.serverMuted) await startMic(voice);
     if (state.voice !== voice) return room.disconnect();
+    watchTalking(voice);
     if (voice.deafened) applyAllVolumes();
     state.ws?.send(JSON.stringify({ type: 'voice_join', channelId, ...voiceFlags() }));
     renderVoiceBar();
@@ -195,6 +194,75 @@ async function republishMic() {
   }
 }
 
+/**
+ * Who's talking, heard right here: everyone's voice (yours as it's sent) is measured every 50 ms,
+ * and someone counts as talking from the moment they're loud enough until they've been quiet for
+ * a third of a second. The voice server also says who's talking, but only after averaging the last
+ * half second or so and sending it back, which made the rings light up late and linger.
+ */
+const TALK_DB = -45; // how loud (RMS over about 40 ms) counts as talking
+const TALK_HOLD = 300; // ms the ring stays lit through a pause
+function watchTalking(voice) {
+  const ctx = voice.talkCtx;
+  if (!ctx) return;
+  keepRunning(ctx);
+  const meters = new Map(); // user id -> { track, source, analyser, until }
+  voice.talkMeters = meters;
+  const samples = new Float32Array(2048);
+  const micOf = (p) => p.getTrackPublication(window.LivekitClient.Track.Source.Microphone)?.track?.mediaStreamTrack ?? null;
+  voice.talkTimer = setInterval(() => {
+    const room = voice.room;
+    if (state.voice !== voice || !room || ctx.state === 'closed') return clearInterval(voice.talkTimer);
+    const now = performance.now();
+    const present = new Set();
+    for (const p of [room.localParticipant, ...room.remoteParticipants.values()]) {
+      const id = Number(p.identity);
+      const track = micOf(p);
+      let m = meters.get(id);
+      if (m && m.track !== track) {
+        m.source.disconnect();
+        meters.delete(id);
+        m = null;
+      }
+      if (!track || track.readyState === 'ended') continue;
+      if (!m) {
+        try {
+          const source = ctx.createMediaStreamSource(new MediaStream([track]));
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = samples.length;
+          source.connect(analyser);
+          m = { track, source, analyser, until: 0 };
+          meters.set(id, m);
+        } catch { continue; }
+      }
+      present.add(id);
+      m.analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+      if (track.enabled && 10 * Math.log10(sum / samples.length || 1e-12) > TALK_DB) m.until = now + TALK_HOLD;
+    }
+    for (const [id, m] of meters) if (!present.has(id)) { m.source.disconnect(); meters.delete(id); }
+    updateSpeaking(voice);
+  }, 50);
+}
+
+/** Puts together who's talking: measured here where we can, the voice server's word otherwise. */
+function updateSpeaking(voice) {
+  if (state.voice !== voice) return;
+  const now = performance.now();
+  const heardHere = voice.talkCtx?.state === 'running' ? voice.talkMeters ?? new Map() : new Map();
+  const speaking = new Set([...heardHere].filter(([, m]) => m.until > now).map(([id]) => id));
+  for (const id of voice.serverSpeakers ?? []) if (!heardHere.has(id)) speaking.add(id);
+  if (speaking.size === state.speaking.size && [...speaking].every((id) => state.speaking.has(id))) return;
+  state.speaking = speaking;
+  // Tell the burrow, so people outside the fire can see who's talking.
+  const talking = speaking.has(state.me.id);
+  if (talking !== !!voice.talking && state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: 'voice_speaking', speaking: talking }));
+  voice.talking = talking;
+  renderChannels();
+  renderStage();
+}
+
 function setMuted(participant, muted) {
   const id = Number(participant.identity);
   if (muted) state.mutedInVoice.add(id);
@@ -230,6 +298,8 @@ function leaveVoice(quiet) {
   clearTimeout(voice.crypto?.rotateTimer);
   voice.crypto?.worker.terminate();
   voice.micCtx?.close().catch(() => {});
+  clearInterval(voice.talkTimer);
+  voice.talkCtx?.close().catch(() => {});
   closeVolume();
   closeStage();
   $('#voice-audio').replaceChildren();
