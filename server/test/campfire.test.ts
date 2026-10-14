@@ -280,12 +280,86 @@ test('listen together: one video per fire, in step for everyone, gone when the f
   h.send({ type: 'voice_leave' });
   b.send({ type: 'voice_leave' });
   await h.next((e) => e.type === 'voice_state' && !e.userIds.length);
+  h.events.length = 0;
   h.send({ type: 'voice_join', channelId: fire });
   await h.next((e) => e.type === 'fireside_history');
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(h.events.some((e) => e.type === 'listen_state'), false);
   h.ws.close();
   b.ws.close();
+});
+
+test('listen together: a queue, and skipping takes more than half the fire', async () => {
+  const [host, bob, carol, dave] = await people('host', 'bob', 'carol', 'dave');
+  const { fire } = await burrow(host, bob, carol, dave);
+  const [h, b, c, d] = await Promise.all([host, bob, carol, dave].map((p) => socket(p.token)));
+  for (const s of [h, b, c, d]) {
+    s.send({ type: 'voice_join', channelId: fire });
+    await s.next((e) => e.type === 'fireside_history');
+  }
+  const latest = async (s: any, pred: (st: any) => boolean) => (await s.next((e: any) => e.type === 'listen_state' && e.state && pred(e.state))).state;
+
+  // Bob puts something on; what anyone adds after that waits its turn.
+  b.send({ type: 'listen', action: 'start', videoId: 'aaaaaaaaaaa' });
+  await latest(h, (st) => st.videoId === 'aaaaaaaaaaa');
+  c.send({ type: 'listen', action: 'queue', videoId: 'bbbbbbbbbbb' });
+  d.send({ type: 'listen', action: 'start', videoId: 'ccccccccccc' }); // older apps say "start": it's queued too
+  let st = await latest(h, (st) => st.queue.length === 2);
+  assert.equal(st.videoId, 'aaaaaaaaaaa');
+  assert.deepEqual(st.queue.map((q: any) => [q.videoId, q.by]), [['bbbbbbbbbbb', carol.user.id], ['ccccccccccc', dave.user.id]]);
+  assert.equal(st.skipsNeeded, 3);
+
+  // Votes: carol and dave aren't enough out of four, and voting again takes it back.
+  c.send({ type: 'listen', action: 'skip', videoId: 'aaaaaaaaaaa' });
+  st = await latest(h, (st) => st.skipVotes.length === 1);
+  d.send({ type: 'listen', action: 'skip', videoId: 'aaaaaaaaaaa' });
+  st = await latest(h, (st) => st.skipVotes.length === 2);
+  assert.equal(st.videoId, 'aaaaaaaaaaa');
+  d.send({ type: 'listen', action: 'skip', videoId: 'aaaaaaaaaaa' });
+  st = await latest(h, (st) => st.skipVotes.length === 1);
+  assert.deepEqual(st.skipVotes, [carol.user.id]);
+  // A vote meant for something that's no longer on doesn't count.
+  d.send({ type: 'listen', action: 'skip', videoId: 'zzzzzzzzzzz' });
+  d.send({ type: 'listen', action: 'skip', videoId: 'aaaaaaaaaaa' });
+  st = await latest(h, (st) => st.skipVotes.length === 2);
+  // The host leaving makes it three at the fire, so two votes are now enough: on to carol's.
+  h.send({ type: 'voice_leave' });
+  st = await latest(b, (st) => st.videoId === 'bbbbbbbbbbb');
+  assert.equal(st.by, carol.user.id);
+  assert.deepEqual(st.skipVotes, []);
+  assert.equal(st.skipsNeeded, 2);
+  assert.equal(st.queue.length, 1);
+
+  // Only whoever put it on (or a host or mod) can stop it, or take something out of the queue.
+  b.send({ type: 'listen', action: 'stop' });
+  await b.next((e) => e.type === 'error' && /vote/i.test(e.error));
+  b.send({ type: 'listen', action: 'unqueue', id: st.queue[0].id });
+  await b.next((e) => e.type === 'error');
+  d.send({ type: 'listen', action: 'unqueue', id: st.queue[0].id });
+  st = await latest(b, (st) => !st.queue.length);
+  // A stray "it ended" for another video changes nothing.
+  b.send({ type: 'listen', action: 'ended', videoId: 'aaaaaaaaaaa' });
+  // Carol put this one on, so she skips it right away; with nothing next, it stops at the end.
+  c.send({ type: 'listen', action: 'skip', videoId: 'bbbbbbbbbbb' });
+  st = await latest(b, (st) => st.ended);
+  assert.equal(st.playing, false);
+  assert.equal(st.videoId, 'bbbbbbbbbbb');
+  // Once it's over, the next thing anyone adds plays straight away.
+  d.send({ type: 'listen', action: 'queue', videoId: 'ddddddddddd' });
+  st = await latest(b, (st) => st.videoId === 'ddddddddddd');
+  assert.equal(st.playing, true);
+  assert.equal(st.by, dave.user.id);
+
+  // The host back at the fire skips anyone's pick right away, and can stop it all.
+  h.send({ type: 'voice_join', channelId: fire });
+  await latest(h, (st) => st.videoId === 'ddddddddddd');
+  b.send({ type: 'listen', action: 'queue', videoId: 'eeeeeeeeeee' });
+  await latest(h, (st) => st.queue.length === 1);
+  h.send({ type: 'listen', action: 'skip' });
+  st = await latest(h, (st) => st.videoId === 'eeeeeeeeeee');
+  h.send({ type: 'listen', action: 'stop' });
+  assert.equal((await b.next((e) => e.type === 'listen_state' && !e.state)).state, null);
+  for (const s of [h, b, c, d]) s.ws.close();
 });
 
 test('calling someone in a direct message rings their app', async () => {

@@ -1139,10 +1139,10 @@ button.seat-face { cursor: pointer; }
 .fire-note { padding: 4px 12px; border-radius: 999px; background: var(--surface); color: var(--text-strong); font-size: 13px; font-weight: 700; box-shadow: var(--shadow); white-space: nowrap; animation: fire-note 4s ease-out forwards; }
 @keyframes fire-note { 0% { opacity: 0; transform: translateY(8px); } 10%, 75% { opacity: 1; transform: none; } 100% { opacity: 0; transform: translateY(-14px); } }
 @media (prefers-reduced-motion: reduce) { .fire-note { animation: none; } }
-.listen-panel { flex: none; display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "video info" "video controls"; align-items: center; gap: 4px 14px; width: min(640px, calc(100% - 24px)); align-self: center; margin: 0 12px 10px; padding: 10px 12px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); }
+.listen-panel { flex: none; display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "video info" "video controls" "queue queue"; align-items: center; gap: 4px 14px; width: min(640px, calc(100% - 24px)); align-self: center; margin: 0 12px 10px; padding: 10px 12px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); }
 .listen-panel.hidden { display: none; }
 .listen-video { grid-area: video; width: 192px; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden; background: #000; }
-.listen-panel.video-hidden { grid-template-areas: "info" "controls"; grid-template-columns: minmax(0, 1fr); }
+.listen-panel.video-hidden { grid-template-areas: "info" "controls" "queue"; grid-template-columns: minmax(0, 1fr); }
 /* Hidden, the video keeps playing (and is heard), just out of sight. */
 .listen-panel.video-hidden .listen-video { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .listen-frame { width: 100%; height: 100%; border: 0; display: block; }
@@ -1152,6 +1152,13 @@ button.seat-face { cursor: pointer; }
 .listen-controls .icon-btn svg { width: 20px; height: 20px; }
 .listen-controls input[type="range"] { width: 90px; accent-color: var(--accent); padding: 0; background: none; border: none; box-shadow: none; }
 .listen-controls .link-btn { font-size: 13px; }
+.listen-controls #listen-skip.voted { color: var(--accent); font-weight: 700; }
+.listen-queue { grid-area: queue; display: flex; flex-direction: column; gap: 2px; min-width: 0; padding-top: 6px; border-top: 1px solid var(--line); }
+.listen-queue ol { margin: 0; padding-left: 22px; max-height: 160px; overflow-y: auto; }
+.listen-queue li { font-size: 13px; padding: 2px 0; }
+.listen-queue li > span { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.listen-queue .q-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-strong); }
+.listen-queue .link-btn { font-size: 12px; }
 .danger-link { color: var(--berry); }
 #fire-listen.on { background: var(--accent); color: var(--accent-ink); }
 .call-btn svg { fill: currentColor; }
