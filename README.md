@@ -303,6 +303,17 @@ docker compose restart burrow                                                   
 On a brand new server (the old one is gone), put the same `.env` in place, start Peiskos once, then
 run the restore with `--uploads` after the date to bring back every uploaded file too.
 
+### Privacy policy and terms
+
+Peiskos serves a privacy policy at `/privacy` and terms of use at `/terms`, and the signup screen links to both (App Store and Google Play listings need their addresses too). They describe what this code keeps, so they're right for any server. Put your name and a contact address in `.env` so people know who runs it:
+
+```
+LEGAL_NAME=Maxwell
+LEGAL_CONTACT=hello@example.com
+```
+
+Without `LEGAL_CONTACT` the pages use the address in `MAIL_FROM`. The wording lives in `server/src/legal.ts`; it isn't legal advice, so have it checked if your server is open to the public.
+
 ### Uptime alerts
 
 To get an email when Peiskos goes down, make a free check at [healthchecks.io](https://healthchecks.io)

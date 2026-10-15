@@ -76,3 +76,36 @@ test('unknown paths get the app shell, and a missing shell is a 404', async () =
   assert.equal(res.status, 404);
   bare.close();
 });
+
+test('the privacy policy and terms are served with who runs the server', async () => {
+  const other = createApp({
+    db: openDb(':memory:'),
+    publicDir: dir,
+    publicUrl: 'https://chat.example.com',
+    mail: { url: 'smtps://a:b@mail.example.com:465', from: 'Peiskos <hello@example.com>' },
+    legal: { name: 'Sam <b>' },
+    hosting: { dbFile: ':memory:', backupDir: dir, backupKeep: 7, dataDir: dir, admins: [] },
+  });
+  await new Promise<void>((r) => other.listen(0, r));
+  try {
+    const base = `http://localhost:${(other.address() as AddressInfo).port}`;
+    const privacy = await fetch(`${base}/privacy`);
+    assert.equal(privacy.status, 200);
+    assert.match(privacy.headers.get('content-type')!, /text\/html/);
+    const text = await privacy.text();
+    assert.match(text, /Privacy policy/);
+    assert.match(text, /chat\.example\.com, run by Sam &#60;b&#62;/);
+    assert.match(text, /mailto:hello@example\.com/, 'falls back to the email the server sends from');
+    assert.match(text, /last 7 days of copies/);
+    const terms = await (await fetch(`${base}/terms/`)).text();
+    assert.match(terms, /Terms of use/);
+    assert.match(terms, /13 or older/);
+  } finally {
+    other.closeAllConnections();
+    other.close();
+  }
+  // With nothing set, the pages still work and say who to ask.
+  const bare = await get('/privacy');
+  assert.equal(bare.status, 200);
+  assert.match(bare.body.toString(), /the person who runs this server/);
+});
