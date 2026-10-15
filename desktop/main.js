@@ -20,7 +20,7 @@ ipcMain.on('idle-seconds', (e) => { e.returnValue = powerMonitor.getSystemIdleTi
 // The page asks once, at start, whether it can share just one program's sound.
 ipcMain.on('app-audio-supported', (e) => { e.returnValue = appAudio.supported(); });
 
-// Keep running in the tray when the window is closed, and start with the computer.
+// Keep running in the tray when the window is closed (off unless chosen), and start with the computer.
 ipcMain.on('desktop-settings', (e) => { e.returnValue = tray.readSettings(); });
 ipcMain.handle('desktop-settings-set', (_e, change) => tray.saveSettings({
   ...('closeToTray' in change ? { closeToTray: !!change.closeToTray } : {}),
@@ -86,8 +86,8 @@ function createWindow({ hidden = false } = {}) {
     } else app.setBadgeCount(count);
     tray.setUnread(count);
   });
-  // Closing the window keeps Burrow running in the tray (unless that's turned off), so
-  // messages still arrive and voice stays connected.
+  // Closing the window quits, unless the tray is turned on in settings: then Peiskos keeps
+  // running there, so messages still arrive and voice stays connected.
   win.on('close', (e) => {
     if (app.isQuitting || !tray.readSettings().closeToTray || (!tray.active() && process.platform !== 'darwin')) return;
     e.preventDefault();
@@ -181,6 +181,5 @@ app.whenReady().then(() => {
   app.on('activate', () => showWindow());
 });
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+// Closing the last window quits on a Mac too, rather than leaving the app in the Dock.
+app.on('window-all-closed', () => app.quit());
