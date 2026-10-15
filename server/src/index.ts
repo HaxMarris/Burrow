@@ -39,6 +39,7 @@ const app = createApp({
   mail: process.env.SMTP_URL ? { url: process.env.SMTP_URL, from: process.env.MAIL_FROM || `Peiskos <${decodeURIComponent(new URL(process.env.SMTP_URL).username).includes('@') ? decodeURIComponent(new URL(process.env.SMTP_URL).username) : 'burrow@localhost'}>` } : undefined,
   publicUrl: process.env.PUBLIC_URL || undefined,
   pushContact: process.env.PUSH_CONTACT || undefined,
+  legal: { name: process.env.LEGAL_NAME || undefined, contact: process.env.LEGAL_CONTACT || undefined },
   gifs: process.env.KLIPY_API_KEY ? { apiKey: process.env.KLIPY_API_KEY, rating: process.env.GIF_RATING || undefined } : undefined,
   voice:
     process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET

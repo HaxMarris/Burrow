@@ -17,6 +17,7 @@ import { looksLikeEmail, sendMail, type MailConfig } from './mail.ts';
 import { hosting, type HostingOptions } from './hosting.ts';
 import { extras, voiceTimeTracker } from './extras.ts';
 import { listenTogether } from './listen.ts';
+import { mailAddress, privacyPage, termsPage, type LegalOptions } from './legal.ts';
 import { checkTotp, hashRecovery, newRecoveryCodes, newTotpSecret, verifyAssertion, verifyRegistration, ZipWriter } from './account.ts';
 
 export interface AppOptions {
@@ -45,6 +46,8 @@ export interface AppOptions {
   /** How long a mention waits unread before it's emailed (default 15 minutes). */
   /** Backups, the admin page, updates and uptime (see hosting.ts). */
   hosting?: HostingOptions;
+  /** Who runs this server and how to reach them, for the privacy policy and terms (see legal.ts). */
+  legal?: { name?: string; contact?: string };
 }
 
 type User = { id: number; username: string; displayName: string | null; avatar: string | null };
@@ -4645,6 +4648,18 @@ export function createApp(opts: AppOptions): Server {
       // Something shared from another app on a phone, before Burrow's service worker was there to
       // catch it: open the app (the shared things are lost, but it doesn't error).
       if (req.method === 'POST' && url.pathname === '/share') return res.writeHead(303, { location: '/' }).end();
+      const legal = url.pathname.match(/^\/(privacy|terms)\/?$/);
+      if (legal) {
+        const o: LegalOptions = {
+          name: opts.legal?.name,
+          contact: opts.legal?.contact ?? mailAddress(opts.mail?.from),
+          publicUrl: opts.publicUrl,
+          backupDays: opts.hosting?.backupKeep ?? 0,
+          offsite: !!opts.hosting?.offsite,
+        };
+        const html = legal[1] === 'privacy' ? privacyPage(o) : termsPage(o);
+        return res.writeHead(200, { 'content-type': MIME['.html'], 'cache-control': 'no-cache' }).end(req.method === 'HEAD' ? undefined : html);
+      }
       return serveStatic(req, res, url.pathname);
     }
 

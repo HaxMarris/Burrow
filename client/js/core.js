@@ -227,6 +227,21 @@ async function renderAuthMode() {
   $('#signup-email').required = registering && canEmail;
   $('#forgot-row').classList.toggle('hidden', registering || !canEmail);
   $('#passkey-login').classList.toggle('hidden', registering || !passkeysWork());
+  renderLegalRow();
+}
+
+// The privacy policy and terms live on the server (they name whoever runs it), so app stores and
+// people signing up can read them.
+const legalUrl = (page) => `${state.serverUrl.replace(/\/$/, '')}/${page}`;
+function renderLegalRow() {
+  const row = $('#legal-row');
+  row.classList.toggle('hidden', !state.serverUrl);
+  if (!state.serverUrl) return;
+  const href = (page) => legalUrl(page).replace(/[&"<>]/g, (c) => `&#${c.charCodeAt(0)};`);
+  const link = (page, text) => `<a href="${href(page)}" target="_blank" rel="noopener">${text}</a>`;
+  row.innerHTML = registering
+    ? `By creating an account you agree to the ${link('terms', 'Terms')} and ${link('privacy', 'Privacy policy')}, and confirm you're 13 or older.`
+    : `${link('privacy', 'Privacy policy')} · ${link('terms', 'Terms')}`;
 }
 
 // ---- forgot your password: a code to your confirmed email, then a new password

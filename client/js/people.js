@@ -520,6 +520,7 @@ function openAccount(tab = store.get('accountTab') || 'profile') {
       <div id="device-box"><span class="small muted">Loading…</span></div>
     </section>
     <section data-pane="data" class="account-pane">
+      <p class="small muted">What Peiskos keeps and who can see it: <a href="${escapeHtml(legalUrl('privacy'))}" target="_blank" rel="noopener">Privacy policy</a> · <a href="${escapeHtml(legalUrl('terms'))}" target="_blank" rel="noopener">Terms</a></p>
       <h3>Export my data</h3>
       <p class="small muted">A zip with your account details, every message you've sent (as JSON) and the files you sent.</p>
       <div><button type="button" class="btn secondary" id="export-btn">Download my data</button></div>
