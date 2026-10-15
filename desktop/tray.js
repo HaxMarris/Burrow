@@ -7,11 +7,16 @@ const path = require('node:path');
 const os = require('node:os');
 
 const settingsFile = () => path.join(app.getPath('userData'), 'desktop-settings.json');
-const defaults = { closeToTray: true, openAtLogin: false };
+// Closing the window quits the app unless you turn the tray on. Staying in the tray used to be
+// the default and every save wrote it down, so a saved closeToTray only counts once trayChosen
+// says you picked it yourself.
+const defaults = { closeToTray: false, openAtLogin: false };
 
 function readSettings() {
   try {
-    return { ...defaults, ...JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) };
+    const saved = JSON.parse(fs.readFileSync(settingsFile(), 'utf8'));
+    if (!saved.trayChosen) delete saved.closeToTray;
+    return { ...defaults, ...saved };
   } catch {
     return { ...defaults };
   }
@@ -19,6 +24,7 @@ function readSettings() {
 
 function saveSettings(change) {
   const next = { ...readSettings(), ...change };
+  if ('closeToTray' in change) next.trayChosen = true;
   try { fs.writeFileSync(settingsFile(), JSON.stringify(next)); } catch {}
   if ('openAtLogin' in change) setOpenAtLogin(!!next.openAtLogin);
   return next;
