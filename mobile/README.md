@@ -16,6 +16,8 @@ What the app shell adds on top of the web page:
   sound anyway (a phone call, Siri), Peiskos starts it again as soon as it's allowed, and brings the
   microphone back when you open the app.
 - Android's back button closes what's open, then goes back to the rooms, then puts Peiskos away.
+- Nothing of Peiskos's goes into Android phone backups or moves to a new phone, since that would carry
+  your login with it. On a new phone you log in again.
 
 Not yet: alerts while the app is closed (that needs Firebase for Android and Apple's push service
 for iPhones), screen sharing from a phone, and passkeys (log in with your password).
