@@ -433,3 +433,53 @@ test('sharing a screen posts "is live" in the go-live room, and stopping marks i
   assert.ok(!b2.events.some((e) => e.type === 'message'));
   b2.ws.close();
 });
+
+test('games at the fire: up to four play, Peiskos passes their messages, and it ends with its host', async () => {
+  const [host, bob, carol, dan, eve] = await people('host', 'bob', 'carol', 'dan', 'eve');
+  const { fire, porch } = await burrow(host, bob, carol, dan, eve);
+  const [h, b, c, d, e] = await Promise.all([host, bob, carol, dan, eve].map((p) => socket(p.token)));
+  h.send({ type: 'game', action: 'start', game: 'melonbomber' });
+  await h.next((ev) => ev.type === 'error' && /Join a fire/.test(ev.error));
+  for (const s of [h, b, c, d, e]) {
+    s.send({ type: 'voice_join', channelId: fire });
+    await s.next((ev) => ev.type === 'fireside_history');
+  }
+  h.send({ type: 'game', action: 'start', game: 'chess' });
+  await h.next((ev) => ev.type === 'error' && /isn't here/.test(ev.error));
+  h.send({ type: 'game', action: 'start', game: 'melonbomber' });
+  const started = await b.next((ev) => ev.type === 'game_state' && ev.game);
+  assert.equal(started.game.hostId, host.user.id);
+  assert.deepEqual(started.game.players, [host.user.id]);
+  for (const s of [b, c, d]) s.send({ type: 'game', action: 'start', game: 'melonbomber' });
+  await h.next((ev) => ev.type === 'game_state' && ev.game?.players.length === 4);
+  e.send({ type: 'game', action: 'start', game: 'melonbomber' });
+  await e.next((ev) => ev.type === 'error' && /full/.test(ev.error));
+
+  // Players talk to the host; the host talks to one of them or to all of them.
+  b.send({ type: 'game', action: 'send', to: carol.user.id, data: { type: 'input', up: true } });
+  assert.deepEqual((await h.next((ev) => ev.type === 'game_msg')).data, { type: 'input', up: true });
+  h.send({ type: 'game', action: 'send', to: 'all', data: { type: 'state', t: 1 } });
+  for (const s of [b, c, d]) assert.equal((await s.next((ev) => ev.type === 'game_msg')).from, host.user.id);
+  h.send({ type: 'game', action: 'send', to: bob.user.id, data: { type: 'youAre', slot: 1 } });
+  assert.equal((await b.next((ev) => ev.type === 'game_msg')).data.slot, 1);
+  e.send({ type: 'game', action: 'send', to: 'all', data: { type: 'state' } }); // not playing: goes nowhere
+  h.send({ type: 'game', action: 'send', to: 'all', data: { big: 'x'.repeat(20_000) } }); // too big: goes nowhere
+  await new Promise((r) => setTimeout(r, 80));
+  for (const s of [h, c, d]) assert.equal(s.events.some((ev) => ev.type === 'game_msg'), false);
+
+  // Leaving the fire leaves the game, and makes room; a newcomer to the fire sees the game.
+  d.send({ type: 'voice_join', channelId: porch });
+  await h.next((ev) => ev.type === 'game_state' && ev.game?.players.length === 3);
+  e.send({ type: 'game', action: 'start', game: 'melonbomber' });
+  await h.next((ev) => ev.type === 'game_state' && ev.game?.players.includes(eve.user.id));
+  d.events.length = 0;
+  d.send({ type: 'voice_join', channelId: fire });
+  assert.equal((await d.next((ev) => ev.type === 'game_state')).game.players.length, 4);
+
+  // A player closing the app is out; the host leaving ends it for everyone.
+  e.ws.close();
+  await h.next((ev) => ev.type === 'game_state' && ev.game?.players.length === 3);
+  h.send({ type: 'game', action: 'leave' });
+  assert.equal((await b.next((ev) => ev.type === 'game_state' && !ev.game)).game, null);
+  for (const s of [h, b, c, d]) s.ws.close();
+});

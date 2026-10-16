@@ -26,8 +26,8 @@ export const APP_CSP = [
   // Voice may live on another address (LIVEKIT_URL).
   "connect-src 'self' https: wss: ws:",
   "worker-src 'self' blob:",
-  // Listen together plays YouTube in its privacy-enhanced player.
-  "frame-src https://www.youtube-nocookie.com",
+  // Listen together plays YouTube in its privacy-enhanced player; games at the fire are Peiskos's own pages.
+  "frame-src 'self' https://www.youtube-nocookie.com",
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'self'",

@@ -6,7 +6,7 @@
   <!-- For the desktop app, which opens this page from its own files and so gets no security headers.
        Only its own scripts run; pictures, sound and the connection come from the server it's set to.
        In a browser the server's stricter Content-Security-Policy header applies as well. -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self' file: 'wasm-unsafe-eval'; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data: blob: https: http:; media-src 'self' file: blob: https: http:; font-src 'self' file:; connect-src 'self' file: https: http: wss: ws:; worker-src 'self' file: blob:; frame-src https://www.youtube-nocookie.com; object-src 'none'; base-uri 'none'; form-action 'self'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self' file: 'wasm-unsafe-eval'; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data: blob: https: http:; media-src 'self' file: blob: https: http:; font-src 'self' file:; connect-src 'self' file: https: http: wss: ws:; worker-src 'self' file: blob:; frame-src 'self' file: https://www.youtube-nocookie.com; object-src 'none'; base-uri 'none'; form-action 'self'" />
   <title>Peiskos</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
   <link rel="manifest" href="manifest.webmanifest" />
@@ -368,6 +368,15 @@
                 <ol id="listen-queue"></ol>
               </div>
             </section>
+            <section class="game-panel hidden" id="game-panel" aria-label="Game at the fire">
+              <span class="game-panel-icon" aria-hidden="true">🍉</span>
+              <div class="game-panel-info">
+                <b id="game-panel-title"></b>
+                <span class="small muted" id="game-panel-sub"></span>
+              </div>
+              <button class="btn" id="game-panel-open"></button>
+              <button class="link-btn danger-link hidden" id="game-panel-leave">Leave</button>
+            </section>
             <button class="fire-chat-bar" id="fire-chat-bar">
               <svg viewBox="0 0 24 24"><path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9l-5 4V5a1 1 0 0 1 1-1Z"/></svg>
               <span class="fire-chat-bar-text"><b>Fireside chat</b><span id="fire-chat-last">Only people at the fire see it</span></span>
@@ -380,6 +389,7 @@
               <span class="fc share"><button class="fire-btn" id="fire-screen"></button><span>Share</span></span>
               <span class="fc board"><button class="fire-btn" id="fire-board" title="Soundboard" aria-label="Soundboard"></button><span>Sounds</span></span>
               <span class="fc"><button class="fire-btn" id="fire-listen" title="Listen together" aria-label="Listen together"></button><span>Listen</span></span>
+              <span class="fc"><button class="fire-btn" id="fire-game" title="Play a game together" aria-label="Play a game together"></button><span>Games</span></span>
               <span class="fc"><button class="fire-btn" id="fire-settings" title="Microphone, speakers and camera" aria-label="Voice and video settings"></button><span>Settings</span></span>
               <span class="fc"><button class="fire-btn leave" id="fire-leave" title="Leave the fire" aria-label="Leave the fire"></button><span>Leave</span></span>
             </div>
@@ -397,6 +407,13 @@
               <button type="submit" class="send" title="Send" aria-label="Send"><svg viewBox="0 0 24 24"><path d="M4 12 20 4l-4 16-4-6-8-2Z"/></svg></button>
             </form>
           </aside>
+        </div>
+        <div class="game-view">
+          <header class="stage-head">
+            <h1 id="game-view-title">Melon Bomber</h1>
+            <button class="btn secondary" id="game-view-back">Back to the fire</button>
+          </header>
+          <div class="game-frame" id="game-frame"></div>
         </div>
         <div class="video-view">
           <header class="stage-head">
@@ -486,6 +503,7 @@
   <script src="js/campfire.js"></script>
   <script src="js/voice-settings.js"></script>
   <script src="js/presence.js"></script>
+  <script src="js/games.js"></script>
   <script src="js/reading.js"></script>
   <script src="js/chat-extras.js"></script>
   <script src="js/organization.js"></script>

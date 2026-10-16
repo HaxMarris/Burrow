@@ -24,3 +24,5 @@
 - `qrcode.js`: [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) 1.4.4 by Kazuhiko Arase
   (MIT License), the npm package's `qrcode.js` unchanged. Draws the QR code for setting up two-step login in an
   authenticator app. Loaded only then.
+- `three.min.js`: [three.js](https://threejs.org) r128 (MIT License), the npm package's `build/three.min.js`
+  unchanged. Draws Melon Bomber's board (`client/games/melonbomber/`). Loaded only when someone opens the game.
