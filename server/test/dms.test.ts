@@ -123,3 +123,21 @@ test('closing a conversation hides it until someone writes', async () => {
   assert.equal((await call('/api/dms', { token: ann.token })).data.length, 1);
   annSocket.ws.close();
 });
+
+test('the list of conversations carries each one\'s newest message', async () => {
+  const reg = async (username: string) => (await call('/api/register', { body: { username, password: 'password1' } })).data;
+  const ana = await reg('ana');
+  const bo = await reg('bo');
+  const burrow = (await call('/api/servers', { body: { name: 'Hut' }, token: ana.token })).data;
+  await call('/api/join', { body: { inviteCode: burrow.inviteCode }, token: bo.token });
+  const dm = (await call('/api/dms', { body: { userId: bo.user.id }, token: ana.token })).data;
+  const listed = async () => (await call('/api/dms', { token: ana.token })).data.find((s: any) => s.id === dm.id);
+  assert.equal((await listed()).last, null);
+  await call(`/api/channels/${dm.channels[0].id}/messages`, { body: { content: 'first' }, token: ana.token });
+  const second = (await call(`/api/channels/${dm.channels[0].id}/messages`, { body: { content: 'see you saturday' }, token: bo.token })).data;
+  const last = (await listed()).last;
+  assert.equal(last.id, second.id);
+  assert.equal(last.authorId, bo.user.id);
+  assert.equal(last.text, 'see you saturday');
+  assert.equal(last.files, 0);
+});

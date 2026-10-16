@@ -863,8 +863,19 @@ export function createApp(opts: AppOptions): Server {
          WHERE m.user_id = ? AND s.kind = 'dm' AND m.hidden_at IS NULL ORDER BY lastActive DESC`,
       )
       .all(user.id) as { id: number; lastActive: number }[];
-    return rows.map((r) => ({ ...serverSummary(r.id, user.id), lastActive: r.lastActive }));
+    return rows.map((r) => ({ ...serverSummary(r.id, user.id), lastActive: r.lastActive, last: lastDmMessage(r.id) }));
   });
+
+  /** A conversation's newest message, for the preview line in the list of conversations. */
+  const lastDmMessage = (serverId: number) =>
+    (db
+      .prepare(
+        `SELECT m.id, m.author_id AS authorId, substr(m.content, 1, 120) AS text, m.created_at AS at,
+                EXISTS(SELECT 1 FROM attachments a WHERE a.message_id = m.id) AS files
+         FROM messages m JOIN channels c ON c.id = m.channel_id
+         WHERE c.server_id = ? AND c.kind != 'thread' ORDER BY m.id DESC LIMIT 1`,
+      )
+      .get(serverId) as Json | undefined) ?? null;
 
   const sharesBurrow = (a: number, b: number) =>
     !!db
@@ -896,7 +907,7 @@ export function createApp(opts: AppOptions): Server {
       const existing = db.prepare('SELECT id FROM servers WHERE dm_key = ?').get([user.id, ids[0]].sort((a, b) => a - b).join(':')) as { id: number } | undefined;
       if (existing) {
         db.prepare('UPDATE members SET hidden_at = NULL WHERE server_id = ? AND user_id = ?').run(existing.id, user.id);
-        return serverSummary(existing.id, user.id);
+        return { ...serverSummary(existing.id, user.id), last: lastDmMessage(existing.id) };
       }
     }
     const others = dmPeople(user, ids);

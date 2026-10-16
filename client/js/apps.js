@@ -19,7 +19,7 @@ function displaySettings() {
   const size = Number(d.textSize) || 100;
   return `<h3>Display</h3>
     <label class="check"><input type="checkbox" id="display-compact" ${d.compact ? 'checked' : ''} /> Compact messages</label>
-    <span class="small muted">Plain lines with small pictures instead of cards, so more fits on screen.</span>
+    <span class="small muted">Tighter lines with small pictures, so more fits on screen.</span>
     <label>Text size
       <select id="display-size">${TEXT_SIZES.map((n) => `<option value="${n}" ${n === size ? 'selected' : ''}>${n}%${n === 100 ? ' (normal)' : ''}</option>`).join('')}</select>
     </label>
