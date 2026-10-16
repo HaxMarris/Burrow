@@ -573,6 +573,8 @@ function connect() {
     const wasRetry = state.wsRetry > 0;
     state.wsRetry = 0;
     setConnected(true, 'Connected');
+    // Dropping off took you out of any game at the fire (and ended it, if it was yours).
+    gameConnectionLost();
     // The server forgets who's in voice when we drop off, so tell it again.
     if (state.voice) ws.send(JSON.stringify({ type: 'voice_join', channelId: state.voice.channelId, ...voiceFlags() }));
     // Dropping off ended your "is live" post; still sharing, it picks back up.
@@ -826,6 +828,12 @@ function handleEvent(ev) {
       break;
     case 'listen_state':
       onListenState(ev);
+      break;
+    case 'game_state':
+      onGameState(ev);
+      break;
+    case 'game_msg':
+      onGameMessage(ev);
       break;
     case 'ring':
       onRing(ev);

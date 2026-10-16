@@ -304,6 +304,7 @@ function leaveVoice(quiet) {
   state.firesideOpen = false;
   renderFireside();
   stopListen();
+  stopGame();
   pttHeld = false;
   stopAppAudio(voice);
   stopThumbs(voice);

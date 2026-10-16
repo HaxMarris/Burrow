@@ -17,6 +17,7 @@ import { looksLikeEmail, sendMail, type MailConfig } from './mail.ts';
 import { hosting, type HostingOptions } from './hosting.ts';
 import { extras, voiceTimeTracker } from './extras.ts';
 import { listenTogether } from './listen.ts';
+import { fireGames } from './games.ts';
 import { codeEmail, type CodeEmail } from './mail-template.ts';
 import { mailAddress, privacyPage, termsPage, type LegalOptions } from './legal.ts';
 import { checkTotp, hashRecovery, newRecoveryCodes, newTotpSecret, verifyAssertion, verifyRegistration, ZipWriter } from './account.ts';
@@ -475,6 +476,7 @@ export function createApp(opts: AppOptions): Server {
       const old = channelById(prev);
       if (old) broadcastToChannel(old, voiceStateEvent(old.id));
       listen.left(prev);
+      games.left(prev, userId);
     }
     if (channelId === null) lastActive.delete(userId);
     else {
@@ -484,6 +486,7 @@ export function createApp(opts: AppOptions): Server {
       lastActive.set(userId, Date.now());
       sendTo([userId], { type: 'fireside_history', channelId, messages: firesideHistory(channel) });
       listen.joined(channelId);
+      games.joined(channelId, userId);
       broadcastToChannel(channel, voiceStateEvent(channelId));
     }
   };
@@ -1520,6 +1523,10 @@ export function createApp(opts: AppOptions): Server {
     active: (userId, t) => lastActive.set(userId, t),
     fail: (status, message) => new HttpError(status, message),
   });
+
+  // ---- games at the fire
+
+  const games = fireGames({ inVoice, usersInVoice, sendTo, fail: (status, message) => new HttpError(status, message) });
 
   // ---- calls in direct messages: a conversation's own voice room, and ringing the others
 
@@ -4705,9 +4712,11 @@ export function createApp(opts: AppOptions): Server {
 
     const url = new URL(req.url ?? '/', 'http://localhost');
     if (!url.pathname.startsWith('/api/')) {
-      // The web app may only run its own scripts, and can't be framed by other sites.
-      res.setHeader('content-security-policy', APP_CSP);
-      res.setHeader('x-frame-options', 'DENY');
+      // The web app may only run its own scripts, and can't be framed by other sites. Games at the
+      // fire are framed by Peiskos itself, and only by it.
+      const game = url.pathname.startsWith('/games/');
+      res.setHeader('content-security-policy', game ? APP_CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'") : APP_CSP);
+      res.setHeader('x-frame-options', game ? 'SAMEORIGIN' : 'DENY');
       res.setHeader('permissions-policy', 'camera=(self), display-capture=(self), geolocation=(), microphone=(self)');
       // Invite links open the app, which shows the burrow before joining.
       const invite = url.pathname.match(/^\/invite\/([\w-]{1,32})\/?$/);
@@ -4815,6 +4824,8 @@ export function createApp(opts: AppOptions): Server {
     ws.on('error', () => ws.terminate());
     // Apps send a few messages a second at most (speaking, typing); far more than that is ignored.
     const frames = allowance(200, 50);
+    // A game's host sends the board many times a second, so games get their own allowance.
+    const gameFrames = allowance(120, 45);
 
     let alive = true;
     ws.on('pong', () => (alive = true));
@@ -4825,10 +4836,11 @@ export function createApp(opts: AppOptions): Server {
     }, 30_000);
 
     ws.on('message', (raw) => {
-      if (!frames.take(0)) return;
+      const text = String(raw);
+      if (!(text.startsWith('{"type":"game"') ? gameFrames : frames).take(0)) return;
       let msg: Json;
       try {
-        msg = JSON.parse(String(raw));
+        msg = JSON.parse(text);
       } catch {
         return;
       }
@@ -4912,6 +4924,8 @@ export function createApp(opts: AppOptions): Server {
           playSound(user, Number(msg.soundId));
         } else if (msg.type === 'listen') {
           listen.handle(user, msg);
+        } else if (msg.type === 'game') {
+          games.handle(user, ws, msg);
         } else if (msg.type === 'typing') {
           const channel = channelById(Number(msg.channelId));
           if (channel && canSee(channel, user.id))
@@ -4932,6 +4946,7 @@ export function createApp(opts: AppOptions): Server {
       set!.delete(ws);
       const wasIdle = userIdle(user.id);
       idleSockets.get(user.id)?.delete(ws);
+      games.closed(user.id, ws);
       if (set!.size === 0) {
         sockets.delete(user.id);
         online.delete(user.id);

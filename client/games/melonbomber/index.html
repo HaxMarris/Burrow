@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<!-- The desktop app opens this from its own files, with no security headers; in a browser the server's apply too. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Melon Bomber</title>
+<link rel="stylesheet" href="game.css">
+</head>
+<body>
+
+<div id="app">
+  <div class="rind-stripes"></div>
+  <div class="seed-field" id="seedField"></div>
+
+  <!-- ============ WAITING FOR PEISKOS ============ -->
+  <div class="panel fade-in" id="menuScreen">
+    <div class="melon-emoji-row">🍉💣🍉</div>
+    <h1 class="logo">MELON<span>BOMBER</span></h1>
+    <div class="tagline">splat or be splatted</div>
+    <div class="status-line" id="menuStatus">Getting the game ready…</div>
+  </div>
+
+  <!-- ============ LOBBY ============ -->
+  <div class="panel fade-in hidden" id="lobbyScreen">
+    <h1 class="logo" style="font-size:1.8rem;">LOBBY</h1>
+    <div class="tagline" id="lobbyHint">Up to 4 players from the fire</div>
+
+    <div class="player-list" id="lobbyPlayerList"></div>
+
+    <div class="setting-row">
+      <span class="setting-label">Your hat</span>
+      <select id="hatSelect" class="setting-select"></select>
+    </div>
+
+    <div class="setting-row" id="stormRow">
+      <span class="setting-label">Melon storm starts</span>
+      <select id="stormSelect" class="setting-select">
+        <option value="30">0:30</option>
+        <option value="60">1:00</option>
+        <option value="90">1:30</option>
+        <option value="120" selected>2:00</option>
+        <option value="150">2:30</option>
+        <option value="180">3:00</option>
+        <option value="210">3:30</option>
+        <option value="240">4:00</option>
+        <option value="270">4:30</option>
+        <option value="300">5:00</option>
+        <option value="0">Off</option>
+      </select>
+    </div>
+
+    <button class="btn lime hidden" id="btnStartMatch">Start Match</button>
+    <div class="status-line" id="lobbyStatus">Waiting for host to start…</div>
+    <button class="small-link" id="btnLeaveLobby">Leave game</button>
+  </div>
+
+  <!-- ============ GAME ============ -->
+  <div id="gameWrap" class="hidden">
+    <div id="hud">
+      <div id="hudPlayers"></div>
+      <div id="hudRight">
+        <div id="hudMapName"></div>
+        <div id="hudStorm"></div>
+        <div id="hudTimer">⏱ 0:00</div>
+        <button id="btnQuit" title="Leave this game">Quit</button>
+      </div>
+    </div>
+    <div id="canvasHolder">
+      <canvas id="gameCanvas" width="650" height="550"></canvas>
+      <div id="overlay" class="hidden"></div>
+      <div id="touchControls">
+        <div class="dpad">
+          <div></div><button data-dir="up">▲</button><div></div>
+          <button data-dir="left">◀</button><div></div><button data-dir="right">▶</button>
+          <div></div><button data-dir="down">▼</button><div></div>
+        </div>
+        <div class="action-btns">
+          <button id="kickBtn">🦵</button>
+          <button id="bombBtn">🍉</button>
+        </div>
+      </div>
+    </div>
+    <div id="mobileHint">D-pad to move · 🍉 drop melon · 🦵 kick (needs kick power-up)</div>
+    <div id="keysHint">Arrows or WASD to move · Space drops a melon · Left Shift kicks (needs the kick power-up)</div>
+  </div>
+
+</div>
+
+<script src="../../vendor/three.min.js"></script>
+<script src="game.js"></script>
+</body>
+</html>

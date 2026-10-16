@@ -109,3 +109,14 @@ test('the privacy policy and terms are served with who runs the server', async (
   assert.equal(bare.status, 200);
   assert.match(bare.body.toString(), /the person who runs this server/);
 });
+
+test('games at the fire can be framed by Peiskos itself, and the app by nobody', async () => {
+  const appPage = await get('/');
+  assert.equal(appPage.headers['x-frame-options'], 'DENY');
+  assert.match(appPage.headers['content-security-policy'], /frame-ancestors 'none'/);
+  assert.match(appPage.headers['content-security-policy'], /frame-src 'self'/);
+  const game = await get('/games/melonbomber/');
+  assert.equal(game.headers['x-frame-options'], 'SAMEORIGIN');
+  assert.match(game.headers['content-security-policy'], /frame-ancestors 'self'/);
+  assert.doesNotMatch(game.headers['content-security-policy'], /frame-ancestors 'none'/);
+});
