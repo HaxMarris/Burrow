@@ -837,11 +837,12 @@ function formatContent(text) {
 function isJumbo(text) {
   if (!text || text.length > 200) return false;
   const rest = text
-    .replace(/<:\w{2,32}:\d+>/g, 'E')
-    .replace(/\p{Extended_Pictographic}(?:\u{FE0F}|\u{20E3}|[\u{1F3FB}-\u{1F3FF}]|\u{200D}\p{Extended_Pictographic})*/gu, 'E')
-    .replace(/[\u{1F1E6}-\u{1F1FF}]{2}/gu, 'E')
+    .replace(/<:\w{2,32}:\d+>/g, '\0')
+    .replace(/\p{Extended_Pictographic}(?:\u{FE0F}|\u{20E3}|[\u{1F3FB}-\u{1F3FF}]|\u{200D}\p{Extended_Pictographic})*/gu, '\0')
+    .replace(/[\u{1F1E6}-\u{1F1FF}]{2}/gu, '\0')
     .replace(/\s+/g, '');
-  return /^E{1,10}$/.test(rest);
+  // Each emoji became a \0 (a character nobody types), so a message that's just the letter E isn't one.
+  return /^\0{1,10}$/.test(rest);
 }
 
 // Spoilers stay hidden until clicked (links inside them don't open on that first click).

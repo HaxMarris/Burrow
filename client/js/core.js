@@ -612,6 +612,9 @@ function handleEvent(ev) {
       const m = ev.message;
       const dm = state.dmOrder.find((id) => state.servers.get(id).channels.some((c) => c.id === m.channelId));
       if (dm) {
+        const s = state.servers.get(dm);
+        if (!m.parentId && !(s.last?.id > m.id))
+          s.last = { id: m.id, authorId: m.authorId, text: (m.content ?? '').slice(0, 120), at: m.createdAt, files: m.attachments?.length ? 1 : 0 };
         state.dmOrder = [dm, ...state.dmOrder.filter((id) => id !== dm)];
         if (state.inDms) renderChannels();
       }
@@ -652,11 +655,19 @@ function handleEvent(ev) {
       if (i >= 0) state.messages[i] = ev.message;
       if (state.threadParent?.id === ev.message.id) { state.threadParent = ev.message; renderMessages(); }
       refreshLine(ev.message.id);
+      for (const id of state.dmOrder) {
+        const s = state.servers.get(id);
+        if (s.last?.id === ev.message.id) { s.last.text = ev.message.content.slice(0, 120); if (state.inDms) renderChannels(); }
+      }
       for (const x of state.messages)
         if (x.replyTo?.id === ev.message.id) { x.replyTo.content = ev.message.content.slice(0, 160); refreshLine(x.id); }
       break;
     }
     case 'message_deleted':
+      for (const id of state.dmOrder) {
+        const s = state.servers.get(id);
+        if (s.last?.id === ev.id) { s.last = null; if (state.inDms) renderChannels(); }
+      }
       if (state.threadParent?.id === ev.id) state.threadParent = { deleted: true };
       state.messages = state.messages.filter((x) => x.id !== ev.id);
       for (const x of state.messages) if (x.replyTo?.id === ev.id) x.replyTo = { deleted: true };
@@ -707,7 +718,7 @@ function handleEvent(ev) {
       for (const s of state.servers.values())
         for (const mem of s.members) if (mem.id === ev.userId) Object.assign(mem, { online: ev.online, status: ev.status, custom: ev.custom, activity: ev.activity });
       for (const list of Object.values(state.friends ?? {})) for (const f of list) if (f.id === ev.userId) Object.assign(f, { online: ev.online, status: ev.status, custom: ev.custom, activity: ev.activity });
-      if (state.inDms && state.friends?.friends.some((f) => f.id === ev.userId)) renderChannels();
+      if (state.inDms) renderChannels(); // the online dots in the list of conversations
       if ($('#friends-panel')) renderFriendsPanel();
       if (ev.userId === state.me.id) Object.assign(state.me, { customStatus: ev.custom });
       renderMembers();

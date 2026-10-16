@@ -9,6 +9,7 @@
 // Picking one sends it straight away (as a reply, if you're replying), and leaves what you typed alone.
 const gifPicker = $('#gif-picker');
 const gifGrid = $('#gif-grid');
+const gifCols = $('#gif-cols');
 const gifSearch = $('#gif-search');
 const gif = { query: null, page: 0, hasMore: false, loading: false, seq: 0, timer: 0 };
 
@@ -33,7 +34,7 @@ async function loadGifs(query, more = false) {
   if (more && (gif.loading || !gif.hasMore)) return;
   const seq = ++gif.seq;
   gif.loading = true;
-  if (!more) { gif.query = query; gif.page = 0; gifGrid.replaceChildren(); gifGrid.scrollTop = 0; }
+  if (!more) { gif.query = query; gif.page = 0; gifCols.replaceChildren(); gifGrid.scrollTop = 0; }
   $('#gif-status').textContent = 'Loading…';
   try {
     const page = gif.page + 1;
@@ -41,8 +42,8 @@ async function loadGifs(query, more = false) {
     if (seq !== gif.seq) return; // a newer search took over
     gif.page = page;
     gif.hasMore = res.hasMore && res.items.length > 0;
-    gifGrid.append(...res.items.map(gifTile));
-    $('#gif-status').textContent = gifGrid.children.length ? '' : query ? `No GIFs for "${query}"` : 'No GIFs right now';
+    gifCols.append(...res.items.map(gifTile));
+    $('#gif-status').textContent = gifCols.children.length ? '' : query ? `No GIFs for "${query}"` : 'No GIFs right now';
   } catch (err) {
     if (seq === gif.seq) $('#gif-status').textContent = err.message;
   } finally {

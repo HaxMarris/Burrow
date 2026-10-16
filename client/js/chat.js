@@ -90,7 +90,7 @@ function addMessageNodes(parent, m, prev, body) {
     body = document.createElement('div');
     const time = new Date(m.createdAt);
     const color = roleColor(state.servers.get(state.serverId), m.authorId);
-    body.innerHTML = `<div class="head"><span class="author"${color ? ` style="color:${escapeHtml(color)}"` : ''}>${escapeHtml(authorName(m))}</span>${m.authorBot ? '<span class="bot-tag">BOT</span>' : ''}
+    body.innerHTML = `<div class="head"><span class="author${color ? ` named" style="--name:${escapeHtml(color)}"` : '"'}>${escapeHtml(authorName(m))}</span>${m.authorBot ? '<span class="bot-tag">BOT</span>' : ''}
         <span class="time" title="${escapeHtml(time.toLocaleString())}">${escapeHtml(formatTime(time))}</span></div>`;
     // Their name and picture open their card.
     av.classList.add('opens-card');
@@ -389,9 +389,12 @@ input.addEventListener('input', () => {
   }
 });
 
+// Grows the message box with what's typed. While the box is hidden (another screen is showing)
+// there's nothing to measure, so it goes back to its CSS size instead of being squashed to 0px.
 function autosize() {
   input.style.height = 'auto';
-  input.style.height = input.scrollHeight + 'px';
+  if (input.value && input.scrollHeight) input.style.height = input.scrollHeight + 'px';
+  else input.style.height = '';
 }
 
 function showTyping(channelId, username) {
@@ -426,7 +429,7 @@ function modal(html, kind = '') {
   onModalClose = null;
   closing?.();
   $('#modal-card').className = 'modal-card' + (kind ? ' ' + kind : '');
-  $('#modal-card').innerHTML = html;
+  $('#modal-card').innerHTML = `<button type="button" class="icon-btn modal-x" data-close title="Close (Esc)" aria-label="Close">×</button>` + html;
   $('#modal').classList.remove('hidden');
   $('#modal-card').querySelectorAll('[data-close]').forEach((b) => (b.onclick = closeModal));
   $('#modal-card').querySelector('input')?.focus();

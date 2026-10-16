@@ -335,7 +335,34 @@ const authorName = (m) => {
   return mem ? nameOfPerson(mem) : m.author;
 };
 
+// The newest message as one plain line: "You: …" for yours, nothing for someone you've blocked.
+function dmPreview(s) {
+  const l = s.last;
+  if (!l || isBlocked(l.authorId)) return '';
+  const text = l.text
+    .replace(/\|\|[\s\S]*?\|\|/g, 'spoiler')
+    .replace(/<a?:(\w+):\d+>/g, ':$1:')
+    .replace(/```[\s\S]*?(```|$)/g, 'code')
+    .replace(/[*_~`#>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim() || (l.files ? 'Sent an attachment' : '');
+  if (!text) return '';
+  if (l.authorId === state.me.id) return 'You: ' + text;
+  return s.group ? `${nameOf(l.authorId, '')}: ${text}`.replace(/^: /, '') : text;
+}
+
+// "2:54 AM" today, "Yesterday", the weekday this week, otherwise the date.
+function shortTime(d) {
+  const days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(d).setHours(0, 0, 0, 0)) / 864e5);
+  if (days <= 0) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return d.toLocaleDateString([], { weekday: 'short' });
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
 function addDm(s) {
+  const old = state.servers.get(s.id);
+  if (old && !('last' in s)) s.last = old.last; // updates to a conversation don't carry its newest message
   rememberAvatars(s);
   state.servers.set(s.id, s);
   if (!state.dmOrder.includes(s.id)) state.dmOrder.unshift(s.id);
@@ -368,22 +395,36 @@ function renderDmList() {
     const s = state.servers.get(id);
     const li = document.createElement('li');
     li.className = 'dm' + (id === state.serverId ? ' active' : serverUnread(s) ? ' unread' : '');
-    let av;
-    if (s.group) av = groupAvatar();
+    // A round picture with who's online, the name over the newest message, and its time and unread count.
+    const wrap = document.createElement('span');
+    wrap.className = 'dm-avatar';
+    if (s.group) wrap.append(groupAvatar());
     else {
       const p = partner(s);
-      av = document.createElement('span');
-      av.className = 'avatar xs';
+      const av = document.createElement('span');
+      av.className = 'avatar';
       setAvatar(av, p.username, avatarOf(p.id, p.avatar));
+      const dot = document.createElement('span');
+      dot.className = 'status-dot ' + statusOf(p);
+      wrap.append(av, dot);
     }
+    const text = document.createElement('span');
+    text.className = 'dm-text';
     const name = document.createElement('span');
     name.className = 'dm-name';
     name.textContent = dmTitle(s);
-    li.append(av, name);
+    const preview = document.createElement('span');
+    preview.className = 'dm-preview';
+    preview.textContent = dmPreview(s);
+    text.append(name, preview);
+    const side = document.createElement('span');
+    side.className = 'dm-side';
+    if (s.last) side.innerHTML = `<span class="dm-time">${escapeHtml(shortTime(new Date(s.last.at)))}</span>`;
+    li.append(wrap, text, side);
     if (notifyState(s, null).muted) li.classList.add('muted-room');
     li.oncontextmenu = (e) => { e.preventDefault(); openNotifyMenu(li, s); };
     const n = id === state.serverId || notifyState(s, null).muted ? 0 : s.channels.reduce((sum, c) => sum + (c.unread ?? 0), 0);
-    if (n) li.insertAdjacentHTML('beforeend', `<span class="ping-count">${n > 99 ? '99+' : n}</span>`);
+    if (n) side.insertAdjacentHTML('beforeend', `<span class="ping-count">${n > 99 ? '99+' : n}</span>`);
     li.onclick = () => { store.set('lastDm', id); selectServer(id); showView('chat'); };
     const close = iconButton('', `Close conversation with ${dmTitle(s)}`, (e) => { e.stopPropagation(); closeDm(s); });
     close.classList.add('room-gear', 'dm-close');
@@ -946,7 +987,7 @@ function renderReplyQuote(r) {
     return q;
   }
   const snippet = r.content ? r.content.replace(/\s+/g, ' ') : (r.hasAttachments ? 'Sent a file' : '');
-  q.innerHTML = `<span class="reply-author" style="color:${colorFor(r.author)}">@${escapeHtml(r.author)}</span><span class="reply-text">${escapeHtml(snippet)}</span>`;
+  q.innerHTML = `<span class="reply-author">@${escapeHtml(r.author)}</span><span class="reply-text">${escapeHtml(snippet)}</span>`;
   q.title = 'Jump to message';
   q.onclick = () => {
     const target = messagesEl.querySelector(`.line[data-id="${r.id}"]`);

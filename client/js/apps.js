@@ -19,7 +19,7 @@ function displaySettings() {
   const size = Number(d.textSize) || 100;
   return `<h3>Display</h3>
     <label class="check"><input type="checkbox" id="display-compact" ${d.compact ? 'checked' : ''} /> Compact messages</label>
-    <span class="small muted">Plain lines with small pictures instead of cards, so more fits on screen.</span>
+    <span class="small muted">Tighter lines with small pictures, so more fits on screen.</span>
     <label>Text size
       <select id="display-size">${TEXT_SIZES.map((n) => `<option value="${n}" ${n === size ? 'selected' : ''}>${n}%${n === 100 ? ' (normal)' : ''}</option>`).join('')}</select>
     </label>
@@ -158,10 +158,10 @@ function switchAccount(to) {
   saveSnapshot();
   const list = readAccounts();
   const mine = list.find((a) => a.url === state.serverUrl && a.token === state.token);
-  if (mine) mine.local = { lastServer: store.get('lastServer'), lastChannel: store.get('lastChannel'), lastDm: store.get('lastDm') };
+  if (mine) mine.local = { lastServer: store.get('lastServer'), lastChannel: store.get('lastChannel'), lastDm: store.get('lastDm'), lastHearth: store.get('lastHearth') };
   saveAccounts(list);
   leaveVoice();
-  for (const k of ['lastServer', 'lastChannel', 'lastDm']) store.set(k, to?.local?.[k] ?? null);
+  for (const k of ['lastServer', 'lastChannel', 'lastDm', 'lastHearth']) store.set(k, to?.local?.[k] ?? null);
   store.set('token', to?.token ?? null);
   store.set('serverUrl', to?.url ?? null);
   location.reload();
