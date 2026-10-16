@@ -131,7 +131,8 @@ function addFiles(fileList) {
     p.done = (shrinkable ? shrinkPhoto(file) : Promise.resolve(file)).then(async (f) => {
       p.file = f;
       p.meta = f.dims ?? (p.previewUrl ? await imageSize(p.previewUrl) : null);
-      if (!state.pending.includes(p)) throw new Error('Upload cancelled');
+      // Removed with its ×, or left behind in another room. (Sending takes it off the tray too, but that's not cancelling.)
+      if (p.cancelled) throw new Error('Upload cancelled');
       if (f.size > limit) {
         p.error = `Too big (at most ${formatSize(limit)})`;
         renderPending();
@@ -191,7 +192,7 @@ function queueVideo(p, channelId, limit, { shrink = false } = {}) {
   p.run = run;
   p.error = null;
   p.progress = 0;
-  const current = () => p.run === run && state.pending.includes(p);
+  const current = () => p.run === run && !p.cancelled;
   p.done = (async () => {
     if (shrink) {
       p.shrinking = 0;
@@ -411,6 +412,7 @@ function renderPending() {
     x.title = 'Remove';
     x.textContent = '×';
     x.onclick = () => {
+      p.cancelled = true;
       p.xhr?.abort();
       p.cancelShrink?.();
       if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);

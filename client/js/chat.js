@@ -35,6 +35,7 @@ function renderMessages({ stick = false } = {}) {
   }
   messagesEl.replaceChildren(frag);
   tailBody = body;
+  reopenEdit();
   if (stick || (nearBottom && state.reachedEnd)) messagesEl.scrollTop = messagesEl.scrollHeight;
   else messagesEl.scrollTop = scrollTop;
   renderSeen();
@@ -121,6 +122,19 @@ function appendMessage(m, { stick = false } = {}) {
 }
 
 // Redraws one message after an edit or a reaction.
+/** Puts the edit box back after its message was drawn again. */
+function reopenEdit() {
+  if (!editing) return;
+  const m = state.messages.find((x) => x.id === editing.id);
+  const line = m && messagesEl.querySelector(`.line[data-id="${m.id}"]`);
+  if (!line) return void (editing = null); // another room, or the message is gone
+  if (line.contains(editing.ta)) return;
+  const { ta } = editing;
+  const focused = document.activeElement === ta || !document.activeElement || document.activeElement === document.body;
+  startEdit(m, line.querySelector('.content'), ta.value, focused);
+  if (focused) editing.ta.setSelectionRange(ta.selectionStart, ta.selectionEnd);
+}
+
 function refreshLine(id) {
   const m = state.messages.find((x) => x.id === id);
   const old = messagesEl.querySelector(`.line[data-id="${id}"]`);
@@ -129,6 +143,7 @@ function refreshLine(id) {
   const line = renderLine(m);
   if (old.classList.contains('touched')) line.classList.add('touched');
   old.replaceWith(line);
+  if (editing?.id === id) reopenEdit();
   if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -179,18 +194,26 @@ function renderLine(m) {
   return el;
 }
 
-function startEdit(m, contentEl) {
+// The message being edited, kept outside the page so redrawing the list (someone reacted, a room
+// changed) puts the edit box back with what you'd typed instead of throwing it away.
+let editing = null; // { id, ta }
+
+function startEdit(m, contentEl, value = emojiToNames(m.content), focus = true) {
   const ta = document.createElement('textarea');
   ta.className = 'edit';
-  ta.value = emojiToNames(m.content);
+  ta.value = value;
+  editing = { id: m.id, ta };
   ta.rows = Math.min(10, m.content.split('\n').length);
   const hint = document.createElement('div');
   hint.className = 'small muted';
   hint.textContent = 'Enter to save · Esc to cancel';
   contentEl.replaceWith(ta);
   ta.after(hint);
-  ta.focus();
-  const done = () => renderMessages();
+  if (focus) ta.focus();
+  const done = () => {
+    editing = null;
+    renderMessages();
+  };
   ta.onkeydown = async (e) => {
     if (e.key === 'Escape') return done();
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -261,19 +284,26 @@ async function sendComposer() {
   state.pending = [];
   renderPending();
   setReply(null);
+  // Put everything back so nothing is lost (if you're still in that room and haven't started typing again).
+  const putBack = (err, unsentFiles = files) => {
+    if (state.channelId === channelId) {
+      if (!input.value) { input.value = emojiToNames(content); autosize(); }
+      state.pending = unsentFiles.concat(state.pending);
+      renderPending();
+      if (replyTo && !state.replyTo) setReply(replyTo);
+    }
+    alertError(err);
+  };
   try {
     const uploaded = await Promise.all(files.map((p) => p.done));
     const attachmentIds = uploaded.map((a) => a.id);
     const spoilerIds = uploaded.filter((a, i) => files[i].spoiler).map((a) => a.id);
-    files.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl));
-    await sendMessage(channelId, { content, attachmentIds, spoilerIds, replyTo: replyTo?.id });
+    // Turned down by the server after it went out: the files are already uploaded, so they come back as they are.
+    await sendMessage(channelId, { content, attachmentIds, spoilerIds, replyTo: replyTo?.id }, (err) => putBack(err));
+    // Their previews are let go once the message is surely sent (or was put back and is still in use).
+    setTimeout(() => files.forEach((p) => p.previewUrl && !state.pending.includes(p) && URL.revokeObjectURL(p.previewUrl)), 30000);
   } catch (err) {
-    // Put everything back so nothing is lost.
-    if (!input.value) input.value = emojiToNames(content);
-    state.pending = files.concat(state.pending);
-    renderPending();
-    if (replyTo && !state.replyTo) setReply(replyTo);
-    alertError(err);
+    putBack(err);
   }
   lastTypingSent = 0;
   input.focus();
