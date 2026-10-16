@@ -23,6 +23,10 @@ services:
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
       # Burrow talks to LiveKit directly to take removed people out of voice rooms.
       LIVEKIT_API_URL: ${LIVEKIT_API_URL:-http://host.docker.internal:7880}
+      # Where apps reach LiveKit, if not through Peiskos's own address.
+      LIVEKIT_URL: ${LIVEKIT_URL:-}
+      # Largest file someone can share, in MB.
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
       # GIF picker (see README).
       KLIPY_API_KEY: ${KLIPY_API_KEY:-}
       GIF_RATING: ${GIF_RATING:-}
@@ -30,6 +34,9 @@ services:
       MAIL_FROM: ${MAIL_FROM:-}
       PUBLIC_URL: ${PUBLIC_URL:-}
       PUSH_CONTACT: ${PUSH_CONTACT:-}
+      # Who runs this server and how to reach them, on /privacy and /terms (see README).
+      LEGAL_NAME: ${LEGAL_NAME:-}
+      LEGAL_CONTACT: ${LEGAL_CONTACT:-}
       # Who can open the admin page (usernames, comma-separated); the first account if empty.
       ADMIN_USERS: ${ADMIN_USERS:-}
       # Uptime: an address pinged every five minutes (see README).
@@ -37,6 +44,8 @@ services:
       # Fire decorations and marshmallows: all unlocked unless this is "hours" (see README).
       FIRE_UNLOCKS: ${FIRE_UNLOCKS:-}
       # Off-site copies of backups and uploads, to any S3-style storage (see README).
+      # How many daily backups to keep; 0 turns them off.
+      BACKUP_KEEP: ${BACKUP_KEEP:-7}
       BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
       BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
       BACKUP_S3_REGION: ${BACKUP_S3_REGION:-}
