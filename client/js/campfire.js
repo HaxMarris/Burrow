@@ -775,7 +775,7 @@ function renderFireside({ added } = {}) {
       who.textContent = nameOf(m.userId, m.author);
       const srv = fireServer();
       const color = srv && roleColor(srv, m.userId);
-      if (color) who.style.color = color;
+      if (color) { who.classList.add('named'); who.style.setProperty('--name', color); }
       el.append(who);
     } else el.classList.add('more');
     const text = document.createElement('div');

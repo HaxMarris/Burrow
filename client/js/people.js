@@ -946,7 +946,7 @@ function renderReplyQuote(r) {
     return q;
   }
   const snippet = r.content ? r.content.replace(/\s+/g, ' ') : (r.hasAttachments ? 'Sent a file' : '');
-  q.innerHTML = `<span class="reply-author" style="color:${colorFor(r.author)}">@${escapeHtml(r.author)}</span><span class="reply-text">${escapeHtml(snippet)}</span>`;
+  q.innerHTML = `<span class="reply-author">@${escapeHtml(r.author)}</span><span class="reply-text">${escapeHtml(snippet)}</span>`;
   q.title = 'Jump to message';
   q.onclick = () => {
     const target = messagesEl.querySelector(`.line[data-id="${r.id}"]`);

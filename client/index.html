@@ -168,7 +168,7 @@
         </div>
         <div class="section-title">
           <span id="rooms-title">Rooms</span>
-          <button class="icon-btn small-btn hidden" id="add-channel" title="New room">+</button>
+          <button class="icon-btn small-btn hidden" id="add-channel" title="New room" aria-label="New room">+</button>
         </div>
         <ul id="channel-list"></ul>
         <div id="voice-section" class="hidden">
@@ -257,13 +257,13 @@
         <div id="pending-files" class="pending-files hidden"></div>
         <div id="reply-bar" class="reply-bar hidden">
           <span>Replying to <b id="reply-name"></b></span>
-          <button type="button" class="icon-btn" id="reply-cancel" title="Cancel reply (Esc)">×</button>
+          <button type="button" class="icon-btn" id="reply-cancel" title="Cancel reply (Esc)" aria-label="Cancel reply">×</button>
         </div>
         <div id="mention-box" class="mention-box hidden" role="listbox"></div>
         <div id="command-box" class="mention-box hidden" role="listbox" aria-label="Commands"></div>
         <div id="gif-picker" class="gif-picker hidden" role="dialog" aria-label="Send a GIF">
-          <input type="search" id="gif-search" placeholder="Search KLIPY" autocomplete="off" enterkeyhint="search" />
-          <div id="gif-grid" class="gif-grid"></div>
+          <input type="search" id="gif-search" placeholder="Search KLIPY" aria-label="Search GIFs" autocomplete="off" enterkeyhint="search" />
+          <div id="gif-grid" class="gif-grid"><div id="gif-cols" class="gif-cols"></div></div>
           <div class="gif-foot"><span id="gif-status" class="muted small"></span><span class="gif-credit">Powered by <b>KLIPY</b></span></div>
         </div>
         <form id="composer" class="composer">
@@ -272,7 +272,7 @@
           </button>
           <input type="file" id="file-input" multiple hidden />
           <button type="button" class="icon-btn gif-btn hidden" id="gif-btn" title="Send a GIF" aria-haspopup="dialog" aria-expanded="false">GIF</button>
-          <textarea id="composer-input" rows="1" placeholder="Say something" maxlength="4000"></textarea>
+          <textarea id="composer-input" rows="1" placeholder="Say something" aria-label="Message" maxlength="4000"></textarea>
           <div id="recorder" class="recorder hidden" aria-live="polite">
             <span class="rec-dot"></span><span id="rec-time">0:00</span><span class="rec-label">Recording a voice message</span>
             <button type="button" class="btn secondary" id="rec-cancel">Cancel</button>

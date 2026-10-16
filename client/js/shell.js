@@ -23,8 +23,8 @@ function initials(name) {
 }
 
 // Forest palette for avatars and burrow tiles: spruce, moss, lingonberry, cloudberry,
-// fjord, bark, lichen, heather.
-const FOREST = ['#2f5440', '#5f8a5a', '#a8423c', '#c98a2b', '#3f6878', '#7a5a40', '#6b7a3a', '#7b5a7e'];
+// fjord, bark, lichen, heather. Each is dark enough for a white initial to read (4.5:1).
+const FOREST = ['#2f5440', '#4f7a4b', '#a8423c', '#9a6510', '#3f6878', '#7a5a40', '#6b7a3a', '#7b5a7e'];
 function colorFor(name) {
   let h = 0;
   for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
@@ -119,7 +119,9 @@ function showView(view) {
 }
 $('#chat-back').onclick = () => showView('rooms');
 $('#tab-burrows').onclick = () => {
-  if (state.inDms) selectServer(Number(store.get('lastServer')) || state.serverOrder[0] || null);
+  // lastServer may be a conversation (it's whatever was open last), so go back to the last hearth.
+  const last = Number(store.get('lastHearth'));
+  if (state.inDms) selectServer(state.serverOrder.includes(last) ? last : state.serverOrder[0] ?? null);
   showView('rooms');
 };
 $('#tab-messages').onclick = () => { if (!state.inDms) openDms(); showView('rooms'); };
@@ -204,7 +206,7 @@ function profileHeader(p, s) {
   const h = document.createElement('h2');
   h.textContent = p.deleted ? 'Deleted user' : nameOfPerson(p);
   const color = s && roleColor(s, p.id);
-  if (color) h.style.color = color;
+  if (color) { h.classList.add('named'); h.style.setProperty('--name', color); }
   names.append(h);
   if (!p.deleted) {
     const sub = document.createElement('span');

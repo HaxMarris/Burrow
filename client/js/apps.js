@@ -158,10 +158,10 @@ function switchAccount(to) {
   saveSnapshot();
   const list = readAccounts();
   const mine = list.find((a) => a.url === state.serverUrl && a.token === state.token);
-  if (mine) mine.local = { lastServer: store.get('lastServer'), lastChannel: store.get('lastChannel'), lastDm: store.get('lastDm') };
+  if (mine) mine.local = { lastServer: store.get('lastServer'), lastChannel: store.get('lastChannel'), lastDm: store.get('lastDm'), lastHearth: store.get('lastHearth') };
   saveAccounts(list);
   leaveVoice();
-  for (const k of ['lastServer', 'lastChannel', 'lastDm']) store.set(k, to?.local?.[k] ?? null);
+  for (const k of ['lastServer', 'lastChannel', 'lastDm', 'lastHearth']) store.set(k, to?.local?.[k] ?? null);
   store.set('token', to?.token ?? null);
   store.set('serverUrl', to?.url ?? null);
   location.reload();

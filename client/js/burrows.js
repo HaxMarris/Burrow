@@ -289,6 +289,7 @@ async function selectServer(id, initial = false, open = null) {
   if (s) state.inDms = isDm(s);
   state.serverId = id;
   store.set('lastServer', id);
+  if (s && !isDm(s)) store.set('lastHearth', id);
   renderServers();
   renderMembers();
   if (!s) { state.channelId = null; renderChannels(); state.messages = []; renderMessages(); return; }
@@ -526,7 +527,7 @@ function renderMembers() {
         name.className = 'member-name';
         name.textContent = nameOfPerson(m);
         const color = roleColor(s, m.id);
-        if (color) name.style.color = color;
+        if (color) { name.classList.add('named'); name.style.setProperty('--name', color); }
         if (m.bot) name.insertAdjacentHTML('beforeend', ' <span class="bot-tag">BOT</span>');
         if (isBirthdayToday(m.birthday)) name.insertAdjacentHTML('beforeend', ' <span class="cake" title="Birthday today">🎂</span>');
         text.append(name);
