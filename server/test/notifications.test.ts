@@ -53,9 +53,14 @@ const fakeSmtp = createNetServer((sock) => {
     }
   });
 });
+// The headers, and each part's text (a plain email has one part; one with HTML has two).
 const mailText = (raw: string) => {
-  const [head, body] = raw.split('\n\n');
-  return { subject: /Subject: (.*)/.exec(head)![1], text: Buffer.from(body.replace(/\s/g, ''), 'base64').toString() };
+  const head = raw.split('\n\n')[0];
+  const part = (type: string) => {
+    const m = new RegExp(`Content-Type: ${type};[^\\n]*\\n(?:[^\\n]+\\n)*\\n([A-Za-z0-9+/=\\n]+)`).exec(raw);
+    return m ? Buffer.from(m[1].replace(/\s/g, ''), 'base64').toString() : '';
+  };
+  return { head, subject: /Subject: (.*)/.exec(head)![1], text: part('text/plain'), html: part('text/html') };
 };
 
 let app: Server;
@@ -366,6 +371,10 @@ test('email: confirm an address with a code, then reset a forgotten password wit
   const mail = mailText(mails[0]);
   const reset = /code: (\d{6})/.exec(mail.subject)![1];
   assert.match(mail.text, /https:\/\/burrow\.example\.com/);
+  assert.ok(mail.text.includes(reset), 'the plain copy has the code too');
+  assert.match(mail.head, /multipart\/alternative/);
+  assert.ok(mail.html.includes(`>${reset}</div>`), 'the HTML shows the code');
+  assert.match(mail.html, /href="https:\/\/burrow\.example\.com"/);
   const wrong = reset === '000000' ? '111111' : '000000';
   assert.equal((await call('/api/password/reset', { body: { username: bob.user.username, code: wrong, newPassword: 'new-password' } })).status, 400);
   assert.equal((await call('/api/password/reset', { body: { username: bob.user.username, code: reset, newPassword: 'short' } })).status, 400);
