@@ -17,6 +17,7 @@ import { looksLikeEmail, sendMail, type MailConfig } from './mail.ts';
 import { hosting, type HostingOptions } from './hosting.ts';
 import { extras, voiceTimeTracker } from './extras.ts';
 import { listenTogether } from './listen.ts';
+import { codeEmail, type CodeEmail } from './mail-template.ts';
 import { mailAddress, privacyPage, termsPage, type LegalOptions } from './legal.ts';
 import { checkTotp, hashRecovery, newRecoveryCodes, newTotpSecret, verifyAssertion, verifyRegistration, ZipWriter } from './account.ts';
 
@@ -2587,9 +2588,12 @@ export function createApp(opts: AppOptions): Server {
 
   // ---- email: confirming your address, so you can reset a forgotten password ----
 
-  const mailTo = async (to: string, subject: string, text: string) => {
+  const mailTo = async (to: string, subject: string, content: Omit<CodeEmail, 'publicUrl' | 'contact'>) => {
     if (!opts.mail) throw new HttpError(400, "Email isn't set up on this server");
-    await sendMail(opts.mail, { to, subject, text });
+    // Replies go to whoever runs the server, not to the address codes are sent from.
+    const contact = opts.legal?.contact;
+    const { text, html } = codeEmail({ ...content, publicUrl: opts.publicUrl, contact });
+    await sendMail(opts.mail, { to, subject, text, html, replyTo: contact });
   };
 
   route('POST', '/api/me/email', async ({ user, body }) => {
@@ -2601,7 +2605,13 @@ export function createApp(opts: AppOptions): Server {
     const code = String(randomBytes(4).readUInt32BE() % 1_000_000).padStart(6, '0');
     db.prepare('UPDATE users SET email = ?, email_verified = 0, email_code = ?, email_code_expires = ? WHERE id = ?').run(email, code, now() + 30 * 60 * 1000, user.id);
     try {
-      await mailTo(email, `Your Peiskos code: ${code}`, `Hi ${user.username},\n\nYour code to confirm this email address on Peiskos is ${code}. It works for 30 minutes.\n\nIf you didn't ask for this, you can ignore this email.`);
+      await mailTo(email, `Your Peiskos code: ${code}`, {
+        username: user.username,
+        intro: 'Here is your code to confirm this email address on Peiskos.',
+        code,
+        minutes: 30,
+        note: "If you didn't ask for this, you can ignore this email.",
+      });
     } catch (err) {
       console.error('Sending email failed:', err);
       throw new HttpError(502, "Peiskos couldn't send the email. Check the address, or ask whoever runs this server.");
@@ -2645,9 +2655,14 @@ export function createApp(opts: AppOptions): Server {
       if (!u?.email || !u.email_verified) return answer;
       const code = String(randomBytes(4).readUInt32BE() % 1_000_000).padStart(6, '0');
       db.prepare('UPDATE users SET reset_code = ?, reset_expires = ?, reset_tries = 0 WHERE id = ?').run(hashCode(code), now() + RESET_MINUTES * 60 * 1000, u.id);
-      const link = opts.publicUrl ? `\n\nOpen Peiskos: ${opts.publicUrl}` : '';
       // Not waited for, so how long the answer takes doesn't give away who has an email on file either.
-      void mailTo(u.email, `Your Peiskos password code: ${code}`, `Hi ${u.username},\n\nSomeone (hopefully you) asked to reset your Peiskos password. Your code is ${code}. It works for ${RESET_MINUTES} minutes.${link}\n\nIf it wasn't you, ignore this email: your password stays the same.`).catch((err) =>
+      void mailTo(u.email, `Your Peiskos password code: ${code}`, {
+        username: u.username,
+        intro: 'Someone (hopefully you) asked to reset your Peiskos password. Here is your code.',
+        code,
+        minutes: RESET_MINUTES,
+        note: "If it wasn't you, ignore this email: your password stays the same.",
+      }).catch((err) =>
         console.error('Sending a password reset email failed:', err),
       );
       return answer;

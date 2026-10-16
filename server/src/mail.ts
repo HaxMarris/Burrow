@@ -10,7 +10,8 @@ import { connect as tlsConnect, type TLSSocket } from 'node:tls';
 import { randomBytes } from 'node:crypto';
 
 export type MailConfig = { url: string; from: string; rejectUnauthorized?: boolean };
-export type Mail = { to: string; subject: string; text: string };
+/** html is optional; when it's there, text goes along as the copy for mail apps that don't show HTML. */
+export type Mail = { to: string; subject: string; text: string; html?: string; replyTo?: string };
 
 /** A rough check that an address could receive mail; the real check is the code sent there. */
 export const looksLikeEmail = (s: string) => s.length <= 254 && /^[^\s@<>()",;:]+@[^\s@<>()",;:]+\.[^\s@<>()",;:]+$/.test(s);
@@ -93,19 +94,35 @@ export async function sendMail(config: MailConfig, mail: Mail) {
     await say(`RCPT TO:<${mail.to}>`, [250, 251]);
     await say('DATA', [354]);
     const domain = from.split('@')[1] ?? 'burrow';
-    const body = Buffer.from(mail.text.replace(/\r?\n/g, '\r\n')).toString('base64').replace(/.{76}/g, '$&\r\n');
+    const b64 = (s: string) => Buffer.from(s.replace(/\r?\n/g, '\r\n')).toString('base64').replace(/.{76}/g, '$&\r\n');
+    const boundary = `=_${randomBytes(12).toString('hex')}`;
+    const content = mail.html
+      ? [
+          `Content-Type: multipart/alternative; boundary="${boundary}"`,
+          '',
+          `--${boundary}`,
+          'Content-Type: text/plain; charset=utf-8',
+          'Content-Transfer-Encoding: base64',
+          '',
+          b64(mail.text),
+          `--${boundary}`,
+          'Content-Type: text/html; charset=utf-8',
+          'Content-Transfer-Encoding: base64',
+          '',
+          b64(mail.html),
+          `--${boundary}--`,
+        ]
+      : ['Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '', b64(mail.text)];
     const message = [
       `From: ${config.from}`,
       `To: <${mail.to}>`,
+      ...(mail.replyTo ? [`Reply-To: <${mail.replyTo}>`] : []),
       `Subject: ${encodeWord(mail.subject)}`,
       `Date: ${new Date().toUTCString()}`,
       `Message-ID: <${randomBytes(12).toString('hex')}@${domain}>`,
       'MIME-Version: 1.0',
-      'Content-Type: text/plain; charset=utf-8',
-      'Content-Transfer-Encoding: base64',
       'Auto-Submitted: auto-generated',
-      '',
-      body,
+      ...content,
     ].join('\r\n');
     sock.write(message + '\r\n.\r\n');
     await expect([250]);
