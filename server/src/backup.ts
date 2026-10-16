@@ -10,7 +10,14 @@ export async function backupNow(db: DatabaseSync, dir: string, keep: number, tod
   mkdirSync(dir, { recursive: true });
   const file = join(dir, `burrow-${today.toISOString().slice(0, 10)}.db`);
   if (force) rmSync(file, { force: true });
-  if (!existsSync(file)) await backup(db, file);
+  if (!existsSync(file)) {
+    // Copied under another name first: a copy cut off halfway (a restart, a crash) is never taken
+    // for that day's backup, and the next run starts it again.
+    const part = `${file}.part`;
+    for (const f of [part, `${part}-journal`]) rmSync(f, { force: true });
+    await backup(db, part);
+    renameSync(part, file);
+  }
   const copies = readdirSync(dir).filter((f) => NAME.test(f)).sort();
   for (const old of copies.slice(0, Math.max(0, copies.length - keep))) rmSync(join(dir, old));
   return file;
@@ -90,9 +97,10 @@ export function scheduleBackups(db: DatabaseSync, dir: string, keep: number, off
     try {
       const file = await backupNow(db, dir, keep);
       // Off-site once a day, after that day's backup.
+      // Only marked done once it worked, so a failed copy is tried again on the next hourly run.
       if (offsite && lastOffsite !== file) {
-        lastOffsite = file;
         await copyOffsite(offsite.cfg, dir, offsite.uploadDir, file);
+        lastOffsite = file;
       }
     } catch (err) {
       console.error('Backup failed:', err instanceof Error ? err.message : err);

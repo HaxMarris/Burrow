@@ -45,9 +45,12 @@ async function joinVoice(channelId, { muted = false, deafened = false, rejoin = 
     if (!LK.isE2EESupported()) throw new Error("this app can't encrypt voice. Update Peiskos or use a current browser.");
     // Muted for everyone by a moderator: your mic stays off until they let you speak.
     voice.serverMuted = !canSpeak;
-    if (voice.serverMuted) voice.muted = true;
+    // What you'd chosen yourself comes back when they let you speak again.
+    if (voice.serverMuted) { voice.mutedBeforeServer = muted; voice.muted = true; }
     if (voice.muted) state.mutedInVoice.add(state.me.id);
     const vc = await createVoiceCrypto(LK);
+    // Left (or moved on) while it was starting: its worker would otherwise run on.
+    if (state.voice !== voice) return vc.worker.terminate();
     voice.crypto = vc;
     const room = new LK.Room({
       // End-to-end encryption: the voice server only ever handles scrambled audio.
@@ -143,6 +146,7 @@ async function joinVoice(channelId, { muted = false, deafened = false, rejoin = 
       })
       .on(LK.RoomEvent.EncryptionError, (err) => console.warn('Voice encryption:', err?.message ?? err));
     await room.connect(url || state.serverUrl.replace(/^http/, 'ws'), token);
+    if (state.voice !== voice) return room.disconnect();
     await room.setE2EEEnabled(true);
     startKeyExchange(voice);
     await room.startAudio();
@@ -157,7 +161,9 @@ async function joinVoice(channelId, { muted = false, deafened = false, rejoin = 
     if (rejoin) cancelRejoin();
     else playSound('join');
   } catch (err) {
-    if (state.voice === voice) leaveVoice(true);
+    // Left while connecting: LiveKit calls that cancelling an error, but there's nothing to tell.
+    if (state.voice !== voice) { voice.room?.disconnect().catch(() => {}); return; }
+    leaveVoice(true);
     // Still offline: keep trying quietly rather than showing an error each time.
     if (rejoin && state.rejoin) return scheduleRejoin(state.rejoin);
     const denied = err?.name === 'NotAllowedError' || /permission/i.test(err?.message ?? '');

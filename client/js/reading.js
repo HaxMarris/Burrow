@@ -268,8 +268,20 @@ window.addEventListener('beforeunload', saveDraft);
 // ---- sending
 
 /** Sends a message over the live connection, or the slower way if it's down. */
-async function sendMessage(channelId, body) {
-  if (state.ws?.readyState === WebSocket.OPEN) return state.ws.send(JSON.stringify({ type: 'send', channelId, ...body }));
+// Messages sent over the connection that the server may still turn down (slow mode, the word
+// filter, a /roll typo), by their tag, so what was typed can be put back.
+const unconfirmed = new Map();
+
+/** Sends a message. If the server turns it down after it went out, onFail gets the error. */
+async function sendMessage(channelId, body, onFail) {
+  if (state.ws?.readyState === WebSocket.OPEN) {
+    const nonce = onFail ? Math.random().toString(36).slice(2) : undefined;
+    if (nonce) {
+      unconfirmed.set(nonce, onFail);
+      setTimeout(() => unconfirmed.delete(nonce), 30000);
+    }
+    return state.ws.send(JSON.stringify({ type: 'send', channelId, ...body, nonce }));
+  }
   try {
     await api(`/api/channels/${channelId}/messages`, { method: 'POST', body });
   } catch (err) {

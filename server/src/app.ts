@@ -671,7 +671,11 @@ export function createApp(opts: AppOptions): Server {
     // Before the message goes out, so the conversation is back in their list when it arrives.
     if (serverKind(channel.serverId) === 'dm') reopenDm(channel.serverId);
     const r = db
-      .prepare('INSERT INTO messages (channel_id, author_id, content, created_at, reply_to, sticker_id, forwarded, live) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      // Numbered above any message ever deleted, so an id is never used twice (see addIdFloor in db.ts).
+      .prepare(
+        `INSERT INTO messages (id, channel_id, author_id, content, created_at, reply_to, sticker_id, forwarded, live)
+         VALUES (MAX(COALESCE((SELECT MAX(id) FROM messages), 0), COALESCE((SELECT value FROM id_floor WHERE name = 'messages'), 0)) + 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
       .run(channelId, user.id, content, now(), replyId, stickerId, extras.forwarded ? JSON.stringify(extras.forwarded) : null, extras.live ? JSON.stringify(extras.live) : null);
     const messageId = Number(r.lastInsertRowid);
     const forWhom = recordMentions(channel, messageId, user.id, content, replyId);
@@ -902,8 +906,9 @@ export function createApp(opts: AppOptions): Server {
   route('POST', '/api/dms', ({ user, body }) => {
     notBot(user);
     // A conversation you already have stays open to you, even if you no longer share a burrow.
-    const ids = (Array.isArray(body.userIds) ? body.userIds : [body.userId]).map(Number);
-    if (ids.length === 1 && ids[0] !== user.id) {
+    // Without you or repeats, so [them], [them, them] and [you, them] all find the same conversation.
+    const ids = [...new Set((Array.isArray(body.userIds) ? body.userIds : [body.userId]).map(Number))].filter((id) => id !== user.id);
+    if (ids.length === 1) {
       const existing = db.prepare('SELECT id FROM servers WHERE dm_key = ?').get([user.id, ids[0]].sort((a, b) => a - b).join(':')) as { id: number } | undefined;
       if (existing) {
         db.prepare('UPDATE members SET hidden_at = NULL WHERE server_id = ? AND user_id = ?').run(existing.id, user.id);
@@ -1303,6 +1308,8 @@ export function createApp(opts: AppOptions): Server {
       db.prepare('SELECT id FROM attachments WHERE channel_id = ? OR channel_id IN (SELECT id FROM channels WHERE parent_id = ?)').all(channel.id, channel.id) as Json[],
     );
     db.prepare('DELETE FROM channels WHERE id = ?').run(channel.id);
+    // Not tied to the room by the database, so a later room can't pick up its mute.
+    db.prepare('DELETE FROM notify_prefs WHERE channel_id = ?').run(channel.id);
     if (channel.kind === 'thread') threadDeleted(channel, threadMessage);
     sendServerUpdate(channel.serverId);
     return { ok: true };
@@ -1633,6 +1640,7 @@ export function createApp(opts: AppOptions): Server {
     removeFiles(db.prepare('SELECT id FROM attachments WHERE message_id = ?').all(id) as Json[]);
     db.prepare('DELETE FROM messages WHERE id = ?').run(id);
     broadcastToChannel(channel, { type: 'message_deleted', id, channelId: channel.id });
+    if (channel.kind === 'thread') threadChanged(channel); // its reply count
     return { ok: true };
   });
 
@@ -1830,6 +1838,7 @@ export function createApp(opts: AppOptions): Server {
       removeFiles(db.prepare('SELECT id FROM attachments WHERE message_id = ?').all(message.id as number) as Json[]);
       db.prepare('DELETE FROM messages WHERE id = ?').run(message.id as number);
       broadcastToChannel(channel, { type: 'message_deleted', id: message.id, channelId: channel.id });
+      if (channel.kind === 'thread') threadChanged(channel);
     }
     db.prepare('UPDATE reports SET resolved_at = ?, resolved_by = ? WHERE resolved_at IS NULL AND (id = ? OR (message_id IS NOT NULL AND message_id = ?))').run(
       now(), user.id, Number(params[0]), report.message_id ?? -1,
@@ -2335,7 +2344,12 @@ export function createApp(opts: AppOptions): Server {
     clearTimeout(statusTimers.get(userId));
     statusTimers.delete(userId);
     if (!until) return;
-    const t = setTimeout(() => { statusTimers.delete(userId); sendPresence(userId); }, Math.min(Math.max(0, until - now()) + 50, 2 ** 31 - 1));
+    // Timers top out at about 24 days, so a longer status sets the timer again when it fires early.
+    const t = setTimeout(() => {
+      statusTimers.delete(userId);
+      if (until > now()) expireStatusAt(userId, until);
+      else sendPresence(userId);
+    }, Math.min(Math.max(0, until - now()) + 50, 2 ** 31 - 1));
     t.unref();
     statusTimers.set(userId, t);
   };
@@ -2958,6 +2972,11 @@ export function createApp(opts: AppOptions): Server {
     const spoilerIds: string[] = [];
     if ((m.attachments as Json[]).length) {
       if (!opts.uploadDir) throw new HttpError(503, 'Uploads are not set up on this server');
+      // The files land in the other room, so its upload limit applies, as if they were uploaded there.
+      const limit = uploadLimitFor(to.serverId, user.id);
+      if (!limit) throw new HttpError(403, "Your roles can't share files in that hearth");
+      if ((m.attachments as Json[]).some((a) => (a.size as number) > limit))
+        throw new HttpError(413, `You can share files up to ${Math.round(limit / 1048576)} MB there`);
       for (const a of m.attachments as Json[]) {
         const copy = randomBytes(16).toString('base64url');
         await copyFile(filePath(a.id as string), filePath(copy)).catch(() => {
@@ -2985,7 +3004,14 @@ export function createApp(opts: AppOptions): Server {
       createdAt: m.createdAt,
       from: place.kind === 'dm' ? 'a direct message' : place.threadName ? `${place.serverName} › #${place.channelName} › ${place.threadName}` : `${place.serverName} › #${place.channelName}`,
     };
-    return postMessage(user, to.id, { content: content.slice(0, MAX_MESSAGE_LENGTH), attachmentIds, spoilerIds, stickerId: keepSticker ? sticker!.id : null }, { forwarded });
+    try {
+      return postMessage(user, to.id, { content: content.slice(0, MAX_MESSAGE_LENGTH), attachmentIds, spoilerIds, stickerId: keepSticker ? sticker!.id : null }, { forwarded });
+    } catch (err) {
+      // Not sent (slow mode, a read-only room…): the copies go now rather than waiting a day for the sweep.
+      removeFiles(attachmentIds.map((id) => ({ id })));
+      for (const id of attachmentIds) db.prepare('DELETE FROM attachments WHERE id = ? AND message_id IS NULL').run(id);
+      throw err;
+    }
   });
 
   // ---- bots and webhooks ----
@@ -3472,6 +3498,9 @@ export function createApp(opts: AppOptions): Server {
     if (channel.kind !== 'text') throw new HttpError(400, "Threads can't start inside a thread");
     let thread = db.prepare("SELECT id FROM channels WHERE parent_message_id = ? AND kind = 'thread'").get(id) as { id: number } | undefined;
     if (!thread) {
+      // Starting a thread is writing in the room, so the same limits apply (timeouts, read-only, archived).
+      const problem = postProblem(channel, user.id);
+      if (problem) throw new HttpError(403, problem);
       const m = db.prepare('SELECT content FROM messages WHERE id = ?').get(id) as { content: string };
       const firstLine = m.content.split('\n').find((l) => l.trim()) ?? '';
       // The first line, without its formatting marks (headings, quotes, bold and so on) or custom emoji codes.
@@ -3638,48 +3667,51 @@ export function createApp(opts: AppOptions): Server {
     }
     allowed(serverId, user, 'burrow');
     const changes = Object.keys(body).filter((k) => ['name', 'description', 'welcomeChannelId', 'afkChannelId', 'afkMinutes', 'rules', 'uploadMb', 'wordFilter', 'liveChannelId'].includes(k));
-    if (changes.length) audit(serverId, user.id, 'burrow_edit', null, changes.map((k) => BURROW_FIELDS[k]).join(', '));
-    if (body.uploadMb !== undefined) db.prepare('UPDATE servers SET upload_mb = ? WHERE id = ?').run(cleanUploadMb(body.uploadMb), serverId);
-    if (body.wordFilter !== undefined) db.prepare('UPDATE servers SET word_filter = ? WHERE id = ?').run(cleanWordFilter(body.wordFilter), serverId);
-    if (body.liveChannelId !== undefined) {
-      const channel = body.liveChannelId === null ? null : channelById(Number(body.liveChannelId));
-      if (channel && (channel.serverId !== serverId || channel.kind !== 'text'))
-        throw new HttpError(400, 'Pick a text room in this hearth for go-live posts');
-      db.prepare('UPDATE servers SET live_channel_id = ? WHERE id = ?').run(channel?.id ?? null, serverId);
-    }
-    if (body.name !== undefined) db.prepare('UPDATE servers SET name = ? WHERE id = ?').run(cleanName(body.name, 'Hearth name'), serverId);
-    if (body.description !== undefined) {
-      const text = typeof body.description === 'string' ? body.description.trim() : '';
-      if (text.length > MAX_DESCRIPTION) throw new HttpError(400, `The description can be at most ${MAX_DESCRIPTION} characters`);
-      db.prepare('UPDATE servers SET description = ? WHERE id = ?').run(text, serverId);
-    }
-    if (body.welcomeChannelId !== undefined) {
-      const channel = body.welcomeChannelId === null ? null : channelById(Number(body.welcomeChannelId));
-      if (channel && (channel.serverId !== serverId || channel.kind !== 'text' || channel.private))
-        throw new HttpError(400, 'The welcome room must be a text room everyone can see');
-      db.prepare('UPDATE servers SET welcome_channel_id = ? WHERE id = ?').run(channel?.id ?? null, serverId);
-    }
-    if (body.afkChannelId !== undefined) {
-      const channel = body.afkChannelId === null ? null : channelById(Number(body.afkChannelId));
-      if (channel && (channel.serverId !== serverId || channel.kind !== 'voice')) throw new HttpError(400, 'The AFK fire must be one of this hearth\'s voice rooms');
-      db.prepare('UPDATE servers SET afk_channel_id = ? WHERE id = ?').run(channel?.id ?? null, serverId);
-    }
-    if (body.afkMinutes !== undefined) {
-      const minutes = Math.floor(Number(body.afkMinutes));
-      if (!(minutes >= 1 && minutes <= 240)) throw new HttpError(400, 'Pick between 1 minute and 4 hours');
-      db.prepare('UPDATE servers SET afk_minutes = ? WHERE id = ?').run(minutes, serverId);
-    }
-    if (body.rules !== undefined) {
-      const rules = typeof body.rules === 'string' ? body.rules.trim() : '';
-      if (rules.length > MAX_RULES) throw new HttpError(400, `The rules can be at most ${MAX_RULES} characters`);
-      const old = (db.prepare('SELECT rules FROM servers WHERE id = ?').get(serverId) as { rules: string }).rules;
-      db.prepare('UPDATE servers SET rules = ? WHERE id = ?').run(rules, serverId);
-      // Changed rules need accepting again, by everyone but whoever changed them.
-      if (rules !== old) {
-        db.prepare('UPDATE members SET rules_accepted_at = NULL WHERE server_id = ?').run(serverId);
-        db.prepare('UPDATE members SET rules_accepted_at = ? WHERE server_id = ? AND user_id = ?').run(now(), serverId, user.id);
+    // All of it or none: one field that doesn't check out leaves the others as they were.
+    inTransaction(db, () => {
+      if (changes.length) audit(serverId, user.id, 'burrow_edit', null, changes.map((k) => BURROW_FIELDS[k]).join(', '));
+      if (body.uploadMb !== undefined) db.prepare('UPDATE servers SET upload_mb = ? WHERE id = ?').run(cleanUploadMb(body.uploadMb), serverId);
+      if (body.wordFilter !== undefined) db.prepare('UPDATE servers SET word_filter = ? WHERE id = ?').run(cleanWordFilter(body.wordFilter), serverId);
+      if (body.liveChannelId !== undefined) {
+        const channel = body.liveChannelId === null ? null : channelById(Number(body.liveChannelId));
+        if (channel && (channel.serverId !== serverId || channel.kind !== 'text'))
+          throw new HttpError(400, 'Pick a text room in this hearth for go-live posts');
+        db.prepare('UPDATE servers SET live_channel_id = ? WHERE id = ?').run(channel?.id ?? null, serverId);
       }
-    }
+      if (body.name !== undefined) db.prepare('UPDATE servers SET name = ? WHERE id = ?').run(cleanName(body.name, 'Hearth name'), serverId);
+      if (body.description !== undefined) {
+        const text = typeof body.description === 'string' ? body.description.trim() : '';
+        if (text.length > MAX_DESCRIPTION) throw new HttpError(400, `The description can be at most ${MAX_DESCRIPTION} characters`);
+        db.prepare('UPDATE servers SET description = ? WHERE id = ?').run(text, serverId);
+      }
+      if (body.welcomeChannelId !== undefined) {
+        const channel = body.welcomeChannelId === null ? null : channelById(Number(body.welcomeChannelId));
+        if (channel && (channel.serverId !== serverId || channel.kind !== 'text' || channel.private))
+          throw new HttpError(400, 'The welcome room must be a text room everyone can see');
+        db.prepare('UPDATE servers SET welcome_channel_id = ? WHERE id = ?').run(channel?.id ?? null, serverId);
+      }
+      if (body.afkChannelId !== undefined) {
+        const channel = body.afkChannelId === null ? null : channelById(Number(body.afkChannelId));
+        if (channel && (channel.serverId !== serverId || channel.kind !== 'voice')) throw new HttpError(400, 'The AFK fire must be one of this hearth\'s voice rooms');
+        db.prepare('UPDATE servers SET afk_channel_id = ? WHERE id = ?').run(channel?.id ?? null, serverId);
+      }
+      if (body.afkMinutes !== undefined) {
+        const minutes = Math.floor(Number(body.afkMinutes));
+        if (!(minutes >= 1 && minutes <= 240)) throw new HttpError(400, 'Pick between 1 minute and 4 hours');
+        db.prepare('UPDATE servers SET afk_minutes = ? WHERE id = ?').run(minutes, serverId);
+      }
+      if (body.rules !== undefined) {
+        const rules = typeof body.rules === 'string' ? body.rules.trim() : '';
+        if (rules.length > MAX_RULES) throw new HttpError(400, `The rules can be at most ${MAX_RULES} characters`);
+        const old = (db.prepare('SELECT rules FROM servers WHERE id = ?').get(serverId) as { rules: string }).rules;
+        db.prepare('UPDATE servers SET rules = ? WHERE id = ?').run(rules, serverId);
+        // Changed rules need accepting again, by everyone but whoever changed them.
+        if (rules !== old) {
+          db.prepare('UPDATE members SET rules_accepted_at = NULL WHERE server_id = ?').run(serverId);
+          db.prepare('UPDATE members SET rules_accepted_at = ? WHERE server_id = ? AND user_id = ?').run(now(), serverId, user.id);
+        }
+      }
+    });
     sendServerUpdate(serverId);
     return serverSummary(serverId, user.id);
   });
@@ -3749,7 +3781,8 @@ export function createApp(opts: AppOptions): Server {
     if (expiresIn !== null && !(expiresIn >= 60 && expiresIn <= 30 * 86400)) throw new HttpError(400, 'Invites can last from a minute to 30 days');
     const maxUses = body.maxUses == null ? null : Math.floor(Number(body.maxUses));
     if (maxUses !== null && !(maxUses >= 1 && maxUses <= 1000)) throw new HttpError(400, 'Invites can be used from 1 to 1000 times');
-    const live = (db.prepare('SELECT COUNT(*) AS n FROM invites WHERE server_id = ? AND (expires_at IS NULL OR expires_at > ?)').get(serverId, now()) as { n: number }).n;
+    // Used-up invites aren't listed (so can't be cancelled), so they don't count either.
+    const live = (db.prepare('SELECT COUNT(*) AS n FROM invites WHERE server_id = ? AND (expires_at IS NULL OR expires_at > ?) AND (max_uses IS NULL OR uses < max_uses)').get(serverId, now()) as { n: number }).n;
     if (live >= 100) throw new HttpError(400, 'This hearth has too many invites. Cancel some first.');
     const code = newInviteCode();
     db.prepare('INSERT INTO invites (code, server_id, created_by, created_at, expires_at, max_uses) VALUES (?, ?, ?, ?, ?, ?)').run(
@@ -4390,6 +4423,8 @@ export function createApp(opts: AppOptions): Server {
   const newChallenge = (key: string, rpId: string, userId?: number) => {
     const t = now();
     for (const [k, v] of passkeyChallenges) if (v.until < t) passkeyChallenges.delete(k);
+    // Oldest first, so a flood of login attempts can't grow this without end.
+    while (passkeyChallenges.size >= 10000) passkeyChallenges.delete(passkeyChallenges.keys().next().value!);
     const challenge = randomBytes(32).toString('base64url');
     passkeyChallenges.set(key, { challenge, until: t + 5 * 60 * 1000, userId, rpId });
     return challenge;
@@ -4444,7 +4479,9 @@ export function createApp(opts: AppOptions): Server {
     'POST',
     '/api/login/passkey/options',
     ({ ip, host }) => {
+      // Every ask counts (it needs no login): 30 a minute from one address.
       checkTries([`passkey-ip:${ip}`], 30);
+      failedTry([`passkey-ip:${ip}`], 60_000);
       const id = newToken();
       const rpId = rpIdFor(host);
       return { id, challenge: newChallenge(`login:${id}`, rpId), rpId, userVerification: 'preferred', timeout: 120_000 };
@@ -4607,7 +4644,11 @@ export function createApp(opts: AppOptions): Server {
       'cache-control': 'no-store',
     });
     const write = async (chunks: Buffer[]) => {
-      for (const c of chunks) if (!res.write(c)) await new Promise((r) => res.once('drain', r));
+      for (const c of chunks) {
+        // A cancelled download never drains, so closing ends the wait (and the export) too.
+        if (res.destroyed) throw new Error('Download cancelled');
+        if (!res.write(c)) await new Promise((r) => { res.once('drain', r); res.once('close', r); });
+      }
     };
     try {
       const json = (v: unknown) => Buffer.from(JSON.stringify(v, null, 2));
@@ -4880,7 +4921,9 @@ export function createApp(opts: AppOptions): Server {
             );
         }
       } catch (err) {
-        ws.send(JSON.stringify({ type: 'error', error: err instanceof Error ? err.message : 'Error' }));
+        // The app's own tag for what it sent, so it can put an unsent message back in the box.
+        const nonce = typeof msg?.nonce === 'string' ? msg.nonce.slice(0, 64) : undefined;
+        ws.send(JSON.stringify({ type: 'error', error: err instanceof Error ? err.message : 'Error', nonce }));
       }
     });
 

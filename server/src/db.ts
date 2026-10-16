@@ -200,6 +200,7 @@ export function openDb(file: string): Db {
   addMediaSizes(db);
   addHosting(db);
   addExtras(db);
+  addIdFloor(db);
   hashSessionTokens(db);
   return db;
 }
@@ -697,6 +698,24 @@ function addExtras(db: Db) {
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS motd_by_server ON motd(server_id, id);
+  `);
+}
+
+/**
+ * SQLite hands the newest message's id to the next one once it's deleted, so "delete my typo,
+ * send the fixed one" gave the new message an id people had already read past. The highest id
+ * ever deleted is kept here, and new messages are numbered above it (see postMessage).
+ */
+function addIdFloor(db: Db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS id_floor (
+      name  TEXT PRIMARY KEY,
+      value INTEGER NOT NULL
+    );
+    CREATE TRIGGER IF NOT EXISTS messages_id_floor AFTER DELETE ON messages BEGIN
+      INSERT INTO id_floor (name, value) VALUES ('messages', old.id)
+        ON CONFLICT(name) DO UPDATE SET value = MAX(value, excluded.value);
+    END;
   `);
 }
 

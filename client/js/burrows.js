@@ -430,7 +430,7 @@ async function selectChannel(id, { around = null, present = false } = {}) {
     saveDraft();
     // Files upload into a specific room, so switching rooms drops any not yet sent.
     if (state.pending.length) {
-      state.pending.forEach((p) => { p.xhr?.abort(); p.cancelShrink?.(); if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
+      state.pending.forEach((p) => { p.cancelled = true; p.xhr?.abort(); p.cancelShrink?.(); if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
       state.pending = [];
       renderPending();
     }

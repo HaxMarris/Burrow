@@ -449,13 +449,23 @@ $('#link-form').addEventListener('submit', async (e) => {
 
 async function logout(callServer = true) {
   leaveVoice();
+  // This device stops getting alerts for the account. The server drops it once the push service says it's gone.
+  pushSubscription().then((sub) => sub?.unsubscribe()).catch(() => {});
   if (callServer) api('/api/logout', { method: 'POST' }).catch(() => {});
   forgetAccount();
   forgetOffline();
   state.token = null;
   state.me = null;
   store.set('token', null);
+  // A reconnect that was waiting would open a second connection after the next login.
+  clearTimeout(wsTimer);
+  wsTimer = null;
   if (state.ws) { state.ws.onclose = null; state.ws.close(); state.ws = null; }
+  // Whoever logs in next starts fresh, not in this account's room.
+  state.channelId = null;
+  state.messages = [];
+  setReply(null);
+  $('#messages').replaceChildren();
   showAuth();
 }
 $('#logout').addEventListener('click', () => logout());
@@ -510,25 +520,40 @@ async function loadServers() {
 }
 
 /**
- * Back online in the same room: fetch just the messages sent while you were away and add them
- * below the ones already on screen, instead of reloading the room and losing your place.
+ * Back online in the same room: fetch the messages sent while you were away and add them below
+ * the ones already on screen, instead of reloading the room and losing your place. The newest
+ * ones already on screen come again too, so edits, deletions and reactions you missed show up.
  */
 async function catchUpRoom() {
   const id = state.channelId;
   if (!id || !state.reachedEnd || !state.messages.length) return;
+  const LIMIT = 100;
   const last = state.messages.at(-1).id;
-  const missed = await api(`/api/channels/${id}/messages?limit=50&after=${last}`);
+  const from = state.messages.at(-Math.min(state.messages.length, 50)).id;
+  const got = await api(`/api/channels/${id}/messages?limit=${LIMIT}&after=${from - 1}`);
   if (state.channelId !== id || state.messages.at(-1)?.id !== last) return;
-  const known = new Set(state.messages.map((m) => m.id));
-  const fresh = missed.filter((m) => !known.has(m.id));
-  if (!fresh.length) return;
+  const byId = new Map(got.map((m) => [m.id, m]));
+  // Everything from `from` up to the last one fetched is now known: missing means deleted.
+  const upTo = got.length === LIMIT ? got.at(-1).id : Infinity;
+  const before = state.messages.length;
+  let changed = false;
+  state.messages = state.messages.flatMap((m) => {
+    if (m.id < from || m.id > upTo) return [m];
+    const now = byId.get(m.id);
+    if (!now) { changed = true; return []; }
+    if (JSON.stringify(now) !== JSON.stringify(m)) changed = true;
+    return [now];
+  });
+  if (state.messages.length !== before) changed = true;
+  const fresh = got.filter((m) => m.id > last);
+  if (changed) renderMessages();
   // Added one by one below what's there, so where you were reading stays put.
   for (const m of fresh) {
     state.messages.push(m);
     appendMessage(m);
   }
   // A long time away: the rest loads as you scroll down, like after jumping back in time.
-  state.reachedEnd = missed.length < 50;
+  state.reachedEnd = got.length < LIMIT;
   renderPresentBar();
   updateUnreadBar();
   if (state.reachedEnd) markReadSoon();
@@ -540,6 +565,8 @@ function connect() {
   wsTimer = null;
   if (!state.token) return;
   const url = state.serverUrl.replace(/^http/, 'ws') + '/ws?token=' + encodeURIComponent(state.token);
+  // Never two at once: an older one still open would deliver every event twice.
+  if (state.ws) { state.ws.onclose = null; state.ws.onmessage = null; state.ws.close(); }
   const ws = new WebSocket(url);
   state.ws = ws;
   ws.onopen = () => {
@@ -548,6 +575,8 @@ function connect() {
     setConnected(true, 'Connected');
     // The server forgets who's in voice when we drop off, so tell it again.
     if (state.voice) ws.send(JSON.stringify({ type: 'voice_join', channelId: state.voice.channelId, ...voiceFlags() }));
+    // Dropping off ended your "is live" post; still sharing, it picks back up.
+    if (state.voice?.room?.localParticipant?.isScreenShareEnabled) ws.send(JSON.stringify({ type: 'voice_live', live: true }));
     // So is whether you're away from this device, and what you're playing.
     if (idleSent) ws.send(JSON.stringify({ type: 'idle', idle: true }));
     if (sharedActivity) ws.send(JSON.stringify({ type: 'activity', name: sharedActivity }));
@@ -668,10 +697,12 @@ function handleEvent(ev) {
         const s = state.servers.get(id);
         if (s.last?.id === ev.id) { s.last = null; if (state.inDms) renderChannels(); }
       }
+      if (state.replyTo?.id === ev.id) setReply(null);
+      // Deleted somewhere else: nothing on screen changes, so nothing is redrawn.
+      if (state.threadParent?.id !== ev.id && !state.messages.some((x) => x.id === ev.id || x.replyTo?.id === ev.id)) break;
       if (state.threadParent?.id === ev.id) state.threadParent = { deleted: true };
       state.messages = state.messages.filter((x) => x.id !== ev.id);
       for (const x of state.messages) if (x.replyTo?.id === ev.id) x.replyTo = { deleted: true };
-      if (state.replyTo?.id === ev.id) setReply(null);
       renderMessages();
       break;
     case 'reactions': {
@@ -765,8 +796,9 @@ function handleEvent(ev) {
     case 'voice_move': {
       if (!state.voice) break;
       const to = roomById(ev.channelId)?.c;
-      const { muted, deafened } = state.voice;
-      joinVoice(ev.channelId, { muted: muted || !!ev.afk, deafened });
+      // Deafened counts as muted, so what you'd chosen before deafening is what's carried over.
+      const { muted, deafened, mutedBeforeDeafen } = state.voice;
+      joinVoice(ev.channelId, { muted: (deafened ? mutedBeforeDeafen : muted) || !!ev.afk, deafened });
       toast(ev.afk ? `You were away for a while, so you were moved to ${to?.name ?? 'the AFK fire'}.` : `${ev.by} moved you to ${to?.name ?? 'another fire'}.`);
       break;
     }
@@ -846,10 +878,14 @@ function handleEvent(ev) {
     case 'scheduled_failed':
       toast(`A scheduled message couldn't be sent: ${ev.error}`, { timeout: 0 });
       break;
-    case 'error':
+    case 'error': {
       // Usually a message that couldn't be sent: slow mode, an archived room, and so on.
-      toast(ev.error);
+      const onFail = ev.nonce && unconfirmed.get(ev.nonce);
+      if (!onFail) { toast(ev.error); break; }
+      unconfirmed.delete(ev.nonce);
+      onFail(new Error(ev.error));
       break;
+    }
     case 'folders':
       state.folders = ev.folders;
       if ($('#switcher').dataset.open) renderSwitcher();
